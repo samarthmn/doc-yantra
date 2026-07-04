@@ -19,7 +19,16 @@ PKG_NAME="@samarthmn/doc-yantra"     # published npm package name
 # ────────────────────────────────────────────────────────────────────────────
 
 echo "Building ${PKG_NAME} ..."
-pnpm dlx wasm-pack build --release --target nodejs --scope "${OWNER}"
+# Use a wasm-pack on PATH if present (CI installs one); otherwise fetch it via
+# pnpm — so the script works both in CI (no pnpm) and locally (no global wasm-pack).
+if command -v wasm-pack >/dev/null 2>&1; then
+  wasm-pack build --release --target nodejs --scope "${OWNER}"
+elif command -v pnpm >/dev/null 2>&1; then
+  pnpm dlx wasm-pack build --release --target nodejs --scope "${OWNER}"
+else
+  echo "error: need either 'wasm-pack' or 'pnpm' on PATH" >&2
+  exit 1
+fi
 
 # wasm-pack writes pkg/.gitignore containing '*' — remove it so the built
 # package can be committed (Vercel/CI have no Rust toolchain).
