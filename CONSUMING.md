@@ -46,11 +46,14 @@ Consumers authenticate to GitHub Packages with a token that has **`read:packages
 
 ## 3. Install in an app (e.g. DocKosha)
 
-**`.npmrc`** at the app root:
+The **registry** goes in the app's committed `.npmrc`; the **credential** must
+NOT — pnpm refuses to expand env vars in a committed project `.npmrc` (a leak
+guard) and the install would 401.
+
+**`.npmrc`** at the app root (registry only, safe to commit):
 
 ```ini
 @samarthmn:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
 ```
 
 **`package.json`**:
@@ -61,17 +64,28 @@ Consumers authenticate to GitHub Packages with a token that has **`read:packages
 }
 ```
 
-**Install:**
+**Local install** — put the token in your **user-level** `~/.npmrc` (which pnpm
+trusts), then install:
 
 ```bash
-export GITHUB_PACKAGES_TOKEN=ghp_xxx   # the read:packages token
+# writes //npm.pkg.github.com/:_authToken=<token> into ~/.npmrc
+pnpm config set "//npm.pkg.github.com/:_authToken" "$GITHUB_PACKAGES_TOKEN"
 pnpm install
 ```
 
+(Or add `//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}` to
+`~/.npmrc` by hand — pnpm expands env vars in the user-level file.)
+
 **On Vercel:** add `GITHUB_PACKAGES_TOKEN` as a project environment variable
-(all environments). Vercel expands it in `.npmrc` at install time. Keep the
-package in `serverExternalPackages` (Next.js) so the `.wasm` binary is traced
-into the function bundle instead of being bundled by the compiler.
+(all environments), then set the project's **Install Command** so the token
+lands in a trusted `~/.npmrc` before install:
+
+```bash
+npm config set "//npm.pkg.github.com/:_authToken" "$GITHUB_PACKAGES_TOKEN" && pnpm install
+```
+
+Keep the package in `serverExternalPackages` (Next.js) so the `.wasm` binary is
+traced into the function bundle instead of being bundled by the compiler.
 
 ## 4. Use it
 
