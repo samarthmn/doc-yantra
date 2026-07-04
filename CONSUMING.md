@@ -91,6 +91,14 @@ traced into the function bundle instead of being bundled by the compiler.
 
 `wasm-pack --target nodejs` emits CommonJS; import it in server code only.
 
+The package has three entry points:
+
+| Import | Runtime | Contents |
+| --- | --- | --- |
+| `@samarthmn/doc-yantra` | Node (CJS) | watermark, merge, csv/md/text → PDF, validate (1.7MB) |
+| `@samarthmn/doc-yantra/office` | Node (CJS) | docx/pptx/xlsx → PDF (pure-Rust office2pdf; 44MB — lazy-load it, never on hot paths) |
+| `@samarthmn/doc-yantra/web` | Browser (ESM) | Zone 1 for client-side previews; call `await mod.default(wasmUrl)` first and serve `web/pdf_core_wasm_bg.wasm` yourself |
+
 ```ts
 import * as pdf from "@samarthmn/doc-yantra";
 
@@ -105,6 +113,10 @@ pdf.csv_to_pdf(new Uint8Array(csvBytes)); // → Uint8Array (landscape table)
 pdf.markdown_to_pdf(markdownString);
 pdf.page_count(new Uint8Array(pdfBytes)); // → number
 pdf.validate_pdf(new Uint8Array(pdfBytes)); // → JSON string
+
+// Office conversion (heavy module — import lazily, e.g. behind a flag)
+const office = require("@samarthmn/doc-yantra/office");
+const { pdf: bytes, warnings } = office.office_to_pdf(new Uint8Array(docx), "docx");
 ```
 
 In DocKosha this is wrapped by `src/server/pdfCoreWasm.ts`, which never throws

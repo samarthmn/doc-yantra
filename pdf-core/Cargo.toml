@@ -14,7 +14,7 @@ path = "src/bin/pdfcore.rs"
 required-features = ["cli", "pdfium"]
 
 [features]
-default = ["pdfium", "cli", "parallel"]
+default = ["pdfium", "cli", "parallel", "office"]
 # Zone 2 (pdfium-backed): raster, extract, redact, forms. Native-only.
 pdfium = ["dep:pdfium-render"]
 # The pdfcore CLI binary.
@@ -23,6 +23,9 @@ cli = ["dep:clap"]
 parallel = ["lopdf/rayon"]
 # wasm32 builds: routes lopdf's getrandom to the JS crypto backend.
 wasm = ["lopdf/wasm_js"]
+# Pure-Rust Office (docx/pptx/xlsx) -> PDF via office2pdf. wasm-compatible;
+# excluded from browser builds for payload size (heavy: bundles Typst).
+office = ["dep:office2pdf"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"], optional = true }
@@ -33,6 +36,7 @@ image = { version = "0.25.9", default-features = false, features = [
     "webp",
 ] }
 lopdf = { version = "0.42.0", default-features = false }
+office2pdf = { version = "0.6.0", optional = true }
 pdf-writer = "0.15.0"
 pdfium-render = { version = "0.9.2", optional = true }
 pulldown-cmark = "0.13.4"

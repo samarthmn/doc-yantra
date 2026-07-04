@@ -272,6 +272,30 @@ pub fn page_count(pdf: &[u8]) -> Result<u32, JsError> {
     pdf_core::meta::page_count(pdf).map_err(err)
 }
 
+/// Office (docx/pptx/xlsx) -> PDF via the pure-Rust office2pdf engine.
+/// Returns `{ pdf: Uint8Array, warnings: string[] }`. Unsupported extensions
+/// (doc/ppt/xls/xlsm) throw so callers route them to LibreOffice. Only
+/// compiled into the Node/server build (`office` feature).
+#[cfg(feature = "office")]
+#[wasm_bindgen]
+pub fn office_to_pdf(bytes: &[u8], extension: &str) -> Result<JsValue, JsError> {
+    let out = pdf_core::office::office_to_pdf_by_extension(bytes, extension).map_err(err)?;
+    let result = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &result,
+        &"pdf".into(),
+        &js_sys::Uint8Array::from(out.pdf.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("failed to build result object"))?;
+    let warnings = js_sys::Array::new();
+    for w in &out.warnings {
+        warnings.push(&JsValue::from_str(w));
+    }
+    js_sys::Reflect::set(&result, &"warnings".into(), &warnings.into())
+        .map_err(|_| JsError::new("failed to build result object"))?;
+    Ok(result.into())
+}
+
 /// Structural validation; returns `{"pageCount":n,"version":"1.7","encrypted":false}`.
 #[wasm_bindgen]
 pub fn validate_pdf(pdf: &[u8]) -> Result<String, JsError> {

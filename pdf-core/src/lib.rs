@@ -16,6 +16,8 @@ pub mod fonts;
 pub mod forms;
 pub mod generate;
 pub mod meta;
+#[cfg(feature = "office")]
+pub mod office;
 #[cfg(feature = "pdfium")]
 pub mod pdfium;
 #[cfg(feature = "pdfium")]

@@ -1,11 +1,13 @@
 {
   "name": "@samarthmn/doc-yantra",
-  "description": "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel)",
-  "version": "0.0.1",
+  "description": "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel + browser)",
+  "version": "0.0.2",
   "files": [
     "pdf_core_wasm_bg.wasm",
     "pdf_core_wasm.js",
-    "pdf_core_wasm.d.ts"
+    "pdf_core_wasm.d.ts",
+    "web",
+    "office"
   ],
   "main": "pdf_core_wasm.js",
   "types": "pdf_core_wasm.d.ts",
@@ -16,5 +18,24 @@
   "license": "UNLICENSED",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
+  },
+  "exports": {
+    ".": {
+      "types": "./pdf_core_wasm.d.ts",
+      "require": "./pdf_core_wasm.js",
+      "default": "./pdf_core_wasm.js"
+    },
+    "./office": {
+      "types": "./office/pdf_core_wasm.d.ts",
+      "require": "./office/pdf_core_wasm.js",
+      "default": "./office/pdf_core_wasm.js"
+    },
+    "./web": {
+      "types": "./web/pdf_core_wasm.d.ts",
+      "import": "./web/pdf_core_wasm.js",
+      "default": "./web/pdf_core_wasm.js"
+    },
+    "./web/pdf_core_wasm_bg.wasm": "./web/pdf_core_wasm_bg.wasm",
+    "./package.json": "./package.json"
   }
 }
