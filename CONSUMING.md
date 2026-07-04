@@ -57,7 +57,7 @@ Consumers authenticate to GitHub Packages with a token that has **`read:packages
 
 ```jsonc
 "dependencies": {
-  "@samarthmn/doc-yantra": "^0.1.0"
+  "@samarthmn/doc-yantra": "^0.0.1"
 }
 ```
 
@@ -107,7 +107,7 @@ This needs no scope-matching, but Vercel still needs git auth for the private
 repo (set `GITHUB_TOKEN` and rewrite the URL in the install step):
 
 ```jsonc
-"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#wasm-v0.1.0&path:/pdf-core/wasm/pkg"
+"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#wasm-v0.0.1&path:/pdf-core/wasm/pkg"
 ```
 
 `#path:` support varies by pnpm version — verify with yours, or use a dedicated
@@ -126,5 +126,5 @@ pnpm add link:../doc-yantra/pdf-core/wasm/pkg   # sibling checkout
 ```
 
 DocKosha currently ships this way (the app’s dependency points at the sibling
-checkout). Switch it to `"^0.1.0"` once the package is published for
+checkout). Switch it to `"^0.0.1"` once the package is published for
 teammates/Vercel.

@@ -28,7 +28,7 @@ is pushed/published, consume it directly from the folder:
 After publishing to GitHub Packages:
 
 ```jsonc
-"@samarthmn/doc-yantra": "^0.1.0"
+"@samarthmn/doc-yantra": "^0.0.1"
 ```
 
 ```ts

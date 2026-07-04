@@ -1,7 +1,7 @@
 name: Publish pdf-core-wasm
 
 # Publishes @samarthmn/doc-yantra to GitHub Packages when a version tag is
-# pushed, e.g.  git tag wasm-v0.1.0 && git push origin wasm-v0.1.0
+# pushed, e.g.  git tag wasm-v0.0.1 && git push origin wasm-v0.0.1
 on:
   push:
     tags:
