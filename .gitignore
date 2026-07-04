@@ -1,0 +1,12 @@
+# Rust
+target/
+**/*.rs.bk
+
+# pdfium binary is fetched per-platform (pdf-core/scripts/fetch-pdfium.sh)
+pdf-core/pdfium/
+
+# OS
+.DS_Store
+
+# The wasm-pack build output (pdf-core/wasm/pkg) IS committed intentionally,
+# so consumers and CI can install without a Rust toolchain. Do not ignore it.

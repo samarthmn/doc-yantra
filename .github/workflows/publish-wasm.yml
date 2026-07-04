@@ -1,0 +1,45 @@
+name: Publish pdf-core-wasm
+
+# Publishes @samarthmn/doc-yantra to GitHub Packages when a version tag is
+# pushed, e.g.  git tag wasm-v0.1.0 && git push origin wasm-v0.1.0
+on:
+  push:
+    tags:
+      - "wasm-v*"
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # lets the built-in GITHUB_TOKEN publish to GitHub Packages
+    defaults:
+      run:
+        working-directory: pdf-core/wasm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build wasm package
+        run: ./build.sh
+
+      - name: Setup Node + GitHub Packages registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: "@samarthmn"
+
+      - name: Publish to GitHub Packages
+        working-directory: pdf-core/wasm/pkg
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

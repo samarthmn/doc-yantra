@@ -1,0 +1,49 @@
+[package]
+name = "pdf-core"
+version = "0.1.0"
+edition = "2024"
+description = "DocKosha proprietary PDF engine: assembly, watermarking, generation, rasterization, extraction, redaction, forms"
+publish = false
+
+[lib]
+name = "pdf_core"
+
+[[bin]]
+name = "pdfcore"
+path = "src/bin/pdfcore.rs"
+required-features = ["cli", "pdfium"]
+
+[features]
+default = ["pdfium", "cli", "parallel"]
+# Zone 2 (pdfium-backed): raster, extract, redact, forms. Native-only.
+pdfium = ["dep:pdfium-render"]
+# The pdfcore CLI binary.
+cli = ["dep:clap"]
+# Parallel content parsing in lopdf (thread pools panic on wasm — native only).
+parallel = ["lopdf/rayon"]
+# wasm32 builds: routes lopdf's getrandom to the JS crypto backend.
+wasm = ["lopdf/wasm_js"]
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"], optional = true }
+csv = "1.4.0"
+image = { version = "0.25.9", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
+lopdf = { version = "0.42.0", default-features = false }
+pdf-writer = "0.15.0"
+pdfium-render = { version = "0.9.2", optional = true }
+pulldown-cmark = "0.13.4"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+serial_test = "3.5.0"
+
+# pdfium raster work is unusably slow at opt-level 0; keep tests usable
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

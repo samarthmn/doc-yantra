@@ -1,0 +1,20 @@
+{
+  "name": "@samarthmn/doc-yantra",
+  "description": "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel)",
+  "version": "0.1.0",
+  "files": [
+    "pdf_core_wasm_bg.wasm",
+    "pdf_core_wasm.js",
+    "pdf_core_wasm.d.ts"
+  ],
+  "main": "pdf_core_wasm.js",
+  "types": "pdf_core_wasm.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samarthmn/doc-yantra.git"
+  },
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}
