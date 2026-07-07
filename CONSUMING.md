@@ -17,19 +17,20 @@ PDF **in-process** — no network hop, no Rust toolchain on the consumer side.
 ## 1. Publish a version (maintainers)
 
 The built package lives at `pdf-core/wasm/pkg` and **is committed** so consumers
-and CI never need Rust. To cut a release:
+and CI never need Rust. Releases stay on the **0.0.x** line (only the patch
+increments). One script does the whole cut — it picks the next `x` from the
+`wasm-v0.0.*` tags, bumps both Cargo.tomls in sync (`version()` returns the wasm
+crate's), rebuilds `pkg/`, commits, tags `wasm-v0.0.x`, and pushes (requires Rust
++ wasm-pack locally):
 
 ```bash
-# 1. rebuild the package (requires Rust + wasm-pack locally)
-cd pdf-core/wasm && ./build.sh && cd -
-
-# 2. bump the version in pdf-core/wasm/Cargo.toml, then rebuild so pkg/ matches
-# 3. commit pkg/ and push
-git add pdf-core/wasm && git commit -m "wasm: v0.1.1"
-
-# 4. tag it — the publish-wasm workflow builds and publishes to GitHub Packages
-git tag wasm-v0.1.1 && git push origin main wasm-v0.1.1
+pdf-core/scripts/release.sh            # auto: next patch, commit, tag, push
+pdf-core/scripts/release.sh 7          # explicit: release 0.0.7
+DRY_RUN=1 pdf-core/scripts/release.sh  # preview only
 ```
+
+Published versions are immutable — the script refuses to reuse or go below an
+existing tag; always bump.
 
 The [`publish-wasm`](.github/workflows/publish-wasm.yml) GitHub Action publishes
 using the repo’s built-in `GITHUB_TOKEN` (needs `packages: write`, already set).
@@ -60,7 +61,9 @@ guard) and the install would 401.
 
 ```jsonc
 "dependencies": {
-  "@samarthmn/doc-yantra": "^0.0.1"
+  // Releases are on the 0.0.x line — pin the exact patch (a caret on 0.0.x
+  // resolves only that exact version) and bump it when a new patch ships.
+  "@samarthmn/doc-yantra": "0.0.2"
 }
 ```
 
@@ -120,9 +123,10 @@ const { pdf: bytes, warnings } = office.office_to_pdf(new Uint8Array(docx), "doc
 ```
 
 In DocKosha this is wrapped by `src/server/pdfCoreWasm.ts`, which never throws
-and falls back to the DocYantra HTTP service on any failure. Non-ASCII csv/md
-and non-WinAnsi watermark text are routed to DocYantra (the engine has
-standard-14 fonts only), so the local path is always a pure speed win.
+and falls back to the DocYantra HTTP service on any failure. Text outside the
+WinAnsi/CP1252 repertoire — in csv/md conversion or watermark lines — is routed
+to DocYantra (the engine has standard-14 fonts only), so the local path is
+always a pure speed win.
 
 ---
 
@@ -133,7 +137,7 @@ This needs no scope-matching, but Vercel still needs git auth for the private
 repo (set `GITHUB_TOKEN` and rewrite the URL in the install step):
 
 ```jsonc
-"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#wasm-v0.0.1&path:/pdf-core/wasm/pkg"
+"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#wasm-v0.0.2&path:/pdf-core/wasm/pkg"
 ```
 
 `#path:` support varies by pnpm version — verify with yours, or use a dedicated
@@ -142,15 +146,37 @@ Packages route above is the supported, recommended path.
 
 ## Local development
 
-While iterating on the engine, link the local build instead of publishing:
+DocKosha ships against the **published registry package** (`package.json` pins
+the exact `0.0.x`), not a sibling checkout. While iterating on the engine,
+temporarily link the local build, then restore the registry pin before committing:
 
 ```bash
 # from the DocKosha app
 pnpm add link:../doc-yantra/pdf-core/wasm/pkg   # sibling checkout
 # rebuild after Rust changes:
 ( cd ../doc-yantra/pdf-core/wasm && ./build.sh )
+# …then restore "@samarthmn/doc-yantra": "0.0.2" and `pnpm install` before commit,
+# so CI/Vercel resolve the published package (a link: path breaks them).
 ```
 
-DocKosha currently ships this way (the app’s dependency points at the sibling
-checkout). Switch it to `"^0.0.1"` once the package is published for
-teammates/Vercel.
+## Panic / trap contract
+
+The wasm boundary distinguishes two failure modes, and consumers must treat
+them differently:
+
+- **`Err` → thrown `JsError`** (recoverable): invalid input, unsupported
+  format, or an over-size rejection (see below). Catch it and fall back; the
+  instance stays healthy and can be reused.
+- **Panic / OOM → trap** (fatal to the instance): a Rust `panic!` or an
+  out-of-memory abort in wasm is **not** a catchable `JsError` —
+  `console_error_panic_hook` only *logs* it. A trap can leave the module's
+  linear memory in an undefined state, so **the instance must be discarded and
+  recreated**; do not keep calling into a trapped instance.
+
+The Zone-1 input path has no known reachable `panic!`, but very large inputs can
+still OOM-abort. To keep that recoverable, the exports **reject oversized inputs
+as a normal `JsError`** before touching linear memory (≈100 MiB per document,
+≈200 MiB per merge set). Consumers should apply their own, lower limits and
+route large jobs to the HTTP service (DocKosha does this in
+`src/server/pdfCoreWasm.ts`), and — because merge/watermark/csv/md run on one
+shared instance — treat a trapped instance as recreate-and-fall-back.
