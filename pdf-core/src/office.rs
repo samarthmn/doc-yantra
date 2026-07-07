@@ -63,9 +63,9 @@ fn signature_entry(format: OfficeFormat) -> &'static [u8] {
 /// parsers can spend MINUTES on bytes of the wrong flavor (e.g. an xlsx
 /// renamed to .docx) — unacceptable for a synchronous in-process engine
 /// with no kill switch. Entry names appear in local file headers (near the
-/// start) AND the central directory (at the end); scanning a generous head
-/// + tail window covers even media-heavy documents whose central directory
-/// exceeds a small tail window (~6,500+ entries).
+/// start) AND the central directory (at the end); scanning a generous
+/// head-and-tail window covers even media-heavy documents whose central
+/// directory would overflow a small tail-only window (~6,500+ entries).
 fn looks_like(bytes: &[u8], format: OfficeFormat) -> bool {
     if !bytes.starts_with(b"PK") {
         return false;
