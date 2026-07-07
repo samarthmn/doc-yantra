@@ -53,6 +53,12 @@ mv pkg-web/* pkg/web/
 mv pkg-office/* pkg/office/
 rmdir pkg-web pkg-office
 
+# The browser build is ESM (wasm-pack --target web); mark it so resolvers that
+# bypass the root "exports" conditions still parse pkg/web/*.js as modules and
+# never mis-read it as CommonJS (Y-8). The office/ subtree is CJS (--target
+# nodejs) and needs no marker — the package root is CJS by default.
+printf '{\n  "type": "module"\n}\n' > pkg/web/package.json
+
 # wasm-pack derives the name from the crate (@OWNER/pdf-core-wasm) and does not
 # emit repository / license / publishConfig / exports; set the final metadata.
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \

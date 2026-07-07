@@ -1,6 +1,15 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export interface OfficeResult {
+    /** The converted PDF bytes. */
+    pdf: Uint8Array;
+    /** Fidelity warnings from the renderer; empty when the document converted cleanly. */
+    warnings: string[];
+}
+
+
+
 /**
  * Applies a DocYantra-payload watermark to a single PDF.
  */
@@ -29,11 +38,11 @@ export function merge_pdfs(pdfs: Uint8Array[], watermark_json?: string | null, w
 
 /**
  * Office (docx/pptx/xlsx) -> PDF via the pure-Rust office2pdf engine.
- * Returns `{ pdf: Uint8Array, warnings: string[] }`. Unsupported extensions
- * (doc/ppt/xls/xlsm) throw so callers route them to LibreOffice. Only
- * compiled into the Node/server build (`office` feature).
+ * Returns `{ pdf: Uint8Array, warnings: string[] }` (typed `OfficeResult`).
+ * Unsupported extensions (doc/ppt/xls/xlsm) throw so callers route them to
+ * LibreOffice. Only compiled into the Node/server build (`office` feature).
  */
-export function office_to_pdf(bytes: Uint8Array, extension: string): any;
+export function office_to_pdf(bytes: Uint8Array, extension: string): OfficeResult;
 
 /**
  * Page count of a PDF (errors on invalid/encrypted documents).

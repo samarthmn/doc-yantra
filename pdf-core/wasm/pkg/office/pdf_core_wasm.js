@@ -95,12 +95,12 @@ exports.merge_pdfs = merge_pdfs;
 
 /**
  * Office (docx/pptx/xlsx) -> PDF via the pure-Rust office2pdf engine.
- * Returns `{ pdf: Uint8Array, warnings: string[] }`. Unsupported extensions
- * (doc/ppt/xls/xlsm) throw so callers route them to LibreOffice. Only
- * compiled into the Node/server build (`office` feature).
+ * Returns `{ pdf: Uint8Array, warnings: string[] }` (typed `OfficeResult`).
+ * Unsupported extensions (doc/ppt/xls/xlsm) throw so callers route them to
+ * LibreOffice. Only compiled into the Node/server build (`office` feature).
  * @param {Uint8Array} bytes
  * @param {string} extension
- * @returns {any}
+ * @returns {OfficeResult}
  */
 function office_to_pdf(bytes, extension) {
     const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);

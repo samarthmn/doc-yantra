@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# Cut a new patch release on the 0.0.x line.
+#
+# Versioning is fixed at 0.0.x (only the patch increments). This script:
+#   1. finds the next x from existing wasm-v0.0.* git tags,
+#   2. writes version = "0.0.x" into BOTH Cargo.tomls (kept in sync — the
+#      package's version() returns the wasm crate's),
+#   3. rebuilds the committed wasm package (pkg/) so it carries the new version,
+#   4. commits pdf-core/, then tags wasm-v0.0.x and pushes — the
+#      publish-wasm.yml Action publishes to GitHub Packages on the tag.
+#
+# Usage:
+#   ./scripts/release.sh            # auto: next patch after the highest tag
+#   ./scripts/release.sh 7          # explicit: release 0.0.7
+#   DRY_RUN=1 ./scripts/release.sh  # print what it would do, change nothing
+#
+set -euo pipefail
+cd "$(dirname "$0")/.."                       # -> pdf-core/
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+CORE_TOML="Cargo.toml"
+WASM_TOML="wasm/Cargo.toml"
+
+# ─── Determine the next patch (x) ──────────────────────────────────────────
+git fetch --tags --quiet 2>/dev/null || true
+highest="$(git tag --list 'wasm-v0.0.*' \
+  | sed -n 's/^wasm-v0\.0\.\([0-9][0-9]*\)$/\1/p' \
+  | sort -n | tail -1)"
+highest="${highest:-0}"
+
+if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+  patch="$1"
+else
+  patch=$((highest + 1))
+fi
+version="0.0.${patch}"
+tag="wasm-v${version}"
+
+if [[ "$patch" -le "$highest" ]]; then
+  echo "error: ${tag} is not newer than the highest existing tag wasm-v0.0.${highest}." >&2
+  echo "       Published versions are immutable — pick a higher patch." >&2
+  exit 1
+fi
+if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+  echo "error: tag ${tag} already exists. Versions are immutable; bump instead." >&2
+  exit 1
+fi
+
+echo "Releasing ${version}  (highest existing: 0.0.${highest})"
+
+if [[ -n "${DRY_RUN:-}" ]]; then
+  echo "[dry-run] would set version=\"${version}\" in ${CORE_TOML} and ${WASM_TOML}"
+  echo "[dry-run] would run wasm/build.sh, commit pdf-core/, tag ${tag}, push origin main ${tag}"
+  exit 0
+fi
+
+# ─── 1. Bump both Cargo.tomls (only the first [package] version line) ───────
+set_version() {
+  local file="$1"
+  awk -v v="$version" '
+    !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" v "\""); done=1 }
+    { print }
+  ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+}
+set_version "$CORE_TOML"
+set_version "$WASM_TOML"
+echo "  set version = \"${version}\" in both Cargo.tomls"
+
+# ─── 2. Rebuild the committed wasm package (pkg/ carries the crate version) ──
+echo "  rebuilding wasm package ..."
+( cd wasm && ./build.sh )
+
+# ─── 3. Commit, tag, push ──────────────────────────────────────────────────
+git -C "$REPO_ROOT" add pdf-core
+git -C "$REPO_ROOT" commit -m "wasm: v${version}"
+git -C "$REPO_ROOT" tag "$tag"
+git -C "$REPO_ROOT" push origin main "$tag"
+
+echo "Done. Pushed ${tag}; publish-wasm.yml will publish ${version} to GitHub Packages."

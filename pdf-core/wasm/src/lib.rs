@@ -8,6 +8,9 @@
 use base64::Engine;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
+// JsCast::unchecked_into is used to hand back the typed OfficeResult (office only).
+#[cfg(feature = "office")]
+use wasm_bindgen::JsCast;
 
 use pdf_core::watermark::{Pattern, WatermarkImage, WatermarkSpec};
 
@@ -16,6 +19,28 @@ const DEFAULT_ROTATION_DEG: f64 = -40.0;
 
 fn err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// Hard ceilings on inputs handed to the wasm engine (Y-6). wasm32 linear
+/// memory is capped and practical OOM happens well before that; a merge
+/// additionally holds every input plus the merged copy at once. Oversized
+/// inputs are rejected here as a NORMAL `JsError` (never an uncatchable trap)
+/// so consumers can fall back to the HTTP service instead of risking an
+/// OOM-abort that poisons the instance — see the panic/trap contract in
+/// CONSUMING.md. These limits sit ABOVE the consumer-side guards (DocKosha
+/// routes to DocYantra well below them); this is the backstop for direct
+/// consumers.
+const MAX_INPUT_BYTES: usize = 100 * 1024 * 1024; // 100 MiB per document
+const MAX_MERGE_TOTAL_BYTES: usize = 200 * 1024 * 1024; // 200 MiB per merge set
+
+fn guard_input_size(len: usize, limit: usize, what: &str) -> Result<(), JsError> {
+    if len > limit {
+        return Err(JsError::new(&format!(
+            "{what} is {len} bytes, over the {} MiB in-process limit; use the HTTP service for inputs this large",
+            limit / (1024 * 1024)
+        )));
+    }
+    Ok(())
 }
 
 #[wasm_bindgen(start)]
@@ -204,6 +229,19 @@ pub fn merge_pdfs(
     if pdfs.is_empty() {
         return Err(JsError::new("At least one PDF is required"));
     }
+    // Size-check BEFORE copying into linear memory (Y-6).
+    let total: usize = pdfs.iter().map(|p| p.length() as usize).sum();
+    guard_input_size(total, MAX_MERGE_TOTAL_BYTES, "merge input set")?;
+    for (index, p) in pdfs.iter().enumerate() {
+        guard_input_size(
+            p.length() as usize,
+            MAX_INPUT_BYTES,
+            &format!("PDF {}", index + 1),
+        )?;
+    }
+    if let Some(bytes) = watermark_image.as_ref() {
+        guard_input_size(bytes.len(), MAX_INPUT_BYTES, "watermark image")?;
+    }
     let buffers: Vec<Vec<u8>> = pdfs.iter().map(|p| p.to_vec()).collect();
     for (index, bytes) in buffers.iter().enumerate() {
         let pages = pdf_core::meta::page_count(bytes)
@@ -238,6 +276,10 @@ pub fn apply_watermark(
     watermark_json: &str,
     watermark_image: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
+    guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
+    if let Some(bytes) = watermark_image.as_ref() {
+        guard_input_size(bytes.len(), MAX_INPUT_BYTES, "watermark image")?;
+    }
     let spec = spec_from_payload(watermark_json, watermark_image).map_err(|e| JsError::new(&e))?;
     pdf_core::watermark::apply_watermark(pdf, &spec).map_err(err)
 }
@@ -246,6 +288,7 @@ pub fn apply_watermark(
 /// which forced landscape:'true' — landscape Letter matches that output).
 #[wasm_bindgen]
 pub fn csv_to_pdf(csv: &[u8]) -> Result<Vec<u8>, JsError> {
+    guard_input_size(csv.len(), MAX_INPUT_BYTES, "CSV")?;
     let opts = pdf_core::generate::DocOptions {
         page_size: pdf_core::generate::PageSize::LetterLandscape,
         ..pdf_core::generate::DocOptions::default()
@@ -256,6 +299,7 @@ pub fn csv_to_pdf(csv: &[u8]) -> Result<Vec<u8>, JsError> {
 /// Markdown → PDF (replaces the md→HTML→Chromium route).
 #[wasm_bindgen]
 pub fn markdown_to_pdf(markdown: &str) -> Result<Vec<u8>, JsError> {
+    guard_input_size(markdown.len(), MAX_INPUT_BYTES, "Markdown")?;
     pdf_core::generate::markdown_to_pdf(markdown, &pdf_core::generate::DocOptions::default())
         .map_err(err)
 }
@@ -263,22 +307,45 @@ pub fn markdown_to_pdf(markdown: &str) -> Result<Vec<u8>, JsError> {
 /// Plain text → PDF.
 #[wasm_bindgen]
 pub fn text_to_pdf(text: &str) -> Result<Vec<u8>, JsError> {
+    guard_input_size(text.len(), MAX_INPUT_BYTES, "text")?;
     pdf_core::generate::text_to_pdf(text, &pdf_core::generate::DocOptions::default()).map_err(err)
 }
 
 /// Page count of a PDF (errors on invalid/encrypted documents).
 #[wasm_bindgen]
 pub fn page_count(pdf: &[u8]) -> Result<u32, JsError> {
+    guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
     pdf_core::meta::page_count(pdf).map_err(err)
 }
 
-/// Office (docx/pptx/xlsx) -> PDF via the pure-Rust office2pdf engine.
-/// Returns `{ pdf: Uint8Array, warnings: string[] }`. Unsupported extensions
-/// (doc/ppt/xls/xlsm) throw so callers route them to LibreOffice. Only
-/// compiled into the Node/server build (`office` feature).
+/// Typed shape of [office_to_pdf]'s result, so consumers get `OfficeResult`
+/// instead of `any` in the generated `.d.ts` (Y-7).
+#[cfg(feature = "office")]
+#[wasm_bindgen(typescript_custom_section)]
+const OFFICE_RESULT_TS: &'static str = r#"
+export interface OfficeResult {
+    /** The converted PDF bytes. */
+    pdf: Uint8Array;
+    /** Fidelity warnings from the renderer; empty when the document converted cleanly. */
+    warnings: string[];
+}
+"#;
+
 #[cfg(feature = "office")]
 #[wasm_bindgen]
-pub fn office_to_pdf(bytes: &[u8], extension: &str) -> Result<JsValue, JsError> {
+extern "C" {
+    #[wasm_bindgen(typescript_type = "OfficeResult")]
+    pub type OfficeResult;
+}
+
+/// Office (docx/pptx/xlsx) -> PDF via the pure-Rust office2pdf engine.
+/// Returns `{ pdf: Uint8Array, warnings: string[] }` (typed `OfficeResult`).
+/// Unsupported extensions (doc/ppt/xls/xlsm) throw so callers route them to
+/// LibreOffice. Only compiled into the Node/server build (`office` feature).
+#[cfg(feature = "office")]
+#[wasm_bindgen]
+pub fn office_to_pdf(bytes: &[u8], extension: &str) -> Result<OfficeResult, JsError> {
+    guard_input_size(bytes.len(), MAX_INPUT_BYTES, "office document")?;
     let out = pdf_core::office::office_to_pdf_by_extension(bytes, extension).map_err(err)?;
     let result = js_sys::Object::new();
     js_sys::Reflect::set(
@@ -293,12 +360,13 @@ pub fn office_to_pdf(bytes: &[u8], extension: &str) -> Result<JsValue, JsError> 
     }
     js_sys::Reflect::set(&result, &"warnings".into(), &warnings.into())
         .map_err(|_| JsError::new("failed to build result object"))?;
-    Ok(result.into())
+    Ok(result.unchecked_into())
 }
 
 /// Structural validation; returns `{"pageCount":n,"version":"1.7","encrypted":false}`.
 #[wasm_bindgen]
 pub fn validate_pdf(pdf: &[u8]) -> Result<String, JsError> {
+    guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
     let info = pdf_core::meta::validate(pdf).map_err(err)?;
     Ok(format!(
         "{{\"pageCount\":{},\"version\":{},\"encrypted\":{}}}",
