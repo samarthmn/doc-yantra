@@ -7,6 +7,10 @@ on:
   push:
     tags:
       - "0.0.*"
+  # NOTE: the test gate lives in pdf-core/scripts/release.sh (CI is waived by
+  # decision). This workflow only builds + publishes — a tag pushed by any means
+  # OTHER than release.sh (including a workflow_dispatch run below, or a manual
+  # `npm publish`) bypasses the tests. Always cut releases via release.sh.
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
 jobs:

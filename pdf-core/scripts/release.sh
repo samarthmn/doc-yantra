@@ -73,6 +73,23 @@ echo "  set version = \"${version}\" in both Cargo.tomls"
 echo "  rebuilding wasm package ..."
 ( cd wasm && ./build.sh )
 
+# ─── 2b. Test gate (R2-Y1) ─────────────────────────────────────────────────
+# CI is waived by decision, so this script is the ONLY thing between a
+# regression and a published, immutable version. Run every suite before we
+# commit/tag/push, so an untested publish is impossible via the supported path.
+# (`workflow_dispatch` and a manual `npm publish` still bypass this — accepted
+# residual risk, noted in publish-wasm.yml.)
+if [[ ! -d pdfium ]]; then
+  echo "error: pdf-core/pdfium/ is missing — cargo's default (pdfium) tests need it." >&2
+  echo "       Run ./scripts/fetch-pdfium.sh once, then re-run the release." >&2
+  exit 1
+fi
+echo "  running cargo tests ..."
+cargo test --quiet
+cargo test --quiet --no-default-features --features wasm
+echo "  running package tests against the rebuilt pkg ..."
+( cd "$REPO_ROOT" && node --test tests/ )
+
 # ─── 3. Commit, tag, push ──────────────────────────────────────────────────
 git -C "$REPO_ROOT" add pdf-core
 git -C "$REPO_ROOT" commit -m "wasm: v${version}"

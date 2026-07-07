@@ -63,7 +63,9 @@ guard) and the install would 401.
 "dependencies": {
   // Releases are on the 0.0.x line — pin the exact patch (a caret on 0.0.x
   // resolves only that exact version) and bump it when a new patch ships.
-  "@samarthmn/doc-yantra": "0.0.2"
+  // Use the latest published patch — find it with:
+  //   git tag --list '0.0.*' | sort -V | tail -1
+  "@samarthmn/doc-yantra": "0.0.x" // the latest tag, e.g. 0.0.3
 }
 ```
 
@@ -137,7 +139,8 @@ This needs no scope-matching, but Vercel still needs git auth for the private
 repo (set `GITHUB_TOKEN` and rewrite the URL in the install step):
 
 ```jsonc
-"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#0.0.2&path:/pdf-core/wasm/pkg"
+// swap 0.0.x for the latest tag: git tag --list '0.0.*' | sort -V | tail -1
+"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#0.0.x&path:/pdf-core/wasm/pkg"
 ```
 
 `#path:` support varies by pnpm version — verify with yours, or use a dedicated
@@ -155,7 +158,7 @@ temporarily link the local build, then restore the registry pin before committin
 pnpm add link:../doc-yantra/pdf-core/wasm/pkg   # sibling checkout
 # rebuild after Rust changes:
 ( cd ../doc-yantra/pdf-core/wasm && ./build.sh )
-# …then restore "@samarthmn/doc-yantra": "0.0.2" and `pnpm install` before commit,
+# …then restore the exact registry pin (the latest 0.0.x) and `pnpm install` before commit,
 # so CI/Vercel resolve the published package (a link: path breaks them).
 ```
 
