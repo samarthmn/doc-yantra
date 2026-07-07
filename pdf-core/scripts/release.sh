@@ -3,12 +3,12 @@
 # Cut a new patch release on the 0.0.x line.
 #
 # Versioning is fixed at 0.0.x (only the patch increments). This script:
-#   1. finds the next x from existing wasm-v0.0.* git tags,
+#   1. finds the next x from existing git tags,
 #   2. writes version = "0.0.x" into BOTH Cargo.tomls (kept in sync — the
 #      package's version() returns the wasm crate's),
 #   3. rebuilds the committed wasm package (pkg/) so it carries the new version,
-#   4. commits pdf-core/, then tags wasm-v0.0.x and pushes — the
-#      publish-wasm.yml Action publishes to GitHub Packages on the tag.
+#   4. commits pdf-core/, then tags 0.0.x and pushes — the publish-wasm.yml
+#      Action publishes to GitHub Packages on the tag.
 #
 # Usage:
 #   ./scripts/release.sh            # auto: next patch after the highest tag
@@ -23,9 +23,11 @@ CORE_TOML="Cargo.toml"
 WASM_TOML="wasm/Cargo.toml"
 
 # ─── Determine the next patch (x) ──────────────────────────────────────────
+# Scan both the current tag form (0.0.x) and the legacy one (wasm-v0.0.x) so
+# the highest patch is found across the naming switch.
 git fetch --tags --quiet 2>/dev/null || true
-highest="$(git tag --list 'wasm-v0.0.*' \
-  | sed -n 's/^wasm-v0\.0\.\([0-9][0-9]*\)$/\1/p' \
+highest="$(git tag --list '0.0.*' 'wasm-v0.0.*' \
+  | sed -n -E 's/^(wasm-v)?0\.0\.([0-9]+)$/\2/p' \
   | sort -n | tail -1)"
 highest="${highest:-0}"
 
@@ -35,10 +37,10 @@ else
   patch=$((highest + 1))
 fi
 version="0.0.${patch}"
-tag="wasm-v${version}"
+tag="${version}"
 
 if [[ "$patch" -le "$highest" ]]; then
-  echo "error: ${tag} is not newer than the highest existing tag wasm-v0.0.${highest}." >&2
+  echo "error: ${tag} is not newer than the highest existing patch 0.0.${highest}." >&2
   echo "       Published versions are immutable — pick a higher patch." >&2
   exit 1
 fi

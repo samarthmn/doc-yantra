@@ -1,11 +1,12 @@
 name: Publish pdf-core-wasm
 
 # Publishes @samarthmn/doc-yantra to GitHub Packages when a version tag is
-# pushed, e.g.  git tag wasm-v0.0.1 && git push origin wasm-v0.0.1
+# pushed, e.g.  git tag 0.0.3 && git push origin 0.0.3
+# (pdf-core/scripts/release.sh does this for you.)
 on:
   push:
     tags:
-      - "wasm-v*"
+      - "0.0.*"
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
 jobs:

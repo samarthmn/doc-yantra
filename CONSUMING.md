@@ -19,8 +19,8 @@ PDF **in-process** — no network hop, no Rust toolchain on the consumer side.
 The built package lives at `pdf-core/wasm/pkg` and **is committed** so consumers
 and CI never need Rust. Releases stay on the **0.0.x** line (only the patch
 increments). One script does the whole cut — it picks the next `x` from the
-`wasm-v0.0.*` tags, bumps both Cargo.tomls in sync (`version()` returns the wasm
-crate's), rebuilds `pkg/`, commits, tags `wasm-v0.0.x`, and pushes (requires Rust
+`0.0.*` tags, bumps both Cargo.tomls in sync (`version()` returns the wasm
+crate's), rebuilds `pkg/`, commits, tags `0.0.x`, and pushes (requires Rust
 + wasm-pack locally):
 
 ```bash
@@ -137,7 +137,7 @@ This needs no scope-matching, but Vercel still needs git auth for the private
 repo (set `GITHUB_TOKEN` and rewrite the URL in the install step):
 
 ```jsonc
-"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#wasm-v0.0.2&path:/pdf-core/wasm/pkg"
+"@samarthmn/doc-yantra": "github:samarthmn/doc-yantra#0.0.2&path:/pdf-core/wasm/pkg"
 ```
 
 `#path:` support varies by pnpm version — verify with yours, or use a dedicated

@@ -70,7 +70,7 @@ Rebuild the wasm package after any Rust change (`cd pdf-core/wasm`):
 ## Releasing (0.0.x line)
 
 Releases stay on `0.0.x` — **only the patch increments**. Use the script; it
-derives the next `x` from the highest `wasm-v0.0.*` git tag, writes both
+derives the next `x` from the highest `0.0.*` git tag, writes both
 Cargo.tomls, rebuilds `pkg/`, commits, tags, and pushes (the `publish-wasm.yml`
 Action then publishes to GitHub Packages on the tag):
 ```bash
@@ -95,8 +95,8 @@ bump plus the regenerated `pkg/` together.
   for you (via the Cargo.tomls + `build.sh`). Published versions are **immutable**.
 - **Releasing** is tag-driven and stays on the `0.0.x` line — just run
   `pdf-core/scripts/release.sh` (see the Releasing section above). It picks the
-  next patch, rebuilds/commits `pkg/`, tags `wasm-v0.0.x`, and pushes; the
-  `publish-wasm.yml` Action publishes to GitHub Packages on `wasm-v*` tags.
+  next patch, rebuilds/commits `pkg/`, tags `0.0.x`, and pushes; the
+  `publish-wasm.yml` Action publishes to GitHub Packages on `0.0.*` tags.
 - **GitHub Packages requires the npm scope to equal the repo owner.** If the owner
   isn't `samarthmn`, change `OWNER`/`SCOPE`/`PKG_NAME` in `build.sh`, the `scope:`
   in `publish-wasm.yml`, and the consumer's `.npmrc`. See `CONSUMING.md`.

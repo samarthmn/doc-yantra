@@ -7,7 +7,7 @@ This repo is DocKosha's **proprietary PDF engine** and its distributable
 | --- | --- |
 | `pdf-core/` | The Rust engine: merge, split, watermark, metadata, CSV/Markdown/text/image → PDF (Zone 1), plus pdfium-backed raster/extract/redact/forms (Zone 2, native-only). See [`pdf-core/README.md`](pdf-core/README.md). |
 | `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Three modules: main (Node CJS — watermark/merge/csv/md, 1.7MB), `./office` (Node — docx/pptx/xlsx via pure-Rust office2pdf, 44MB, lazy-load only), `./web` (browser ESM — Zone 1 for in-browser previews, 1.7MB). |
-| `.github/workflows/publish-wasm.yml` | Publishes the package to **GitHub Packages** when a `wasm-v*` tag is pushed. |
+| `.github/workflows/publish-wasm.yml` | Publishes the package to **GitHub Packages** when a `0.0.*` tag is pushed. |
 
 > **Not in this repo:** the DocYantra HTTP service (NestJS + Gotenberg —
 > Office→PDF, HTML→PDF, redaction endpoints). That still lives in the
@@ -66,8 +66,8 @@ served by the DocYantra HTTP service instead.
 ## Releasing
 
 Releases stay on the **0.0.x** line — only the patch increments. One script does
-everything: it picks the next `x` from the `wasm-v0.0.*` tags, bumps both
-Cargo.tomls, rebuilds + commits `pkg/`, tags `wasm-v0.0.x`, and pushes (the
+everything: it picks the next `x` from the `0.0.*` tags, bumps both
+Cargo.tomls, rebuilds + commits `pkg/`, tags `0.0.x`, and pushes (the
 publish-wasm workflow then publishes to GitHub Packages):
 
 ```bash
