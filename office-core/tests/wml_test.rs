@@ -267,3 +267,52 @@ fn minimal_docx_parses() {
     let doc = parse_document(xml).unwrap();
     assert_eq!(doc.body.len(), 1);
 }
+
+/// Cascade precedence: a character style overrides the paragraph style for the
+/// same property (docDefaults → default style → para style → CHAR style → direct).
+#[test]
+fn character_style_overrides_paragraph_style() {
+    let styles = wrap_styles(
+        r#"
+        <w:style w:type="paragraph" w:styleId="P">
+          <w:name w:val="P"/><w:rPr><w:sz w:val="20"/><w:b/></w:rPr>
+        </w:style>
+        <w:style w:type="character" w:styleId="C">
+          <w:name w:val="C"/><w:rPr><w:sz w:val="40"/></w:rPr>
+        </w:style>
+        "#,
+    );
+    let resolver = StyleResolver::parse(&styles).unwrap();
+    let para = ParaProps {
+        style_id: Some("P".into()),
+        ..Default::default()
+    };
+    let run = RunProps {
+        style_id: Some("C".into()),
+        ..Default::default()
+    };
+    let eff = resolver.run_props(&para, &run);
+    // Character style C (sz 40 → 20pt) overrides paragraph style P (sz 20 → 10pt).
+    assert_eq!(
+        eff.size_pt,
+        Some(20.0),
+        "character style must win over paragraph style"
+    );
+    // A property only P sets (bold) still inherits through.
+    assert_eq!(
+        eff.bold,
+        Some(true),
+        "paragraph-style bold still applies when C is silent"
+    );
+    // Direct run props override even the character style.
+    let direct = RunProps {
+        style_id: Some("C".into()),
+        size_pt: Some(9.0),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolver.run_props(&para, &direct).size_pt,
+        Some(9.0),
+        "direct wins over all"
+    );
+}
