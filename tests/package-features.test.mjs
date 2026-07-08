@@ -1,8 +1,7 @@
 // Feature test suite for the built @samarthmn/doc-yantra wasm package, run
 // against the repo's own mock-files copy. Exercises EVERY export of the main
-// module and the office submodule, asserting real behavior (not just "did not
-// throw"): %PDF magic, page counts, watermark presence, merge arithmetic, and
-// the office extension-scope / fast-reject contract.
+// module, asserting real behavior (not just "did not throw"): %PDF magic, page
+// counts, watermark presence, and merge arithmetic.
 //
 // Run:  node --test tests/
 //
@@ -25,7 +24,6 @@ const ROOT = join(HERE, "..");
 const PKG = join(ROOT, "pdf-core", "wasm", "pkg");
 
 const main = require(join(PKG, "pdf_core_wasm.js"));
-const office = require(join(PKG, "office", "pdf_core_wasm.js"));
 
 // --- helpers ---------------------------------------------------------------
 
@@ -84,7 +82,6 @@ describe("engine metadata", () => {
     const v = main.version();
     assert.equal(typeof v, "string");
     assert.match(v, /^\d+\.\d+\.\d+/, `unexpected version: ${v}`);
-    assert.equal(office.version(), v, "office submodule reports same version");
   });
 
   test("page_count() counts a real mock PDF", () => {
@@ -260,79 +257,5 @@ describe("merge_pdfs", () => {
 
   test("an invalid member PDF throws", () => {
     assert.throws(() => main.merge_pdfs([mock("pdf"), new Uint8Array([1, 2, 3])]));
-  });
-});
-
-// --- office submodule: conversion ------------------------------------------
-
-describe("office_to_pdf (docx / pptx / xlsx)", () => {
-  for (const ext of ["docx", "pptx", "xlsx"]) {
-    for (const name of [`file1.${ext}`, `file2.${ext}`]) {
-      test(`${name} converts warning-free to a valid PDF`, () => {
-        const res = office.office_to_pdf(mock(ext, name), ext);
-        assert.ok(res && res.pdf, "result has a pdf field");
-        assert.ok(isPdf(res.pdf), "output is a PDF");
-        assert.ok(main.page_count(res.pdf) >= 1, "at least one page");
-        assert.ok(Array.isArray(res.warnings), "warnings is an array");
-        assert.equal(
-          res.warnings.length,
-          0,
-          `${name} should convert warning-free, got: ${JSON.stringify(res.warnings)}`,
-        );
-      });
-    }
-  }
-
-  test("extension casing and whitespace are tolerated", () => {
-    const res = office.office_to_pdf(mock("docx"), "  DOCX ");
-    assert.ok(isPdf(res.pdf));
-  });
-
-  test("converted office PDF flows through downstream ops", () => {
-    // A converted document must be a first-class PDF: countable, watermarkable,
-    // mergeable.
-    const { pdf } = office.office_to_pdf(mock("docx"), "docx");
-    const pages = main.page_count(pdf);
-    const stamped = main.apply_watermark(
-      pdf,
-      JSON.stringify({ pattern: "grid", lines: ["CONFIDENTIAL"] }),
-    );
-    assert.ok(pdfDrawnText(stamped).includes("CONFIDENTIAL"));
-    const merged = main.merge_pdfs([stamped, pdf]);
-    assert.equal(main.page_count(merged), pages * 2);
-  });
-});
-
-// --- office submodule: rejection contract ----------------------------------
-
-describe("office_to_pdf rejections", () => {
-  for (const ext of ["doc", "ppt", "xls", "xlsm"]) {
-    test(`legacy/macro extension '${ext}' is rejected (routes to LibreOffice)`, () => {
-      // Even with real, well-formed bytes for that family, the pure-Rust engine
-      // declines by extension scope. (Use the ext's real mock bytes.)
-      assert.throws(() => office.office_to_pdf(mock(ext), ext));
-    });
-  }
-
-  test("unknown extension is rejected", () => {
-    assert.throws(() => office.office_to_pdf(mock("docx"), "bogus"));
-  });
-
-  test("renamed file (xlsx bytes as docx) is rejected fast", () => {
-    const start = process.hrtime.bigint();
-    assert.throws(() => office.office_to_pdf(mock("xlsx"), "docx"));
-    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
-    assert.ok(
-      elapsedMs < 2000,
-      `content-mismatch rejection must be fast, took ${elapsedMs.toFixed(0)}ms`,
-    );
-  });
-
-  test("corrupt zip bytes are rejected", () => {
-    assert.throws(() => office.office_to_pdf(new Uint8Array([0x50, 0x4b, 3, 4, 9, 9, 9]), "docx"));
-  });
-
-  test("empty input is rejected", () => {
-    assert.throws(() => office.office_to_pdf(new Uint8Array([]), "docx"));
   });
 });

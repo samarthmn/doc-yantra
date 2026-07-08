@@ -8,9 +8,6 @@
 use base64::Engine;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
-// JsCast::unchecked_into is used to hand back the typed OfficeResult (office only).
-#[cfg(feature = "office")]
-use wasm_bindgen::JsCast;
 
 use pdf_core::watermark::{Pattern, WatermarkImage, WatermarkSpec};
 
@@ -316,51 +313,6 @@ pub fn text_to_pdf(text: &str) -> Result<Vec<u8>, JsError> {
 pub fn page_count(pdf: &[u8]) -> Result<u32, JsError> {
     guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
     pdf_core::meta::page_count(pdf).map_err(err)
-}
-
-/// Typed shape of [office_to_pdf]'s result, so consumers get `OfficeResult`
-/// instead of `any` in the generated `.d.ts` (Y-7).
-#[cfg(feature = "office")]
-#[wasm_bindgen(typescript_custom_section)]
-const OFFICE_RESULT_TS: &'static str = r#"
-export interface OfficeResult {
-    /** The converted PDF bytes. */
-    pdf: Uint8Array;
-    /** Fidelity warnings from the renderer; empty when the document converted cleanly. */
-    warnings: string[];
-}
-"#;
-
-#[cfg(feature = "office")]
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(typescript_type = "OfficeResult")]
-    pub type OfficeResult;
-}
-
-/// Office (docx/pptx/xlsx) -> PDF via the pure-Rust office2pdf engine.
-/// Returns `{ pdf: Uint8Array, warnings: string[] }` (typed `OfficeResult`).
-/// Unsupported extensions (doc/ppt/xls/xlsm) throw so callers route them to
-/// LibreOffice. Only compiled into the Node/server build (`office` feature).
-#[cfg(feature = "office")]
-#[wasm_bindgen]
-pub fn office_to_pdf(bytes: &[u8], extension: &str) -> Result<OfficeResult, JsError> {
-    guard_input_size(bytes.len(), MAX_INPUT_BYTES, "office document")?;
-    let out = pdf_core::office::office_to_pdf_by_extension(bytes, extension).map_err(err)?;
-    let result = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &result,
-        &"pdf".into(),
-        &js_sys::Uint8Array::from(out.pdf.as_slice()).into(),
-    )
-    .map_err(|_| JsError::new("failed to build result object"))?;
-    let warnings = js_sys::Array::new();
-    for w in &out.warnings {
-        warnings.push(&JsValue::from_str(w));
-    }
-    js_sys::Reflect::set(&result, &"warnings".into(), &warnings.into())
-        .map_err(|_| JsError::new("failed to build result object"))?;
-    Ok(result.unchecked_into())
 }
 
 /// Structural validation; returns `{"pageCount":n,"version":"1.7","encrypted":false}`.

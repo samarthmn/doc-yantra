@@ -1,12 +1,12 @@
 # doc-yantra feature tests
 
 Two layers of feature coverage, both driven against this repo's own
-`mock-files/` corpus (real docx / pptx / xlsx / csv / md / pdf documents — the
-same layout DocKosha's suites use):
+`mock-files/` corpus (real csv / md / pdf documents — the same layout
+DocKosha's suites use):
 
 | Layer | Location | Runner | What it proves |
 | --- | --- | --- | --- |
-| **npm package** (`@samarthmn/doc-yantra`) | `tests/package-features.test.mjs` | `node --test` | Every export of the built wasm package (main + `office/`) behaves correctly on real files. |
+| **npm package** (`@samarthmn/doc-yantra`) | `tests/package-features.test.mjs` | `node --test` | Every export of the built wasm package behaves correctly on real files. |
 | **Rust engine** (`pdf-core`) | `pdf-core/tests/*.rs` | `cargo test` | The crate's features, plus a real-file end-to-end pipeline. |
 
 ## Running the package suite (Node)
@@ -21,8 +21,7 @@ The suite loads the **built** package directly by path — no install, no
 bundler — mirroring a Node/Vercel consumer:
 
 ```js
-require("../pdf-core/wasm/pkg/pdf_core_wasm.js")        // main module
-require("../pdf-core/wasm/pkg/office/pdf_core_wasm.js") // office submodule
+require("../pdf-core/wasm/pkg/pdf_core_wasm.js") // main module
 ```
 
 so `pdf-core/wasm/pkg/` must be built first (see `pdf-core/wasm/build.sh`).
@@ -57,14 +56,8 @@ Main module (`@samarthmn/doc-yantra`):
   `page_count == sum of inputs`, single-input passthrough, and error on an empty
   list / an invalid member.
 
-Office submodule (`@samarthmn/doc-yantra/office`):
-
-- `office_to_pdf` converts docx / pptx / xlsx (both mock variants) **warning-free**
-  to a valid, countable PDF, and the result flows through downstream ops.
-- Extension scope: `doc` / `ppt` / `xls` / `xlsm` / unknown all **throw** (they
-  route to LibreOffice in production).
-- Robustness: a renamed file (xlsx bytes sent as `docx`) is rejected **fast**
-  (< 2 s), and corrupt / empty input is rejected.
+Office → PDF is **not** in this package — it is handled by the DocYantra
+LibreOffice HTTP service.
 
 ## Running the Rust suite
 
@@ -75,12 +68,10 @@ cd pdf-core && cargo test
 Requires Rust ≥ 1.89 and a resolvable pdfium (see the crate's pdfium setup).
 Relevant to the mock corpus:
 
-- `tests/office_test.rs` — office→PDF conversion + the extension-scope /
-  fast-reject / corrupt / empty contract, all against `../mock-files`.
 - `tests/mockfiles_pipeline_test.rs` — a real-file end-to-end pipeline: every
-  convertible source (docx / pptx / xlsx via office2pdf, csv / md via the
-  generator) is driven through **convert → watermark → merge → extract →
-  page_count → raster**, asserting each stage.
+  in-process convertible source (csv / md via the generator) is driven through
+  **convert → watermark → merge → extract → page_count → raster**, asserting
+  each stage.
 
 The remaining `tests/*.rs` cover the individual engine modules (assembly,
 watermark, meta, generate, raster, extract, redact, forms) with synthetic

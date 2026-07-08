@@ -1,16 +1,16 @@
 //! End-to-end pipeline over the SHARED workspace mock corpus
 //! (`../mock-files`). Proves the engine's features compose on REAL inputs:
-//! every convertible source (docx / pptx / xlsx via office2pdf, csv / md via
-//! the generator) is driven through the full downstream chain —
+//! every in-process convertible source (csv / md via the generator) is driven
+//! through the full downstream chain —
 //! convert → watermark → merge → extract → page_count → raster — with each
 //! stage asserted. This complements the per-module unit tests (which use
 //! synthetic fixtures) by catching integration gaps that only surface on
-//! real documents.
+//! real documents. (Office → PDF is handled by the DocYantra LibreOffice
+//! service, not this engine, so it is not exercised here.)
 
-#![cfg(all(feature = "office", feature = "pdfium"))]
+#![cfg(feature = "pdfium")]
 
 use pdf_core::generate::{self, DocOptions};
-use pdf_core::office::{OfficeFormat, office_to_pdf};
 use pdf_core::watermark::{Pattern, WatermarkSpec};
 use pdf_core::{assembly, extract, meta, raster};
 use serial_test::serial;
@@ -87,33 +87,6 @@ fn assert_full_pipeline(base: Vec<u8>, label: &str) {
         thumbs[0].starts_with(&[0x89, b'P', b'N', b'G']),
         "{label}: thumbnail must be PNG-encoded"
     );
-}
-
-#[test]
-#[serial]
-fn docx_real_file_pipeline() {
-    let base = office_to_pdf(&mock("docx/file1.docx"), OfficeFormat::Docx)
-        .expect("docx converts")
-        .pdf;
-    assert_full_pipeline(base, "docx");
-}
-
-#[test]
-#[serial]
-fn pptx_real_file_pipeline() {
-    let base = office_to_pdf(&mock("pptx/file1.pptx"), OfficeFormat::Pptx)
-        .expect("pptx converts")
-        .pdf;
-    assert_full_pipeline(base, "pptx");
-}
-
-#[test]
-#[serial]
-fn xlsx_real_file_pipeline() {
-    let base = office_to_pdf(&mock("xlsx/file1.xlsx"), OfficeFormat::Xlsx)
-        .expect("xlsx converts")
-        .pdf;
-    assert_full_pipeline(base, "xlsx");
 }
 
 #[test]

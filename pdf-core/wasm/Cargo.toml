@@ -11,9 +11,6 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-# Pure-Rust Office (docx/pptx/xlsx) -> PDF. Enabled for the Node/server build;
-# excluded from the browser build (bundles Typst — large payload).
-office = ["pdf-core/office"]
 
 [dependencies]
 pdf-core = { path = "..", default-features = false, features = ["wasm"] }

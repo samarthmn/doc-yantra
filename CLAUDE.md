@@ -20,9 +20,10 @@ fallback for everything the wasm package covers. When you see references to the
 Every module belongs to one zone, and the zone dictates where it can run:
 
 - **Zone 1 — pure Rust** (lopdf + pdf-writer): `assembly`, `watermark`, `meta`,
-  `generate` (csv/md/text/image→PDF), plus `office` (docx/pptx/xlsx→PDF via
-  pure-Rust office2pdf). Lock-free, parallel-safe, and the **only** zone that
-  compiles to wasm. This is what ships in the npm package.
+  `generate` (csv/md/text/image→PDF). Lock-free, parallel-safe, and the **only**
+  zone that compiles to wasm. This is what ships in the npm package. (Office →
+  PDF is NOT in this engine — it is served by the DocYantra LibreOffice HTTP
+  service.)
 - **Zone 2 — Rust + pdfium** (bundled BSD dylib): `raster`, `extract`, `redact`,
   `forms`. **Native-only** — needs the pdfium dynamic library, cannot run in
   wasm. Gated behind the `pdfium` cargo feature (`#[cfg(feature = "pdfium")]` in
@@ -31,7 +32,7 @@ Every module belongs to one zone, and the zone dictates where it can run:
 All engine functions take and return `&[u8]`/`Vec<u8>` PDF bytes, keeping the crate
 IO-agnostic and embeddable.
 
-## The npm package has three entry points (one crate, three builds)
+## The npm package has two entry points (one crate, two builds)
 
 `pdf-core/wasm/build.sh` produces `pkg/` from Zone 1 only. The wasm crate
 (`pdf-core/wasm/src/lib.rs`) is a thin wasm-bindgen wrapper whose watermark JSON
@@ -42,8 +43,7 @@ without reshaping data.
 | Import | Build | Contents |
 | --- | --- | --- |
 | `@samarthmn/doc-yantra` | Node CJS (`--target nodejs`) | watermark/merge/csv/md/text/validate (~1.7 MB) |
-| `@samarthmn/doc-yantra/office` | Node CJS + `--features office` | docx/pptx/xlsx→PDF (~44 MB — bundles Typst; **lazy-load only**, never hot paths) |
-| `@samarthmn/doc-yantra/web` | Browser ESM (`--target web`) | Zone 1 for in-browser previews; no office (payload size) |
+| `@samarthmn/doc-yantra/web` | Browser ESM (`--target web`) | Zone 1 for in-browser previews |
 
 ## Build / test / run commands
 
@@ -51,8 +51,8 @@ Rust engine (`cd pdf-core`):
 ```bash
 ./scripts/fetch-pdfium.sh          # ONE-TIME: fetches pdfium dylib for Zone 2 tests
 cargo test                         # full suite (Zone 1 + Zone 2)
-cargo test --test office_test      # a single test file
-cargo test extension_scope         # a single test by name substring
+cargo test --test watermark_test   # a single test file
+cargo test page_count              # a single test by name substring
 cargo build --release              # CLI binary at target/release/pdfcore
 ```
 pdfium resolution order: `PDFIUM_DYNAMIC_LIB_PATH` → crate-local `pdfium/lib/` → system.
@@ -122,11 +122,10 @@ bump plus the regenerated `pkg/` together.
 
 ## Cargo features
 
-`default = ["pdfium", "cli", "parallel", "office"]`. `pdfium` gates Zone 2;
-`cli` gates the `pdfcore` binary; `parallel` enables lopdf's rayon (native only —
-thread pools panic on wasm); `wasm` routes getrandom to the JS crypto backend;
-`office` bundles office2pdf. **wasm builds use `--no-default-features --features
-wasm`** (+ `office` for the office target), which drops Zone 2 and rayon.
+`default = ["pdfium", "cli", "parallel"]`. `pdfium` gates Zone 2; `cli` gates the
+`pdfcore` binary; `parallel` enables lopdf's rayon (native only — thread pools
+panic on wasm); `wasm` routes getrandom to the JS crypto backend. **wasm builds
+use `--no-default-features --features wasm`**, which drops Zone 2 and rayon.
 
 ## Docs worth reading
 
