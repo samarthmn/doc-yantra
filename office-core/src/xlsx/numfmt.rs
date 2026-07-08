@@ -250,6 +250,11 @@ fn format_general(value: f64) -> String {
 
 /// Formats a non-negative number with a numeric pattern.
 fn format_numeric(value: f64, pattern: &str) -> String {
+    // A section with no digit placeholders is literal text; an `@` there takes
+    // the value's General form (e.g. a number under the text format `@`).
+    if !pattern.contains(['0', '#', '?']) {
+        return apply_text_section(pattern, &format_general(value));
+    }
     // Count trailing commas (scale by 1000 each) and detect features.
     let percent = pattern.contains('%');
     let scientific = pattern.to_ascii_uppercase().contains('E');
@@ -323,8 +328,24 @@ fn trailing_literal(pattern: &str, percent: bool) -> String {
     out
 }
 
+/// Rounds `value` to `decimals` places **half away from zero** — Excel's rule.
+/// (Rust's `{:.N}` formatting rounds half to even, which mis-rounds `2.5` → `2`.)
+fn round_half_away(value: f64, decimals: usize) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    let factor = 10f64.powi(decimals as i32);
+    let scaled = value * factor;
+    let rounded = if scaled >= 0.0 {
+        (scaled + 0.5).floor()
+    } else {
+        (scaled - 0.5).ceil()
+    };
+    rounded / factor
+}
+
 fn format_fixed(value: f64, decimals: usize, thousands: bool) -> String {
-    let s = format!("{value:.*}", decimals);
+    let s = format!("{:.*}", decimals, round_half_away(value, decimals));
     let (int_part, frac) = match s.split_once('.') {
         Some((i, f)) => (i.to_string(), Some(f.to_string())),
         None => (s, None),
@@ -358,7 +379,7 @@ fn format_scientific(value: f64, decimals: usize, exp_digits: usize) -> String {
         return format!("{:.*}E+{:0width$}", decimals, 0, 0, width = exp_digits);
     }
     let exp = value.abs().log10().floor() as i32;
-    let mantissa = value / 10f64.powi(exp);
+    let mantissa = round_half_away(value / 10f64.powi(exp), decimals);
     let sign = if exp < 0 { '-' } else { '+' };
     format!(
         "{:.*}E{}{:0width$}",
@@ -569,6 +590,33 @@ mod tests {
             (0.005, "0.00", "0.01"),
             (0.004, "0.00", "0.00"),
             (42.0, "@", "42"),
+            // Excel rounds half AWAY from zero (Rust's {:.N} rounds to even).
+            (2.5, "0", "3"),
+            (3.5, "0", "4"),
+            (-2.5, "0", "-3"),
+            (0.125, "0.00", "0.13"),
+            (0.375, "0.00", "0.38"),
+            // Negatives, single-section.
+            (-3.5, "0.00", "-3.50"),
+            (-1234.5, "#,##0.00", "-1,234.50"),
+            // Larger grouping + zero.
+            (1000000.0, "#,##0", "1,000,000"),
+            (0.0, "0", "0"),
+            (0.0, "#,##0", "0"),
+            // Percent edge cases.
+            (0.0, "0%", "0%"),
+            (-0.5, "0%", "-50%"),
+            (1.5, "0.0%", "150.0%"),
+            // Trailing-comma scaling (thousands).
+            (1500000.0, "#,##0,", "1,500"),
+            (2500000.0, "0.0,,", "2.5"),
+            // Two-section: zero uses the positive section.
+            (0.0, "#,##0;(#,##0)", "0"),
+            // Three-section pos;neg;zero.
+            (0.0, "0.0;-0.0;\"zero\"", "zero"),
+            (-5.0, "0.0;-0.0;\"zero\"", "-5.0"),
+            // Text section.
+            (0.0, "@", "0"),
         ];
         for (v, code, expect) in cases {
             assert_eq!(&f(*v, code), expect, "value {v} code {code:?}");
