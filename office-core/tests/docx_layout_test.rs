@@ -259,3 +259,61 @@ fn multicolumn_section_fails_closed() {
     // Keep the wrap_document helper exercised.
     assert!(wrap_document("<w:p/>").contains("w:body"));
 }
+
+/// Multi-level list counters: deeper levels reset when a shallower level
+/// increments (Word restart semantics). Verified via the rendered label glyphs.
+#[test]
+fn list_counters_reset_on_shallower_level() {
+    let ns = office_core::testkit::DOC_NAMESPACES;
+    let numbering = format!(
+        r#"<?xml version="1.0"?><w:numbering{ns}>
+        <w:abstractNum w:abstractNumId="0">
+          <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+          <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2)"/></w:lvl>
+        </w:abstractNum>
+        <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    let mk = |lvl: u32, t: &str| {
+        format!(
+            "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"{lvl}\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>{t}</w:t></w:r></w:p>"
+        )
+    };
+    let body = format!(
+        "{}{}{}{}{}",
+        mk(0, "one"), // 1.
+        mk(1, "a"),   // a)
+        mk(1, "b"),   // b)
+        mk(0, "two"), // 2.  → resets level 1
+        mk(1, "c"),   // a)  (reset, NOT c)
+    );
+    let document =
+        format!(r#"<?xml version="1.0"?><w:document{ns}><w:body>{body}</w:body></w:document>"#);
+    let ct = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/numbering.xml", numbering.as_bytes()),
+    ]);
+
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).expect("open");
+    let laid = layout_docx(&doc).0;
+    let text: String = laid.pages.iter().map(page_text).collect();
+    // Labels: 1. a) b) 2. a)  — the final item resets to "a", proving the reset.
+    let a_count = text.matches("a)").count();
+    assert_eq!(
+        a_count, 2,
+        "level-1 counter must reset after '2.': {text:?}"
+    );
+    assert!(
+        text.contains("1.") && text.contains("2."),
+        "top-level labels: {text:?}"
+    );
+    assert!(text.contains("b)"), "second level-1 item is 'b)': {text:?}");
+}
