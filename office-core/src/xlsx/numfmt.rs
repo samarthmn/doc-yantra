@@ -639,6 +639,15 @@ mod tests {
             (44927.0, "mmm-yy", "Jan-23"),
             (44927.0, "mmmm d, yyyy", "January 1, 2023"),
             (45658.0, "m/d/yyyy", "1/1/2025"),
+            // The 1900 phantom-leap-day boundary (Excel's famous bug): serial 60
+            // is the non-existent 1900-02-29; 59 and 61 straddle it.
+            (59.0, "m/d/yyyy", "2/28/1900"),
+            (60.0, "m/d/yyyy", "2/29/1900"),
+            (61.0, "m/d/yyyy", "3/1/1900"),
+            (1.0, "m/d/yyyy", "1/1/1900"),
+            // A real Gregorian leap day.
+            (45351.0, "yyyy-mm-dd", "2024-02-29"),
+            (45350.0, "yyyy-mm-dd", "2024-02-28"),
         ];
         for (v, code, expect) in cases {
             assert_eq!(&f(*v, code), expect, "serial {v} code {code:?}");
