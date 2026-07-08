@@ -69,3 +69,36 @@ fn pptx_profile_reports_slides() {
     assert!(prof.supported);
     assert!(prof.stats.slides >= 1);
 }
+
+/// Router contract for PPTX: `profile().supported == convert().is_ok()` on every
+/// real mock file. `convert_pptx` profiles first and fails closed, so the
+/// unsupported→unsupported direction is structural; the risk this guards is a
+/// profile *false positive* — a file profile passes that then fails in
+/// `PptxDoc::open`/render/emit. DocKosha's engine-first router depends on this.
+#[test]
+fn pptx_profile_agrees_with_convert_on_mock_corpus() {
+    let dir = std::path::Path::new("../mock-files/pptx");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut checked = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pptx") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let prof = profile(&bytes, OfficeFormat::Pptx).expect("profile");
+        let conv = convert(&bytes, OfficeFormat::Pptx, &opts());
+        assert_eq!(
+            prof.supported,
+            conv.is_ok(),
+            "profile/convert verdict mismatch for {}: reasons={:?} err={:?}",
+            path.display(),
+            prof.reasons,
+            conv.err(),
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no mock pptx files found");
+}

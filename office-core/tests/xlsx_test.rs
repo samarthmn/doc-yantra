@@ -70,3 +70,38 @@ fn xlsx_profile_reports_sheets() {
     assert!(prof.supported, "reasons: {:?}", prof.reasons);
     assert!(prof.stats.sheets >= 1);
 }
+
+/// Router contract for XLSX/XLSM: `profile().supported == convert().is_ok()` on
+/// every real mock file. `convert_xlsx` profiles first and fails closed, so the
+/// unsupported→unsupported direction is structural; the risk this guards is a
+/// profile *false positive* — a file profile passes that then fails in
+/// `XlsxDoc::open`/render/emit. DocKosha's engine-first router depends on this.
+#[test]
+fn xlsx_profile_agrees_with_convert_on_mock_corpus() {
+    let mut checked = 0;
+    for sub in ["xlsx", "xlsm"] {
+        let dir = std::path::Path::new("../mock-files").join(sub);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(sub) {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let prof = profile(&bytes, OfficeFormat::Xlsx).expect("profile");
+            let conv = convert(&bytes, OfficeFormat::Xlsx, &opts());
+            assert_eq!(
+                prof.supported,
+                conv.is_ok(),
+                "profile/convert verdict mismatch for {}: reasons={:?} err={:?}",
+                path.display(),
+                prof.reasons,
+                conv.err(),
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no mock xlsx/xlsm files found");
+}
