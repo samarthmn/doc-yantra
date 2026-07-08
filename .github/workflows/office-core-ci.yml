@@ -1,0 +1,72 @@
+name: office-core CI
+
+# Lint, test, and prove wasm-compilability of the office-core engine on every
+# change to it or the fidelity corpus. Mirrors the toolchain setup in
+# publish-wasm.yml.
+on:
+  push:
+    paths:
+      - "office-core/**"
+      - "fidelity-corpus/**"
+      - ".github/workflows/office-core-ci.yml"
+  pull_request:
+    paths:
+      - "office-core/**"
+      - "fidelity-corpus/**"
+      - ".github/workflows/office-core-ci.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: office-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      - name: wasm32 build check
+        run: cargo check --no-default-features --features wasm --target wasm32-unknown-unknown
+
+  fidelity-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: office-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch pdfium (harness rasterizer)
+        run: ../pdf-core/scripts/fetch-pdfium.sh
+
+      - name: Fidelity SSIM unit tests
+        run: cargo test -p fidelity
+
+      # Score the corpus only when Word ground truths exist (human task H3).
+      # continue-on-error until H4 declares the docx tier shippable — then flip
+      # to blocking by removing that line (plan: hyper-agent/office-engine).
+      - name: Fidelity corpus (docx)
+        continue-on-error: true
+        run: |
+          if find ../fidelity-corpus -name ground-truth.pdf | grep -q .; then
+            cargo run -p fidelity -- run --format docx
+          else
+            echo "No ground truths yet — skipping corpus scoring (human task H3)."
+          fi

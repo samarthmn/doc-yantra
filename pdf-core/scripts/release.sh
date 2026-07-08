@@ -21,6 +21,9 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 CORE_TOML="Cargo.toml"
 WASM_TOML="wasm/Cargo.toml"
+# office-core rides the same 0.0.x line (four Cargo.tomls in lockstep).
+OFFICE_TOML="../office-core/Cargo.toml"
+OFFICE_WASM_TOML="../office-core/wasm/Cargo.toml"
 
 # ─── Determine the next patch (x) ──────────────────────────────────────────
 # Scan both the current tag form (0.0.x) and the legacy one (wasm-v0.0.x) so
@@ -52,8 +55,10 @@ fi
 echo "Releasing ${version}  (highest existing: 0.0.${highest})"
 
 if [[ -n "${DRY_RUN:-}" ]]; then
-  echo "[dry-run] would set version=\"${version}\" in ${CORE_TOML} and ${WASM_TOML}"
-  echo "[dry-run] would run wasm/build.sh, commit pdf-core/, tag ${tag}, push origin main ${tag}"
+  echo "[dry-run] would set version=\"${version}\" in all four Cargo.tomls:"
+  echo "          ${CORE_TOML}, ${WASM_TOML}, ${OFFICE_TOML}, ${OFFICE_WASM_TOML}"
+  echo "[dry-run] would run pdf-core + office-core wasm/build.sh, commit pdf-core/ + office-core/,"
+  echo "          tag ${tag}, push origin main ${tag}"
   exit 0
 fi
 
@@ -67,11 +72,15 @@ set_version() {
 }
 set_version "$CORE_TOML"
 set_version "$WASM_TOML"
-echo "  set version = \"${version}\" in both Cargo.tomls"
+set_version "$OFFICE_TOML"
+set_version "$OFFICE_WASM_TOML"
+echo "  set version = \"${version}\" in all four Cargo.tomls"
 
-# ─── 2. Rebuild the committed wasm package (pkg/ carries the crate version) ──
-echo "  rebuilding wasm package ..."
+# ─── 2. Rebuild the committed wasm packages (pkg/ carries the crate version) ──
+echo "  rebuilding pdf-core wasm package ..."
 ( cd wasm && ./build.sh )
+echo "  rebuilding office-core wasm package ..."
+( cd ../office-core/wasm && ./build.sh )
 
 # ─── 2b. Test gate (R2-Y1) ─────────────────────────────────────────────────
 # CI is waived by decision, so this script is the ONLY thing between a
@@ -87,11 +96,13 @@ fi
 echo "  running cargo tests ..."
 cargo test --quiet
 cargo test --quiet --no-default-features --features wasm
+echo "  running office-core cargo tests ..."
+( cd ../office-core && cargo test --quiet )
 echo "  running package tests against the rebuilt pkg ..."
 ( cd "$REPO_ROOT" && node --test tests/ )
 
 # ─── 3. Commit, tag, push ──────────────────────────────────────────────────
-git -C "$REPO_ROOT" add pdf-core
+git -C "$REPO_ROOT" add pdf-core office-core
 git -C "$REPO_ROOT" commit -m "wasm: v${version}"
 git -C "$REPO_ROOT" tag "$tag"
 git -C "$REPO_ROOT" push origin main "$tag"

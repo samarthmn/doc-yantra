@@ -1,0 +1,6 @@
+title = "Footer with PAGE / NUMPAGES fields"
+tier = "core"
+ssim_threshold = 0.95
+max_page_count_delta = 0
+word_version = "TBD (fill on export)"
+notes = "Synthetic fixture — export ground-truth.pdf from Word (human task H3)."

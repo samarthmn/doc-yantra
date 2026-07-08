@@ -1,0 +1,52 @@
+[package]
+name = "office-core"
+version = "0.0.5"            # keep in lockstep with pdf-core's current version line
+edition = "2024"
+rust-version = "1.89"
+description = "DocKosha proprietary Office->PDF engine: DOCX/PPTX/XLSX layout and PDF emission, pure Rust"
+publish = false
+
+[lib]
+name = "office_core"
+
+[[bin]]
+name = "officecore"
+path = "src/bin/officecore.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "bundled-fonts"]
+cli = ["dep:clap"]
+# Embeds office-core/fonts/**.ttf via include_bytes! for zero-config native + Node wasm.
+bundled-fonts = []
+# wasm32 builds: JS crypto for any randomness pulled in transitively.
+wasm = []
+
+[dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+roxmltree = "0.20"
+ttf-parser = "0.25"
+subsetter = "0.2"
+unicode-linebreak = "0.1"
+unicode-bidi = "0.3"
+pdf-writer = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+miniz_oxide = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+
+[dev-dependencies]
+serial_test = "3"
+
+# The fidelity harness is a workspace member but NOT a default member: plain
+# `cargo test`/`clippy`/wasm-check operate on office-core only (the harness needs
+# pdfium, which CI does not provide), while `cargo test -p fidelity` opts in.
+[workspace]
+members = ["fidelity"]
+default-members = ["."]
+# The wasm crate is built standalone by wasm/build.sh (wasm-pack), not as a
+# workspace member.
+exclude = ["wasm"]

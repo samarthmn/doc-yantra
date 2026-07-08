@@ -102,6 +102,38 @@ The package has two entry points:
 | --- | --- | --- |
 | `@samarthmn/doc-yantra` | Node (CJS) | watermark, merge, csv/md/text → PDF, validate (1.7MB) |
 | `@samarthmn/doc-yantra/web` | Browser (ESM) | Zone 1 for client-side previews; call `await mod.default(wasmUrl)` first and serve `web/pdf_core_wasm_bg.wasm` yourself |
+| `@samarthmn/doc-yantra-office` | Node (CJS) | **Office → PDF**: `office_profile()`, `office_to_pdf()`, `register_font()` |
+| `@samarthmn/doc-yantra-office/web` | Browser (ESM) | same API for in-browser conversion |
+
+### Office package (`@samarthmn/doc-yantra-office`)
+
+Same registry, token, and `.npmrc` scope flow as `@samarthmn/doc-yantra` (same
+GitHub owner). Both packages publish together on each `0.0.*` tag, so pin them to
+the same version.
+
+```js
+const office = require("@samarthmn/doc-yantra-office");
+
+// Router gate — profile() NEVER throws for well-formed input; container
+// failures serialize into the JSON (supported:false + reason code).
+const profile = JSON.parse(office.office_profile(bytes, "docx"));
+if (profile.supported) {
+  const pdf = office.office_to_pdf(bytes, "docx"); // Uint8Array (%PDF-…)
+}
+```
+
+**Stable API surface DocKosha depends on:**
+
+- `office_to_pdf` throws a `JsError` whose message begins with
+  `"unsupported:<code>: "` for envelope misses (e.g. `unsupported:footnotes: …`),
+  `"invalid: …"` / `"internal: …"` otherwise. Parse the `unsupported:` prefix to
+  record the fallback reason.
+- Inputs over **50 MiB** are rejected before copying; defer them to the DocYantra
+  service.
+- Trap contract is identical to `@samarthmn/doc-yantra`: `JsError` is
+  recoverable; a panic/OOM traps and the instance must be discarded.
+
+DocKosha's adapter is `src/server/officeCoreWasm.ts` (mirrors `pdfCoreWasm.ts`).
 
 Office → PDF (docx/pptx/xlsx + legacy doc/ppt/xls/xlsm) is **not** part of this
 package — it is handled by the DocYantra LibreOffice HTTP service.

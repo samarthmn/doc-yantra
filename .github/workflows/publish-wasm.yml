@@ -48,3 +48,22 @@ jobs:
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # office-core rides the same 0.0.* tags. Its publish runs after pdf-core's
+      # and is independent — a failure here does not un-publish pdf-core; re-run
+      # the job to retry (npm refuses double-publish, so we guard with a skip).
+      - name: Build office-core wasm package
+        working-directory: office-core/wasm
+        run: ./build.sh
+
+      - name: Publish office package to GitHub Packages
+        working-directory: office-core/wasm/pkg
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@samarthmn/doc-yantra-office@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "@samarthmn/doc-yantra-office@${VERSION} already published — skipping."
+          else
+            npm publish
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

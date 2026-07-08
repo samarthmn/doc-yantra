@@ -45,6 +45,21 @@ without reshaping data.
 | `@samarthmn/doc-yantra` | Node CJS (`--target nodejs`) | watermark/merge/csv/md/text/validate (~1.7 MB) |
 | `@samarthmn/doc-yantra/web` | Browser ESM (`--target web`) | Zone 1 for in-browser previews |
 
+## office-core — the Office → PDF engine (separate crate)
+
+`office-core/` is a second standalone crate: pure-Rust DOCX/PPTX/XLSX → PDF, with
+its own **fail-closed envelope** (`convert()` returns `Unsupported{code}` off-
+envelope) and **DocProfile** router contract (`profile()` predicts the verdict
+without layout). It reuses none of pdf-core's code and does not modify it (the
+fidelity harness consumes pdf-core read-only for rasterization). It compiles to
+wasm (`--no-default-features --features wasm,bundled-fonts`) and ships as
+`@samarthmn/doc-yantra-office`. See `office-core/README.md`.
+
+**Versioning now spans four Cargo.tomls** kept in lockstep by
+`pdf-core/scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
+`office-core/Cargo.toml`, `office-core/wasm/Cargo.toml`. One `0.0.*` tag publishes
+both npm packages via `publish-wasm.yml`.
+
 ## Build / test / run commands
 
 Rust engine (`cd pdf-core`):
