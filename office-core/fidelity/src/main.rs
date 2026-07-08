@@ -313,3 +313,59 @@ fn html(reports: &[CaseReport]) -> String {
         <table><tr><th></th><th>case</th><th>tier</th><th>SSIM</th><th>diff</th><th>pages</th></tr>{rows}</table>"
     )
 }
+
+#[cfg(test)]
+mod roundtrip {
+    //! End-to-end text round-trip: convert known text with office-core, then
+    //! extract it back through pdfium. Fails if the ToUnicode CMap or glyph→CID
+    //! subset mapping is wrong (extracted text would be garbled/empty).
+
+    use office_core::testkit::minimal_docx;
+    use office_core::{ConvertOptions, OfficeFormat, convert};
+
+    #[test]
+    fn docx_text_round_trips_through_pdf() {
+        let phrase = "Roundtrip Verification Alpha Bravo Charlie";
+        let docx = minimal_docx(&format!(
+            "<w:p><w:r><w:t xml:space=\"preserve\">{phrase}</w:t></w:r></w:p>"
+        ));
+        let out =
+            convert(&docx, OfficeFormat::Docx, &ConvertOptions::default()).expect("convert docx");
+        let text = pdf_core::extract::extract_text(&out.pdf).expect("extract text");
+        for word in ["Roundtrip", "Verification", "Bravo", "Charlie"] {
+            assert!(
+                text.contains(word),
+                "word {word:?} missing from extracted text: {text:?}",
+            );
+        }
+    }
+
+    /// pptx/xlsx share the emitter; confirm their text is also selectable
+    /// (the DocKosha viewer's per-page text depends on it).
+    #[test]
+    fn pptx_and_xlsx_text_are_selectable() {
+        for (file, format, needle) in [
+            (
+                "../mock-files/pptx/file1.pptx",
+                OfficeFormat::Pptx,
+                "Dummy Document 1",
+            ),
+            (
+                "../mock-files/xlsx/file1.xlsx",
+                OfficeFormat::Xlsx,
+                "Column A",
+            ),
+        ] {
+            let Ok(bytes) = std::fs::read(file) else {
+                continue;
+            };
+            let out = convert(&bytes, format, &ConvertOptions::default())
+                .unwrap_or_else(|e| panic!("convert {file}: {e}"));
+            let text = pdf_core::extract::extract_text(&out.pdf).expect("extract text");
+            assert!(
+                text.contains(needle),
+                "{needle:?} missing from {file}: {text:?}",
+            );
+        }
+    }
+}
