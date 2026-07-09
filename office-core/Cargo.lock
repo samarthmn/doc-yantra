@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "office-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "clap",
  "image",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "csv",
  "image",

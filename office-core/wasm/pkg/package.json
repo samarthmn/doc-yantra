@@ -1,0 +1,35 @@
+{
+  "name": "@samarthmn/doc-yantra-office",
+  "description": "DocKosha office-core Office->PDF engine compiled to WebAssembly (Node/Vercel + browser)",
+  "version": "0.0.6",
+  "files": [
+    "office_core_wasm_bg.wasm",
+    "office_core_wasm.js",
+    "office_core_wasm.d.ts",
+    "web"
+  ],
+  "main": "office_core_wasm.js",
+  "types": "office_core_wasm.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samarthmn/doc-yantra.git"
+  },
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "exports": {
+    ".": {
+      "types": "./office_core_wasm.d.ts",
+      "require": "./office_core_wasm.js",
+      "default": "./office_core_wasm.js"
+    },
+    "./web": {
+      "types": "./web/office_core_wasm.d.ts",
+      "import": "./web/office_core_wasm.js",
+      "default": "./web/office_core_wasm.js"
+    },
+    "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
+    "./package.json": "./package.json"
+  }
+}
