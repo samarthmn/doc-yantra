@@ -158,7 +158,8 @@ fn shape_run(
 
     for piece in run.text.split_inclusive('\n') {
         let text = piece.trim_end_matches('\n');
-        let shaped = shape::shape(text, &metrics, size, 0.0);
+        // PowerPoint kerns text by default (DrawingML `kern` defaults to on).
+        let shaped = shape::shape(text, &metrics, size, 0.0, true);
         let chars: std::collections::HashMap<usize, char> = text.char_indices().collect();
         for g in &shaped.glyphs {
             let ch = chars.get(&g.cluster).copied().unwrap_or(' ');

@@ -200,7 +200,8 @@ fn render_cell_text(
         return;
     };
     let metrics = FaceMetrics::new(parsed);
-    let shaped = shape::shape(&text, &metrics, size, 0.0);
+    // Excel does not kern cell text.
+    let shaped = shape::shape(&text, &metrics, size, 0.0, false);
     let text_w = shaped.width_pt;
 
     let align = style.align.as_deref().unwrap_or(default_align);

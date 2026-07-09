@@ -324,6 +324,10 @@ pub struct RunProps {
     pub vert_align: Option<VertAlign>,
     /// Character spacing (tracking), points.
     pub spacing_pt: Option<f64>,
+    /// Font-kerning threshold in points (`w:kern`): pair kerning applies only when
+    /// this is set and the effective size is at least this value. Absent (the Word
+    /// default) means no automatic kerning.
+    pub kern_min_pt: Option<f64>,
     /// Right-to-left run.
     pub rtl: Option<bool>,
 }
@@ -431,6 +435,7 @@ impl RunProps {
             fonts: self.fonts.merge_over(&base.fonts),
             vert_align: self.vert_align.or(base.vert_align),
             spacing_pt: self.spacing_pt.or(base.spacing_pt),
+            kern_min_pt: self.kern_min_pt.or(base.kern_min_pt),
             rtl: self.rtl.or(base.rtl),
         }
     }
@@ -1553,6 +1558,15 @@ pub fn parse_run_props(rpr: Node) -> RunProps {
                 }
             }
             "spacing" => props.spacing_pt = parse_i64(attr(c, W, "val")).map(twip_to_pt),
+            // `w:kern` present enables kerning at sizes >= val (half-points → points);
+            // a missing val defaults to 0 (kern at any size).
+            "kern" => {
+                props.kern_min_pt = Some(
+                    parse_i64(attr(c, W, "val"))
+                        .map(half_point_to_pt)
+                        .unwrap_or(0.0),
+                )
+            }
             "rtl" => props.rtl = Some(toggle_child(c)),
             _ => {}
         }

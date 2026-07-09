@@ -123,7 +123,8 @@ pub fn build_label(
     let face = resolved.face?;
     let parsed = doc.fonts.face(face)?.parsed()?;
     let metrics = FaceMetrics::new(parsed);
-    let shaped = shape::shape(&mapped, &metrics, size, 0.0);
+    let kern = eff.kern_min_pt.is_some_and(|min| size >= min);
+    let shaped = shape::shape(&mapped, &metrics, size, 0.0, kern);
     if shaped.glyphs.is_empty() {
         return None;
     }

@@ -383,14 +383,25 @@ fn flatten_run(
     });
 
     let char_spacing = eff.spacing_pt.unwrap_or(0.0);
+    // Word only kerns runs carrying `w:kern` whose size clears the threshold; it is
+    // off by default. Kerning unconditionally narrows text and shifts line breaks.
+    let kern = eff.kern_min_pt.is_some_and(|min| size >= min);
     for content in &run.content {
         match content {
-            RunContent::Text(t) => shape_text(&metrics, t, size, char_spacing, &style, atoms),
+            RunContent::Text(t) => shape_text(&metrics, t, size, char_spacing, kern, &style, atoms),
             RunContent::Tab => atoms.push(Atom::Tab),
             RunContent::Break(k) => atoms.push(Atom::Break(*k)),
             RunContent::Symbol { font, char_code } => {
                 if let Some(ch) = matching::map_symbol_char(font, *char_code) {
-                    shape_text(&metrics, &ch.to_string(), size, char_spacing, &style, atoms);
+                    shape_text(
+                        &metrics,
+                        &ch.to_string(),
+                        size,
+                        char_spacing,
+                        kern,
+                        &style,
+                        atoms,
+                    );
                 }
             }
             RunContent::Drawing(d) => {
@@ -415,10 +426,11 @@ fn shape_text(
     text: &str,
     size: f64,
     char_spacing: f64,
+    kern: bool,
     style: &Rc<RunStyle>,
     atoms: &mut Vec<Atom>,
 ) {
-    let shaped = shape::shape(text, metrics, size, char_spacing);
+    let shaped = shape::shape(text, metrics, size, char_spacing, kern);
     let chars: HashMap<usize, char> = text.char_indices().collect();
     for g in &shaped.glyphs {
         let ch = chars.get(&g.cluster).copied().unwrap_or(' ');

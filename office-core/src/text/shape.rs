@@ -31,8 +31,16 @@ pub struct ShapedRun {
 }
 
 /// Shapes `text` with `metrics` at `size_pt`, applying `char_spacing_pt` to each
-/// glyph and kerning between adjacent glyphs.
-pub fn shape(text: &str, metrics: &FaceMetrics, size_pt: f64, char_spacing_pt: f64) -> ShapedRun {
+/// glyph and, when `kern` is set, pair kerning between adjacent glyphs. Word only
+/// kerns runs that carry `w:kern` (off by default), so the caller passes the
+/// resolved decision here rather than kerning unconditionally.
+pub fn shape(
+    text: &str,
+    metrics: &FaceMetrics,
+    size_pt: f64,
+    char_spacing_pt: f64,
+    kern: bool,
+) -> ShapedRun {
     let mut run = ShapedRun::default();
     let mut prev: Option<GlyphId> = None;
 
@@ -43,7 +51,7 @@ pub fn shape(text: &str, metrics: &FaceMetrics, size_pt: f64, char_spacing_pt: f
             continue;
         };
         // Fold kerning into the previous glyph's advance so x-positions are exact.
-        if let Some(p) = prev {
+        if let Some(p) = prev.filter(|_| kern) {
             let k = metrics.kern_pt(p, gid, size_pt);
             if k != 0.0 {
                 if let Some(last) = run.glyphs.last_mut() {
@@ -78,12 +86,33 @@ mod tests {
             return;
         };
         let metrics = FaceMetrics::new(face.parsed().unwrap());
-        let run = shape("Hi", &metrics, 12.0, 0.0);
+        let run = shape("Hi", &metrics, 12.0, 0.0, true);
         assert_eq!(run.glyphs.len(), 2);
         assert!(run.width_pt > 0.0);
         assert!(run.missing_glyphs.is_empty());
         // Clusters are byte offsets of each character.
         assert_eq!(run.glyphs[0].cluster, 0);
         assert_eq!(run.glyphs[1].cluster, 1);
+    }
+
+    /// Kerning must be gated: with `kern=false` a run is never narrower than with
+    /// `kern=true` (kerning only ever pulls glyphs together). Word leaves kerning
+    /// off by default, so this gate is what keeps line breaks matching Word.
+    #[test]
+    fn kerning_is_gated_and_never_widens() {
+        let db = FontDb::with_bundled();
+        let Some(face) = db.faces().first() else {
+            eprintln!("skipping: no bundled fonts vendored (human task H2)");
+            return;
+        };
+        let metrics = FaceMetrics::new(face.parsed().unwrap());
+        // Pairs like AV / To / Yo carry negative kerning in text faces.
+        let text = "AVAWAY To Yo Wa.";
+        let kerned = shape(text, &metrics, 24.0, 0.0, true).width_pt;
+        let unkerned = shape(text, &metrics, 24.0, 0.0, false).width_pt;
+        assert!(
+            kerned <= unkerned,
+            "kerning must not widen text: kerned={kerned} unkerned={unkerned}"
+        );
     }
 }
