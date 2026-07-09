@@ -317,3 +317,62 @@ fn list_counters_reset_on_shallower_level() {
     );
     assert!(text.contains("b)"), "second level-1 item is 'b)': {text:?}");
 }
+
+/// Y-S3: headers on a *mid-document* section must be profiled, not just the final
+/// section's. A two-section doc with Arabic (complex script) in the first
+/// section's header must fail closed; before the all-section union fix, that
+/// header escaped the profile entirely.
+#[test]
+fn mid_section_header_content_is_profiled() {
+    let ns = office_core::testkit::DOC_NAMESPACES;
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{ns}><w:body>
+        <w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/>
+          <w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>Section one</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Section two</w:t></w:r></w:p>
+        <w:sectPr><w:headerReference w:type="default" r:id="rIdH2"/>
+          <w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#
+    );
+    let hdr1 = format!(
+        r#"<?xml version="1.0"?><w:hdr{ns}><w:p><w:r><w:t>مرحبا بالعالم</w:t></w:r></w:p></w:hdr>"#
+    );
+    let hdr2 = format!(
+        r#"<?xml version="1.0"?><w:hdr{ns}><w:p><w:r><w:t>Header two</w:t></w:r></w:p></w:hdr>"#
+    );
+    let content_types = r#"<?xml version="1.0"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        <Override PartName="/word/header2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>"#;
+    let root_rels = r#"<?xml version="1.0"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>"#;
+    let doc_rels = r#"<?xml version="1.0"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        <Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/>
+        </Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", doc_rels.as_bytes()),
+        ("word/header1.xml", hdr1.as_bytes()),
+        ("word/header2.xml", hdr2.as_bytes()),
+    ]);
+    let prof = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(
+        !prof.supported,
+        "complex script in section 1's header must be caught"
+    );
+    assert!(
+        prof.reasons.iter().any(|r| r.code == UnsupportedCode::ComplexScript
+            || r.code == UnsupportedCode::RtlText),
+        "expected ComplexScript/RtlText, got {:?}",
+        prof.reasons
+    );
+}

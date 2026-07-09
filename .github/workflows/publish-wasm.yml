@@ -1,4 +1,4 @@
-name: Publish pdf-core-wasm
+name: Publish wasm packages
 
 # Publishes @samarthmn/doc-yantra to GitHub Packages when a version tag is
 # pushed, e.g.  git tag 0.0.3 && git push origin 0.0.3

@@ -93,6 +93,17 @@ impl PptxDoc {
             .find(|r| r.rel_type.ends_with("/officeDocument"))
             .map(|r| r.target)
             .unwrap_or_else(|| "ppt/presentation.xml".to_string());
+        // Reject a mismatched-format package (e.g. a .docx routed here): without
+        // this the main part parses to zero slides and we emit an invalid 0-page
+        // PDF. The main part's content type must be presentationml.
+        if !pkg
+            .content_type(&pres_part)
+            .is_some_and(|ct| ct.contains("presentationml"))
+        {
+            return Err(OfficeError::Invalid(
+                "main part is not a presentation".into(),
+            ));
+        }
         let presentation = parse_str(&pkg, &pres_part, Presentation::parse)?;
 
         let pres_rels = rel_map(&pkg, &pres_part);

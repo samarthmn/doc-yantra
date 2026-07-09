@@ -44,6 +44,10 @@ pub enum UnsupportedCode {
     OleObject,
     /// WordArt / preset text warp.
     WordArt,
+    /// A non-rectangular shape geometry (`prstGeom` other than `rect`, or
+    /// `custGeom`). v1 renders shape fills against their bounding box, so any
+    /// non-rect geometry would draw wrong; fail closed rather than degrade.
+    ShapeGeometry,
     /// An equation (`m:oMath`).
     Equation,
     /// A field instruction we neither evaluate nor have a cached result for.

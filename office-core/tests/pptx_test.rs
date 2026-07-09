@@ -2,10 +2,40 @@
 
 use office_core::layout::{Item, Page};
 use office_core::pptx::{PptxDoc, render_pptx};
-use office_core::{ConvertOptions, OfficeFormat, convert, profile};
+use office_core::testkit::zip_package;
+use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
 
 fn opts() -> ConvertOptions {
     ConvertOptions::default()
+}
+
+/// Builds a minimal one-slide `.pptx` whose slide's shape tree is `shapes`.
+fn minimal_pptx(shapes: &str) -> Vec<u8> {
+    let ct = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>"#;
+    let pres = r#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+    let pres_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>"#;
+    let slide = format!(
+        r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:sld>"#
+    );
+    zip_package(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("ppt/presentation.xml", pres.as_bytes()),
+        ("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        ("ppt/slides/slide1.xml", slide.as_bytes()),
+    ])
 }
 
 fn page_text(page: &Page) -> String {
@@ -101,4 +131,38 @@ fn pptx_profile_agrees_with_convert_on_mock_corpus() {
         checked += 1;
     }
     assert!(checked > 0, "no mock pptx files found");
+}
+
+/// Y-B1: non-rectangular geometry must fail closed. v1 draws shape fills against
+/// the bounding box, so an arrow/star/callout would render as a rectangle. A
+/// plain rect passes; every other preset and custGeom is unsupported, and since
+/// the router trusts profile(), convert() must fail closed too.
+#[test]
+fn pptx_non_rect_geometry_fails_closed() {
+    let rect = minimal_pptx(r#"<p:sp><p:spPr><a:prstGeom prst="rect"/></p:spPr></p:sp>"#);
+    assert!(
+        profile(&rect, OfficeFormat::Pptx).unwrap().supported,
+        "a rect-only deck must be supported"
+    );
+
+    for geom in [
+        r#"<a:prstGeom prst="star5"/>"#,
+        r#"<a:prstGeom prst="rightArrow"/>"#,
+        "<a:custGeom/>",
+    ] {
+        let deck = minimal_pptx(&format!("<p:sp><p:spPr>{geom}</p:spPr></p:sp>"));
+        let prof = profile(&deck, OfficeFormat::Pptx).unwrap();
+        assert!(!prof.supported, "{geom} should be unsupported");
+        assert!(
+            prof.reasons
+                .iter()
+                .any(|r| r.code == UnsupportedCode::ShapeGeometry),
+            "{geom} should report ShapeGeometry, got {:?}",
+            prof.reasons
+        );
+        assert!(
+            convert(&deck, OfficeFormat::Pptx, &opts()).is_err(),
+            "{geom}: convert must fail closed to match profile"
+        );
+    }
 }

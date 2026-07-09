@@ -43,6 +43,15 @@ impl XlsxDoc {
             .find(|r| r.rel_type.ends_with("/officeDocument"))
             .map(|r| r.target)
             .unwrap_or_else(|| "xl/workbook.xml".to_string());
+        // Reject a mismatched-format package (e.g. a .docx routed here): without
+        // this the main part parses to zero sheets and we emit an invalid 0-page
+        // PDF. The main part's content type must be spreadsheetml.
+        if !pkg
+            .content_type(&wb_part)
+            .is_some_and(|ct| ct.contains("spreadsheetml"))
+        {
+            return Err(OfficeError::Invalid("main part is not a workbook".into()));
+        }
         let workbook = parse(&pkg, &wb_part, Workbook::parse)?;
         let wb_rels = rel_map(&pkg, &wb_part);
 

@@ -23,6 +23,13 @@ pub fn emit(
     doc_id: [u8; 16],
     warnings: &mut Vec<Warning>,
 ) -> Result<Vec<u8>> {
+    // Defense in depth: a 0-page PDF is invalid per spec and treated as corrupt
+    // by viewers. The format converters already reject mismatched inputs before
+    // reaching here, so an empty page list is an internal invariant violation.
+    if laid.pages.is_empty() {
+        return Err(OfficeError::Internal("document produced no pages".into()));
+    }
+
     // 1. Collect used glyphs per face and subset.
     let used = collect_used_glyphs(laid);
     let mut subsets: BTreeMap<FaceId, EmbeddedFont> = BTreeMap::new();

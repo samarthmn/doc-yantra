@@ -215,7 +215,7 @@ fn profile_xlsx(bytes: &[u8]) -> Result<DocProfile> {
 }
 
 fn profile_pptx(bytes: &[u8]) -> Result<DocProfile> {
-    use crate::oxml::pml::{Fill, ShapeElem, TextBody, TextRun};
+    use crate::oxml::pml::{ShapeElem, TextBody, TextRun};
     use crate::pptx::PptxDoc;
 
     let doc = PptxDoc::open(bytes, &crate::ConvertOptions::default())?;
@@ -259,23 +259,40 @@ fn profile_pptx(bytes: &[u8]) -> Result<DocProfile> {
         shape_count: &mut u32,
     ) {
         for elem in elems {
-            *shape_count += 1;
             match elem {
+                // A group is not itself a drawn shape; recurse without counting it
+                // so stats.shapes reflects leaf shapes only.
+                ShapeElem::Group { children, .. } => {
+                    walk(children, profile, scripts, fonts, minor, shape_count)
+                }
                 ShapeElem::Shape { props, text, .. } => {
-                    if matches!(props.fill, Some(Fill::LinearGradient { .. })) && props.custom_geom
+                    *shape_count += 1;
+                    // v1 renders shape fills against the bounding box (the guide-
+                    // formula evaluator is deferred), so only a plain `rect` draws
+                    // correctly. Fail closed on any other geometry rather than
+                    // silently drawing an arrow/star/callout as a rectangle.
+                    if props.custom_geom {
+                        profile.add_reason_deduped(UnsupportedCode::ShapeGeometry, "custGeom");
+                    } else if let Some(preset) = &props.preset
+                        && preset != "rect"
                     {
-                        // gradient custom geometry is documented-lossy, not fatal
+                        profile.add_reason_deduped(
+                            UnsupportedCode::ShapeGeometry,
+                            format!("preset:{preset}"),
+                        );
                     }
                     if let Some(body) = text {
                         walk_body(body, scripts, fonts, minor);
                     }
                 }
                 ShapeElem::Picture { drawing, .. } => {
+                    *shape_count += 1;
                     if drawing.cropped {
                         profile.add_reason_deduped(UnsupportedCode::ImageCrop, "a:srcRect");
                     }
                 }
                 ShapeElem::Table { table, .. } => {
+                    *shape_count += 1;
                     for row in &table.rows {
                         for cell in &row.cells {
                             if let Some(b) = &cell.text {
@@ -284,10 +301,8 @@ fn profile_pptx(bytes: &[u8]) -> Result<DocProfile> {
                         }
                     }
                 }
-                ShapeElem::Group { children, .. } => {
-                    walk(children, profile, scripts, fonts, minor, shape_count)
-                }
                 ShapeElem::Unsupported(detail) => {
+                    *shape_count += 1;
                     let code = match detail.as_str() {
                         "chart" => UnsupportedCode::Chart,
                         "smartart" => UnsupportedCode::SmartArt,
@@ -347,15 +362,18 @@ fn profile_docx(bytes: &[u8]) -> Result<DocProfile> {
     let main_rels = rel_map(&pkg, &main);
     collector.walk_blocks(&document.body, &pkg, &main_rels, &mut profile);
 
-    // Headers/footers.
+    // Headers/footers. A parse failure here is not swallowed: an unsupported or
+    // malformed header must surface (as it would during layout), not silently
+    // pass the profile gate.
     for part in header_footer_parts(&pkg, &document) {
-        if let Some(bytes) = pkg.part(&part)
-            && let Ok(text) = std::str::from_utf8(bytes)
-            && let Ok(blocks) = wml::parse_hdr_ftr(text)
-        {
-            let hf_rels = rel_map(&pkg, &part);
-            collector.walk_blocks(&blocks, &pkg, &hf_rels, &mut profile);
-        }
+        let Some(bytes) = pkg.part(&part) else {
+            continue; // a dangling reference is skipped by layout too
+        };
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| OfficeError::Invalid(format!("header/footer {part}: {e}")))?;
+        let blocks = wml::parse_hdr_ftr(text)?;
+        let hf_rels = rel_map(&pkg, &part);
+        collector.walk_blocks(&blocks, &pkg, &hf_rels, &mut profile);
     }
 
     // Reasons from parse-time document flags + settings.
@@ -677,13 +695,27 @@ fn header_footer_parts(pkg: &Package, document: &wml::Document) -> Vec<String> {
         return Vec::new();
     };
     let rels = rel_map(pkg, &main);
-    let sect = &document.final_sect;
+    // Union across every section, not just the final one: a mid-document section
+    // break (a paragraph's `sect_break`) carries its own headers/footers, whose
+    // content (a chart, complex script, a missing font) must still be profiled.
+    let mut sects: Vec<&wml::SectPr> = document
+        .body
+        .iter()
+        .filter_map(|b| match b {
+            wml::BlockContent::Paragraph(p) => p.sect_break.as_ref(),
+            _ => None,
+        })
+        .collect();
+    sects.push(&document.final_sect);
+
     let mut parts = Vec::new();
-    for hf in sect.header_refs.iter().chain(sect.footer_refs.iter()) {
-        if let Some(target) = rels.get(&hf.rel_id)
-            && !parts.contains(target)
-        {
-            parts.push(target.clone());
+    for sect in sects {
+        for hf in sect.header_refs.iter().chain(sect.footer_refs.iter()) {
+            if let Some(target) = rels.get(&hf.rel_id)
+                && !parts.contains(target)
+            {
+                parts.push(target.clone());
+            }
         }
     }
     parts
@@ -765,13 +797,41 @@ mod tests {
     }
 
     #[test]
-    fn all_formats_profile_without_panicking() {
-        // Every format now has a profiler; a docx opened as another format just
-        // yields an empty (supported) verdict rather than FormatNotImplemented.
+    fn profile_rejects_mismatched_format_content() {
+        // Every format has a profiler, so this never panics. A docx profiled as
+        // its own format succeeds; profiled as pptx/xlsx it fails closed with
+        // Invalid (it previously returned an empty "supported" verdict, which let
+        // convert() emit an invalid 0-page PDF).
         let bytes = minimal_docx("<w:p/>");
-        for fmt in [OfficeFormat::Docx, OfficeFormat::Pptx, OfficeFormat::Xlsx] {
-            let p = run(&bytes, fmt).expect("profile");
-            assert_eq!(p.engine, "office-core");
+        assert_eq!(
+            run(&bytes, OfficeFormat::Docx)
+                .expect("profile docx")
+                .engine,
+            "office-core"
+        );
+        for fmt in [OfficeFormat::Pptx, OfficeFormat::Xlsx] {
+            assert!(
+                matches!(run(&bytes, fmt), Err(OfficeError::Invalid(_))),
+                "expected Invalid for {fmt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_rejects_mismatched_format_content() {
+        // A docx handed to the pptx/xlsx path used to open with zero slides/sheets
+        // and emit an invalid 0-page PDF. It must now fail closed: the document
+        // converts as docx, but the mismatched formats return Invalid rather than
+        // a broken file.
+        use crate::{ConvertOptions, convert};
+        let bytes = minimal_docx("<w:p><w:r><w:t>hi</w:t></w:r></w:p>");
+        assert!(convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()).is_ok());
+        for fmt in [OfficeFormat::Pptx, OfficeFormat::Xlsx] {
+            let err = convert(&bytes, fmt, &ConvertOptions::default()).unwrap_err();
+            assert!(
+                matches!(err, OfficeError::Invalid(_)),
+                "expected Invalid for {fmt:?}, got {err:?}"
+            );
         }
     }
 
