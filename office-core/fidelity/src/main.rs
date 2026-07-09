@@ -232,6 +232,20 @@ fn score_case(
             report.note = format!("rasterization failed on page {i}");
             return report;
         };
+        // A raster-size mismatch means the two PDFs use different page geometry
+        // (e.g. A4 vs Letter). SSIM of differently-sized images is meaningless
+        // (degenerate 0.0); report the mismatch explicitly so it reads as a
+        // corpus/ground-truth page-size problem, not a rendering catastrophe.
+        if ours.width() != truth.width() || ours.height() != truth.height() {
+            report.note = format!(
+                "page {i} raster {}x{} vs {}x{} — page-size mismatch; re-export ground truth from the current source.docx",
+                ours.width(),
+                ours.height(),
+                truth.width(),
+                truth.height()
+            );
+            return report;
+        }
         let s = ssim::score_pages(&ours, &truth);
         min_ssim = min_ssim.min(s.ssim);
         max_diff = max_diff.max(s.diff_pct);

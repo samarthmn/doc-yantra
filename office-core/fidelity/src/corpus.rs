@@ -2,7 +2,7 @@
 //! customer content) plus their manifests. `seed` (re)generates the sources;
 //! a human then exports Word ground truths (human task H3).
 
-use office_core::testkit::{DOC_NAMESPACES, minimal_docx, zip_package};
+use office_core::testkit::{DOC_NAMESPACES, zip_package};
 use std::path::Path;
 
 /// One corpus case.
@@ -19,15 +19,77 @@ pub struct Case {
     pub docx: Vec<u8>,
 }
 
-/// Wraps body XML in a section with a footer that carries PAGE/NUMPAGES fields.
+/// A4 page (210×297 mm) with 1" margins, pinned on every case so office-core and
+/// Word render the same page geometry rather than each using its own default
+/// (office-core → US Letter; an A4-locale Word → A4). Twips: 11906×16838.
+const A4_PGSZ_MAR: &str = r#"<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>"#;
+
+/// `word/styles.xml` pinning document defaults (font, size, paragraph spacing) so
+/// neither renderer falls back to its built-in Normal style — Word's is 1.08 line
+/// with 8pt after, office-core's is single with 0. Pinning explicit single
+/// spacing / 0 after makes both agree (and keeps office-core's output stable).
+fn styles_xml() -> String {
+    format!(
+        r#"<?xml version="1.0"?><w:styles{ns}><w:docDefaults>
+<w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault>
+<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>
+</w:docDefaults></w:styles>"#,
+        ns = DOC_NAMESPACES
+    )
+}
+
+/// `[Content_Types].xml` registering the styles part, plus any extra `<Override>`
+/// lines a case needs (footer, numbering).
+fn content_types(extra_overrides: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+{extra_overrides}</Types>"#
+    )
+}
+
+/// `word/_rels/document.xml.rels` linking the styles part (id `rIdS`) plus any
+/// extra relationships. Word requires these to load styles/numbering/footer;
+/// office-core resolves styles by convention but valid rels keep the package sound.
+fn document_rels(extra_rels: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rIdS" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+{extra_rels}</Relationships>"#
+    )
+}
+
+/// A deterministic single-body `.docx`: the body XML followed by an explicit A4
+/// section, with a pinned `styles.xml`. Replaces `minimal_docx` for corpus cases
+/// so fixtures never depend on a renderer's implicit page-size / spacing defaults.
+fn det_docx(body: &str) -> Vec<u8> {
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{ns}><w:body>{body}<w:sectPr>{sect}</w:sectPr></w:body></w:document>"#,
+        ns = DOC_NAMESPACES,
+        sect = A4_PGSZ_MAR
+    );
+    zip_package(&[
+        ("[Content_Types].xml", content_types("").as_bytes()),
+        ("_rels/.rels", ROOT_RELS.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", document_rels("").as_bytes()),
+        ("word/styles.xml", styles_xml().as_bytes()),
+    ])
+}
+
+/// Wraps body XML in a section with a footer that carries PAGE/NUMPAGES fields
+/// (A4, with the pinned `styles.xml`).
 fn docx_with_footer(body: &str) -> Vec<u8> {
     let document = format!(
         r#"<?xml version="1.0"?><w:document{ns}><w:body>{body}
-        <w:sectPr><w:footerReference w:type="default" r:id="rId1"/>
-        <w:pgSz w:w="12240" w:h="15840"/>
-        <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>
-        </w:sectPr></w:body></w:document>"#,
-        ns = DOC_NAMESPACES
+        <w:sectPr><w:footerReference w:type="default" r:id="rId1"/>{sect}</w:sectPr></w:body></w:document>"#,
+        ns = DOC_NAMESPACES,
+        sect = A4_PGSZ_MAR
     );
     let footer = format!(
         r#"<?xml version="1.0"?><w:ftr{ns}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>
@@ -38,29 +100,25 @@ fn docx_with_footer(body: &str) -> Vec<u8> {
         </w:p></w:ftr>"#,
         ns = DOC_NAMESPACES
     );
+    let ct = content_types(
+        r#"<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>"#,
+    );
+    let rels = document_rels(
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>"#,
+    );
     zip_package(&[
-        ("[Content_Types].xml", CT_WITH_FOOTER.as_bytes()),
+        ("[Content_Types].xml", ct.as_bytes()),
         ("_rels/.rels", ROOT_RELS.as_bytes()),
         ("word/document.xml", document.as_bytes()),
-        ("word/_rels/document.xml.rels", FOOTER_RELS.as_bytes()),
+        ("word/_rels/document.xml.rels", rels.as_bytes()),
+        ("word/styles.xml", styles_xml().as_bytes()),
         ("word/footer1.xml", footer.as_bytes()),
     ])
 }
 
-const CT_WITH_FOOTER: &str = r#"<?xml version="1.0"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
-</Types>"#;
 const ROOT_RELS: &str = r#"<?xml version="1.0"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>"#;
-const FOOTER_RELS: &str = r#"<?xml version="1.0"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
 </Relationships>"#;
 
 /// Builds every corpus case.
@@ -84,14 +142,14 @@ pub fn cases() -> Vec<Case> {
         "Plain paragraphs",
         "core",
         0.97,
-        minimal_docx(&format!("{}{}{}", para(&lorem), para(&lorem), para(&lorem))),
+        det_docx(&format!("{}{}{}", para(&lorem), para(&lorem), para(&lorem))),
     );
     add(
         "run-formatting-matrix",
         "Run formatting: bold/italic/underline/strike/color/size",
         "core",
         0.96,
-        minimal_docx(
+        det_docx(
             r#"<w:p>
               <w:r><w:rPr><w:b/></w:rPr><w:t>Bold </w:t></w:r>
               <w:r><w:rPr><w:i/></w:rPr><w:t>Italic </w:t></w:r>
@@ -106,7 +164,7 @@ pub fn cases() -> Vec<Case> {
         "Justified paragraph",
         "core",
         0.95,
-        minimal_docx(&format!(
+        det_docx(&format!(
             r#"<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p>"#,
             lorem.repeat(3)
         )),
@@ -116,7 +174,7 @@ pub fn cases() -> Vec<Case> {
         "Font substitution: Calibri/Cambria/Arial/Times",
         "core",
         0.94,
-        minimal_docx(
+        det_docx(
             r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri"/></w:rPr><w:t>Calibri </w:t></w:r>
               <w:r><w:rPr><w:rFonts w:ascii="Cambria"/></w:rPr><w:t>Cambria </w:t></w:r>
               <w:r><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr><w:t>Arial </w:t></w:r>
@@ -128,21 +186,21 @@ pub fn cases() -> Vec<Case> {
         "Fixed-layout table with borders",
         "core",
         0.95,
-        minimal_docx(&bordered_table(3, 3)),
+        det_docx(&bordered_table(3, 3)),
     );
     add(
         "table-merges",
         "Table with gridSpan and vMerge",
         "core",
         0.94,
-        minimal_docx(MERGE_TABLE),
+        det_docx(MERGE_TABLE),
     );
     add(
         "table-nested",
         "Nested table inside a cell",
         "extended",
         0.93,
-        minimal_docx(NESTED_TABLE),
+        det_docx(NESTED_TABLE),
     );
     add(
         "lists-multilevel",
@@ -163,7 +221,7 @@ pub fn cases() -> Vec<Case> {
         "Tab stops",
         "extended",
         0.94,
-        minimal_docx(
+        det_docx(
             r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="8640"/></w:tabs></w:pPr>
               <w:r><w:t>Left</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>Right</w:t></w:r></w:p>"#,
         ),
@@ -173,7 +231,7 @@ pub fn cases() -> Vec<Case> {
         "Exact and at-least line spacing",
         "extended",
         0.94,
-        minimal_docx(
+        det_docx(
             r#"<w:p><w:pPr><w:spacing w:line="480" w:lineRule="auto"/></w:pPr><w:r><w:t>Double spaced line one and a fairly long continuation to force wrapping across the page width.</w:t></w:r></w:p>"#,
         ),
     );
@@ -196,7 +254,7 @@ pub fn cases() -> Vec<Case> {
         "Long document pagination stability",
         "core",
         0.95,
-        minimal_docx(&para(&lorem).repeat(120)),
+        det_docx(&para(&lorem).repeat(120)),
     );
 
     cases
@@ -271,20 +329,22 @@ fn numbered_list_docx() -> Vec<u8> {
         <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Sub a</w:t></w:r></w:p>
         <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Sub b</w:t></w:r></w:p>
         <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Third</w:t></w:r></w:p>
-        </w:body></w:document>"#,
-        ns = DOC_NAMESPACES
+        <w:sectPr>{sect}</w:sectPr></w:body></w:document>"#,
+        ns = DOC_NAMESPACES,
+        sect = A4_PGSZ_MAR
     );
-    let ct = r#"<?xml version="1.0"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
-</Types>"#;
+    let ct = content_types(
+        r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#,
+    );
+    let rels = document_rels(
+        r#"<Relationship Id="rIdN" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#,
+    );
     zip_package(&[
         ("[Content_Types].xml", ct.as_bytes()),
         ("_rels/.rels", ROOT_RELS.as_bytes()),
         ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", rels.as_bytes()),
+        ("word/styles.xml", styles_xml().as_bytes()),
         ("word/numbering.xml", numbering.as_bytes()),
     ])
 }
@@ -294,24 +354,19 @@ fn hyperlink_docx() -> Vec<u8> {
         r#"<?xml version="1.0"?><w:document{ns}><w:body>
         <w:p><w:r><w:t xml:space="preserve">Visit </w:t></w:r>
         <w:hyperlink r:id="rId2"><w:r><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr><w:t>example.com</w:t></w:r></w:hyperlink></w:p>
-        </w:body></w:document>"#,
-        ns = DOC_NAMESPACES
+        <w:sectPr>{sect}</w:sectPr></w:body></w:document>"#,
+        ns = DOC_NAMESPACES,
+        sect = A4_PGSZ_MAR
     );
-    let doc_rels = r#"<?xml version="1.0"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>
-</Relationships>"#;
-    let ct = r#"<?xml version="1.0"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>"#;
+    let rels = document_rels(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>"#,
+    );
     zip_package(&[
-        ("[Content_Types].xml", ct.as_bytes()),
+        ("[Content_Types].xml", content_types("").as_bytes()),
         ("_rels/.rels", ROOT_RELS.as_bytes()),
         ("word/document.xml", document.as_bytes()),
-        ("word/_rels/document.xml.rels", doc_rels.as_bytes()),
+        ("word/_rels/document.xml.rels", rels.as_bytes()),
+        ("word/styles.xml", styles_xml().as_bytes()),
     ])
 }
 
