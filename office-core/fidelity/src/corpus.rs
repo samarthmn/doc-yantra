@@ -311,6 +311,7 @@ const NESTED_TABLE: &str = r#"<w:tbl>
     <w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>
       <w:tr><w:tc><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr>
     </w:tbl>
+    <w:p/>
   </w:tc></w:tr>
 </w:tbl>"#;
 
