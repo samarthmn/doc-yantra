@@ -1,7 +1,7 @@
 {
   "name": "@samarthmn/doc-yantra",
   "description": "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel + browser)",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "files": [
     "pdf_core_wasm_bg.wasm",
     "pdf_core_wasm.js",

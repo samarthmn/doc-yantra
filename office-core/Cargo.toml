@@ -1,6 +1,6 @@
 [package]
 name = "office-core"
-version = "0.0.6"            # keep in lockstep with pdf-core's current version line
+version = "0.0.7"            # keep in lockstep with pdf-core's current version line
 edition = "2024"
 rust-version = "1.89"
 description = "DocKosha proprietary Office->PDF engine: DOCX/PPTX/XLSX layout and PDF emission, pure Rust"
