@@ -33,7 +33,11 @@ fn styles_xml() -> String {
         r#"<?xml version="1.0"?><w:styles{ns}><w:docDefaults>
 <w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault>
 <w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>
-</w:docDefaults></w:styles>"#,
+</w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>
+<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style>
+</w:styles>"#,
         ns = DOC_NAMESPACES
     )
 }
