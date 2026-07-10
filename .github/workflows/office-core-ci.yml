@@ -59,14 +59,13 @@ jobs:
       - name: Fidelity SSIM unit tests
         run: cargo test -p fidelity
 
-      # Score the corpus only when Word ground truths exist (human task H3).
-      # continue-on-error until H4 declares the docx tier shippable — then flip
-      # to blocking by removing that line (plan: hyper-agent/office-engine).
+      # Word ground truths are committed for the DOCX corpus. This is a release
+      # signal, so core-case regressions must block the workflow.
       - name: Fidelity corpus (docx)
-        continue-on-error: true
         run: |
           if find ../fidelity-corpus -name ground-truth.pdf | grep -q .; then
             cargo run -p fidelity -- run --format docx
           else
-            echo "No ground truths yet — skipping corpus scoring (human task H3)."
+            echo "DOCX ground truths are required for the fidelity gate."
+            exit 1
           fi

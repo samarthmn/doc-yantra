@@ -14,7 +14,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnsupportedCode {
-    /// The format's converter is not implemented yet (pptx/xlsx before their tasks land).
+    /// A recognized format whose converter is unavailable in this engine build.
     FormatNotImplemented,
     /// A legacy binary format (`.doc`/`.ppt`/`.xls`, CFB container).
     LegacyFormat,
@@ -64,6 +64,10 @@ pub enum UnsupportedCode {
     UnknownElement,
     /// The input exceeds the in-process size guard.
     InputTooLarge,
+    /// The package decompresses past the entry/part/total budgets. A local
+    /// envelope miss to route to the compatibility service — legitimate large
+    /// documents can trip it, so it must never read as file corruption.
+    DecompressionLimit,
     /// The bytes are not a valid OOXML package.
     InvalidFile,
 }
@@ -79,7 +83,9 @@ pub enum OfficeError {
         /// Human-readable detail (e.g. the offending element name).
         detail: String,
     },
-    /// The input is malformed (not a zip, corrupt XML, zip-bomb guard tripped).
+    /// The input is malformed (not a zip, corrupt XML). Decompression-budget
+    /// hits are `Unsupported(DecompressionLimit)`, not `Invalid` — they are an
+    /// envelope miss, not corruption.
     #[error("invalid input: {0}")]
     Invalid(String),
     /// A font could not be parsed or resolved.

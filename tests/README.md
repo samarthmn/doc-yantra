@@ -6,7 +6,9 @@ DocKosha's suites use):
 
 | Layer | Location | Runner | What it proves |
 | --- | --- | --- | --- |
-| **npm package** (`@samarthmn/doc-yantra`) | `tests/package-features.test.mjs` | `node --test` | Every export of the built wasm package behaves correctly on real files. |
+| **PDF npm package** (`@samarthmn/doc-yantra`) | `tests/package-features.test.mjs` | `node --test` | Every PDF export of the built wasm package behaves correctly on real files. |
+| **Office npm package** (`@samarthmn/doc-yantra-office`) | `tests/office.test.mjs` | `node --test` | Profile, deterministic conversion, format coverage, size guard, and font registration work through the built package. |
+| **Release contract** | `tests/release-contract.test.mjs` | `node --test` | Both native crates, wasm crates, package manifests, and built engines carry the same immutable version. |
 | **Rust engine** (`pdf-core`) | `pdf-core/tests/*.rs` | `cargo test` | The crate's features, plus a real-file end-to-end pipeline. |
 
 ## Running the package suite (Node)
@@ -21,16 +23,21 @@ The suite loads the **built** package directly by path — no install, no
 bundler — mirroring a Node/Vercel consumer:
 
 ```js
-require("../pdf-core/wasm/pkg/pdf_core_wasm.js") // main module
+require("../pdf-core/wasm/pkg")
+require("../office-core/wasm/pkg")
 ```
 
-so `pdf-core/wasm/pkg/` must be built first (see `pdf-core/wasm/build.sh`).
+Both committed packages must exist. A missing or unloadable PDF or Office
+package fails this suite. A standalone source checkout that has not built
+Office wasm yet may run the Rust suites, but it is not release-ready until
+`office-core/wasm/build.sh` and this package suite pass.
 
 ### Notes on the invocation
 
-- The suite is ESM (`.mjs`, using `node:test`). There is **no root
+- The suite is ESM (`.mjs`, using `node:test`). `tests/all.test.mjs` imports
+  both package suites. There is **no root
   `package.json`** — the repo root intentionally has none. A tiny
-  `tests/package.json` (`{"type":"module","main":"package-features.test.mjs"}`)
+  `tests/package.json` (`{"type":"module","main":"all.test.mjs"}`)
   exists only so the `node --test tests/` **path form** resolves on Node 24+
   (which treats a positional path as a glob and no longer scans a bare
   directory).
@@ -56,8 +63,9 @@ Main module (`@samarthmn/doc-yantra`):
   `page_count == sum of inputs`, single-input passthrough, and error on an empty
   list / an invalid member.
 
-Office → PDF is **not** in this package — it is handled by the DocYantra
-LibreOffice HTTP service.
+Office → PDF is covered through the separate
+`@samarthmn/doc-yantra-office` package. Inputs outside its fail-closed envelope
+use the DocYantra LibreOffice compatibility service.
 
 ## Running the Rust suite
 

@@ -16,12 +16,13 @@ PDF **in-process** — no network hop, no Rust toolchain on the consumer side.
 
 ## 1. Publish a version (maintainers)
 
-The built package lives at `pdf-core/wasm/pkg` and **is committed** so consumers
-and CI never need Rust. Releases stay on the **0.0.x** line (only the patch
-increments). One script does the whole cut — it picks the next `x` from the
-`0.0.*` tags, bumps both Cargo.tomls in sync (`version()` returns the wasm
-crate's), rebuilds `pkg/`, commits, tags `0.0.x`, and pushes (requires Rust
-+ wasm-pack locally):
+The built packages live under each engine's `wasm/pkg` directory and are
+**committed** so consumers and CI never need Rust. Releases stay on the
+**0.0.x** line (only the patch increments). From a clean local `main` branch,
+one script picks the next `x`, bumps all four Cargo manifests in sync, rebuilds
+both packages, runs the Rust/package/fidelity gates, commits, tags `0.0.x`, and
+pushes (requires Rust; the build scripts pin wasm-pack 0.15.0 and use pnpm or
+npx when it is not installed globally):
 
 ```bash
 pdf-core/scripts/release.sh            # auto: next patch, commit, tag, push
@@ -32,10 +33,10 @@ DRY_RUN=1 pdf-core/scripts/release.sh  # preview only
 Published versions are immutable — the script refuses to reuse or go below an
 existing tag; always bump.
 
-The [`publish-wasm`](.github/workflows/publish-wasm.yml) GitHub Action publishes
-using the repo’s built-in `GITHUB_TOKEN` (needs `packages: write`, already set).
-You can also publish manually from `pdf-core/wasm/pkg` with `npm publish` after
-authenticating to GitHub Packages.
+The [`publish-wasm`](.github/workflows/publish-wasm.yml) GitHub Action repeats
+the engine, package, and fidelity gates, requires the tag to match both package
+versions, then publishes using the repo’s built-in `GITHUB_TOKEN` (needs
+`packages: write`, already set).
 
 ## 2. Create an install token
 
@@ -65,7 +66,8 @@ guard) and the install would 401.
   // resolves only that exact version) and bump it when a new patch ships.
   // Use the latest published patch — find it with:
   //   git tag --list '0.0.*' | sort -V | tail -1
-  "@samarthmn/doc-yantra": "0.0.x" // the latest tag, e.g. 0.0.3
+  "@samarthmn/doc-yantra": "0.0.7",
+  "@samarthmn/doc-yantra-office": "0.0.7"
 }
 ```
 
@@ -128,15 +130,17 @@ if (profile.supported) {
   `"unsupported:<code>: "` for envelope misses (e.g. `unsupported:footnotes: …`),
   `"invalid: …"` / `"internal: …"` otherwise. Parse the `unsupported:` prefix to
   record the fallback reason.
-- Inputs over **50 MiB** are rejected before copying; defer them to the DocYantra
-  service.
+- The built Node and browser glue reject inputs over **50 MiB** before copying
+  into wasm memory; defer them to the DocYantra compatibility service.
 - Trap contract is identical to `@samarthmn/doc-yantra`: `JsError` is
   recoverable; a panic/OOM traps and the instance must be discarded.
 
 DocKosha's adapter is `src/server/officeCoreWasm.ts` (mirrors `pdfCoreWasm.ts`).
 
-Office → PDF (docx/pptx/xlsx + legacy doc/ppt/xls/xlsm) is **not** part of this
-package — it is handled by the DocYantra LibreOffice HTTP service.
+Office → PDF is provided by the separate
+`@samarthmn/doc-yantra-office` package for supported DOCX/PPTX/XLSX/XLSM
+documents. Legacy formats and documents outside its fail-closed envelope use
+the DocYantra LibreOffice compatibility service.
 
 ```ts
 import * as pdf from "@samarthmn/doc-yantra";

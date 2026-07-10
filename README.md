@@ -6,10 +6,10 @@ This repo is DocKosha's **proprietary PDF engine** and its distributable
 | Path | What it is |
 | --- | --- |
 | `pdf-core/` | The Rust engine: merge, split, watermark, metadata, CSV/Markdown/text/image → PDF (Zone 1), plus pdfium-backed raster/extract/redact/forms (Zone 2, native-only). See [`pdf-core/README.md`](pdf-core/README.md). |
-| `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS — watermark/merge/csv/md, 1.7MB), `./web` (browser ESM — Zone 1 for in-browser previews, 1.7MB). Office→PDF is not in this package; the DocYantra LibreOffice service handles it. |
+| `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS — watermark/merge/csv/md, 1.7MB), `./web` (browser ESM — Zone 1 for client-side previews, 1.7MB). Office→PDF is provided by the separate Office package below; out-of-envelope files use the compatibility service. |
 | `office-core/` | The pure-Rust **Office → PDF** engine: DOCX/PPTX/XLSX layout + PDF emission, fail-closed envelope, DocProfile router contract. No LibreOffice/Chromium/pdfium in the conversion path. See [`office-core/README.md`](office-core/README.md). |
 | `office-core/wasm/` | The **`@samarthmn/doc-yantra-office`** npm package (Node CJS + browser ESM). `office_profile()` / `office_to_pdf()` / `register_font()`. DocKosha routes office conversions here engine-first, LibreOffice as fallback. |
-| `.github/workflows/publish-wasm.yml` | Publishes **both** packages to **GitHub Packages** when a `0.0.*` tag is pushed. |
+| `.github/workflows/publish-wasm.yml` | Rebuilds and tests both engines/packages, runs the blocking DOCX fidelity gate, validates the tag version, then publishes **both** packages to **GitHub Packages** for a `0.0.*` tag. |
 | `.github/workflows/office-core-ci.yml` | Lints/tests office-core + proves wasm-compilability on every change. |
 
 > **Not in this repo:** the DocYantra HTTP service (NestJS + Gotenberg —
@@ -25,11 +25,12 @@ Packages; consume the registry version (this is how DocKosha ships today):
 
 ```jsonc
 // app package.json — needs @samarthmn:registry in .npmrc + a read:packages token
-"@samarthmn/doc-yantra": "0.0.2"
+"@samarthmn/doc-yantra": "0.0.7",
+"@samarthmn/doc-yantra-office": "0.0.7"
 ```
 
 > Releases stay on the **0.0.x** line. On `0.0.x`, a caret pins the exact patch
-> (`^0.0.2` resolves only `0.0.2`), so pin the exact version and bump it in the
+> (`^0.0.7` resolves only `0.0.7`), so pin the exact version and bump it in the
 > consumer each time a new patch is published.
 
 For local engine iteration you can temporarily `link:` a sibling checkout
@@ -68,10 +69,11 @@ served by the DocYantra HTTP service instead.
 
 ## Releasing
 
-Releases stay on the **0.0.x** line — only the patch increments. One script does
-everything: it picks the next `x` from the `0.0.*` tags, bumps both
-Cargo.tomls, rebuilds + commits `pkg/`, tags `0.0.x`, and pushes (the
-publish-wasm workflow then publishes to GitHub Packages):
+Releases stay on the **0.0.x** line — only the patch increments. From a clean
+`main`, one script picks the next `x`, bumps all four engine/wasm manifests,
+rebuilds and tests both packages, runs the blocking DOCX fidelity corpus, then
+commits, tags, and atomically pushes `main` + `0.0.x`. The tag workflow repeats
+the gates before publishing to GitHub Packages:
 
 ```bash
 pdf-core/scripts/release.sh            # auto: next patch, commit, tag, push

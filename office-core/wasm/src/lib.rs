@@ -12,8 +12,8 @@ use office_core::{
 use std::sync::{Mutex, OnceLock};
 use wasm_bindgen::prelude::*;
 
-/// Oversized inputs are rejected before copying (the router should defer these
-/// to the HTTP service). Matches the DocKosha adapter's expectation.
+/// Defense-in-depth limit after wasm entry. The generated JS package adds the
+/// matching pre-copy guard so oversized input never reaches wasm allocation.
 const MAX_INPUT_BYTES: usize = 50 * 1024 * 1024;
 
 #[wasm_bindgen(start)]
@@ -43,7 +43,8 @@ fn format_for(extension: &str) -> Option<OfficeFormat> {
 
 /// The DocProfile JSON for a document. Never throws for well-formed calls;
 /// container-level failures serialize via `DocProfile::from_error`. Oversized
-/// input returns the `input_too_large` profile before copying.
+/// input returns the `input_too_large` profile. The generated JS package
+/// performs this check before copying the input into wasm memory.
 #[wasm_bindgen]
 pub fn office_profile(bytes: &[u8], extension: &str) -> Result<String, JsError> {
     let Some(format) = format_for(extension) else {

@@ -12,9 +12,15 @@ use std::io::{Cursor, Read};
 /// Maximum number of parts in a package (zip-bomb guard).
 const MAX_ENTRIES: usize = 10_000;
 /// Maximum decompressed size of any single part (zip-bomb guard).
-const MAX_PART_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PART_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum total decompressed size across all parts (zip-bomb guard).
-const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Small valid packages get this much decompression headroom.
+const MIN_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Larger packages may expand up to this multiple, capped by `MAX_TOTAL_BYTES`.
+const MAX_EXPANSION_RATIO: u64 = 200;
+/// Never reserve a whole part from untrusted ZIP size metadata up front.
+const MAX_INITIAL_PART_CAPACITY: u64 = 64 * 1024;
 
 /// OLE2 / CFB compound-file magic (`D0 CF 11 E0 A1 B1 1A E1`). Legacy binary
 /// Office formats and encrypted OOXML both use this container.
@@ -56,14 +62,83 @@ pub struct Package {
     ct_overrides: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PackageLimits {
+    max_entries: usize,
+    max_part_bytes: u64,
+    max_total_bytes: u64,
+}
+
+impl PackageLimits {
+    fn for_input(input_bytes: usize) -> PackageLimits {
+        let input_bytes = u64::try_from(input_bytes).unwrap_or(u64::MAX);
+        let proportional = input_bytes.saturating_mul(MAX_EXPANSION_RATIO);
+        PackageLimits {
+            max_entries: MAX_ENTRIES,
+            max_part_bytes: MAX_PART_BYTES,
+            max_total_bytes: proportional.clamp(MIN_TOTAL_BYTES, MAX_TOTAL_BYTES),
+        }
+    }
+}
+
+fn read_part_bounded<R: Read>(
+    reader: &mut R,
+    name: &str,
+    declared_size: u64,
+    max_part_bytes: u64,
+    remaining_total_bytes: u64,
+) -> Result<Vec<u8>> {
+    if declared_size > max_part_bytes {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::DecompressionLimit,
+            format!("part `{name}` is {declared_size} bytes (part size limit {max_part_bytes})"),
+        ));
+    }
+    if declared_size > remaining_total_bytes {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::DecompressionLimit,
+            format!("part `{name}` would exceed the package total size limit"),
+        ));
+    }
+
+    let read_limit = max_part_bytes.min(remaining_total_bytes);
+    let initial_capacity = declared_size.min(read_limit).min(MAX_INITIAL_PART_CAPACITY) as usize;
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    reader
+        .take(read_limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| OfficeError::Invalid(format!("failed reading `{name}`: {error}")))?;
+
+    let actual_size = bytes.len() as u64;
+    if actual_size > max_part_bytes {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::DecompressionLimit,
+            format!("part `{name}` exceeded the part size limit while decompressing"),
+        ));
+    }
+    if actual_size > remaining_total_bytes {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::DecompressionLimit,
+            format!("part `{name}` exceeded the package total size limit while decompressing"),
+        ));
+    }
+    Ok(bytes)
+}
+
 impl Package {
     /// Opens and validates an OOXML package from raw bytes.
     ///
     /// Fails with:
     /// - `Unsupported{Encrypted}` / `Unsupported{LegacyFormat}` for a CFB container
     ///   (encrypted OOXML vs legacy `.doc`/`.ppt`/`.xls`),
-    /// - `Invalid` for non-zip input or a tripped zip-bomb guard.
+    /// - `Unsupported{DecompressionLimit}` for a tripped entry/part/total
+    ///   decompression budget (an envelope miss routed to the fallback),
+    /// - `Invalid` for non-zip input.
     pub fn open(bytes: &[u8]) -> Result<Package> {
+        Self::open_with_limits(bytes, PackageLimits::for_input(bytes.len()))
+    }
+
+    fn open_with_limits(bytes: &[u8], limits: PackageLimits) -> Result<Package> {
         if bytes.len() >= 4 && bytes[0..4] == CFB_MAGIC {
             return Err(if looks_encrypted(bytes) {
                 OfficeError::unsupported(UnsupportedCode::Encrypted, "encrypted OOXML package")
@@ -78,11 +153,15 @@ impl Package {
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|e| OfficeError::Invalid(format!("not a valid zip/OPC package: {e}")))?;
 
-        if archive.len() > MAX_ENTRIES {
-            return Err(OfficeError::Invalid(format!(
-                "package has {} entries (limit {MAX_ENTRIES})",
-                archive.len()
-            )));
+        if archive.len() > limits.max_entries {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::DecompressionLimit,
+                format!(
+                    "package has {} entries (limit {})",
+                    archive.len(),
+                    limits.max_entries,
+                ),
+            ));
         }
 
         let mut parts = BTreeMap::new();
@@ -94,29 +173,17 @@ impl Package {
             if !file.is_file() {
                 continue;
             }
-            let size = file.size();
-            if size > MAX_PART_BYTES {
-                return Err(OfficeError::Invalid(format!(
-                    "part `{}` is {size} bytes (limit {MAX_PART_BYTES})",
-                    file.name()
-                )));
-            }
-            total = total.saturating_add(size);
-            if total > MAX_TOTAL_BYTES {
-                return Err(OfficeError::Invalid(format!(
-                    "package decompresses to over {MAX_TOTAL_BYTES} bytes"
-                )));
-            }
             let name = normalize_part(file.name());
-            let mut buf = Vec::with_capacity(size as usize);
-            file.read_to_end(&mut buf)
-                .map_err(|e| OfficeError::Invalid(format!("failed reading `{name}`: {e}")))?;
-            // Belt-and-suspenders: the declared size can lie; cap the actual read.
-            if buf.len() as u64 > MAX_PART_BYTES {
-                return Err(OfficeError::Invalid(format!(
-                    "part `{name}` exceeded the size limit while decompressing"
-                )));
-            }
+            let declared_size = file.size();
+            let remaining = limits.max_total_bytes.saturating_sub(total);
+            let buf = read_part_bounded(
+                &mut file,
+                &name,
+                declared_size,
+                limits.max_part_bytes,
+                remaining,
+            )?;
+            total = total.saturating_add(buf.len() as u64);
             parts.insert(name, buf);
         }
 
@@ -299,6 +366,49 @@ fn looks_encrypted(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_part_reader_uses_actual_bytes_not_declared_size() {
+        let mut reader = Cursor::new(vec![0_u8; 17]);
+        let err = read_part_bounded(&mut reader, "word/document.xml", 1, 16, 100)
+            .expect_err("actual bytes must trip the per-part budget");
+        assert!(matches!(
+            err,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::DecompressionLimit,
+                detail,
+            } if detail.contains("size limit")
+        ));
+    }
+
+    #[test]
+    fn bounded_part_reader_enforces_actual_aggregate_remaining_budget() {
+        let mut reader = Cursor::new(vec![0_u8; 9]);
+        let err = read_part_bounded(&mut reader, "word/document.xml", 1, 100, 8)
+            .expect_err("actual bytes must trip the aggregate budget");
+        assert!(matches!(
+            err,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::DecompressionLimit,
+                detail,
+            } if detail.contains("total size limit")
+        ));
+    }
+
+    /// A budget hit must present as an envelope miss (`unsupported`), never as
+    /// corruption — DocKosha routes it to the compatibility service.
+    #[test]
+    fn decompression_budget_is_an_envelope_miss_not_corruption() {
+        let err = read_part_bounded(
+            &mut Cursor::new(Vec::new()),
+            "word/document.xml",
+            u64::MAX,
+            16,
+            100,
+        )
+        .expect_err("declared size over the part budget must be rejected");
+        assert!(err.to_string().starts_with("unsupported"));
+    }
 
     #[test]
     fn part_name_normalization() {

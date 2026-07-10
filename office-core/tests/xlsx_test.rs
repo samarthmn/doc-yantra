@@ -24,11 +24,14 @@ fn page_text(page: &Page) -> String {
 fn converts_every_mock_xlsx_to_valid_pdf() {
     for sub in ["xlsx", "xlsm"] {
         let dir = std::path::Path::new("../mock-files").join(sub);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|error| {
+            panic!("required fixture directory {}: {error}", dir.display())
+        });
+        let mut checked = 0;
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("read fixture under {}: {error}", dir.display()))
+                .path();
             if path.extension().and_then(|e| e.to_str()) != Some(sub) {
                 continue;
             }
@@ -37,7 +40,9 @@ fn converts_every_mock_xlsx_to_valid_pdf() {
                 .unwrap_or_else(|e| panic!("convert {}: {e}", path.display()));
             assert!(out.pdf.starts_with(b"%PDF-"));
             assert!(out.page_count >= 1, "{} had 0 pages", path.display());
+            checked += 1;
         }
+        assert!(checked > 0, "no required {sub} fixtures found");
     }
 }
 
@@ -81,11 +86,14 @@ fn xlsx_profile_agrees_with_convert_on_mock_corpus() {
     let mut checked = 0;
     for sub in ["xlsx", "xlsm"] {
         let dir = std::path::Path::new("../mock-files").join(sub);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|error| {
+            panic!("required fixture directory {}: {error}", dir.display())
+        });
+        let mut checked_for_format = 0;
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("read fixture under {}: {error}", dir.display()))
+                .path();
             if path.extension().and_then(|e| e.to_str()) != Some(sub) {
                 continue;
             }
@@ -101,7 +109,9 @@ fn xlsx_profile_agrees_with_convert_on_mock_corpus() {
                 conv.err(),
             );
             checked += 1;
+            checked_for_format += 1;
         }
+        assert!(checked_for_format > 0, "no required {sub} fixtures found");
     }
     assert!(checked > 0, "no mock xlsx/xlsm files found");
 }

@@ -20,15 +20,22 @@ cd "$(dirname "$0")"
 OWNER="samarthmn"                    # GitHub owner (user/org) == npm scope
 REPO="doc-yantra"                    # GitHub repo name
 PKG_NAME="@samarthmn/doc-yantra"     # published npm package name
+WASM_PACK_VERSION="0.15.0"           # generated glue is committed; upgrades are deliberate
 # ────────────────────────────────────────────────────────────────────────────
 
 wasmpack() {
   if command -v wasm-pack >/dev/null 2>&1; then
+    if [[ "$(wasm-pack --version)" != "wasm-pack ${WASM_PACK_VERSION}" ]]; then
+      echo "error: expected wasm-pack ${WASM_PACK_VERSION}; found $(wasm-pack --version)." >&2
+      exit 1
+    fi
     wasm-pack "$@"
   elif command -v pnpm >/dev/null 2>&1; then
-    pnpm dlx wasm-pack "$@"
+    pnpm dlx "wasm-pack@${WASM_PACK_VERSION}" "$@"
+  elif command -v npx >/dev/null 2>&1; then
+    npx --yes "wasm-pack@${WASM_PACK_VERSION}" "$@"
   else
-    echo "error: need either 'wasm-pack' or 'pnpm' on PATH" >&2
+    echo "error: need wasm-pack ${WASM_PACK_VERSION}, pnpm, or npx on PATH" >&2
     exit 1
   fi
 }

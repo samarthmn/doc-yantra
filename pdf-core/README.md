@@ -118,12 +118,16 @@ pdfium resolution order: `PDFIUM_DYNAMIC_LIB_PATH` env var → crate-local
 accept the **same JSON payload** DocKosha sends to DocYantra's
 `/docyantra/pdf/merge`, so the app switches engines without reshaping data.
 
-```
-cd wasm && pnpm dlx wasm-pack build --release --target nodejs --scope samarthmn
+```bash
+cd wasm && ./build.sh
 ```
 
-The output (`wasm/pkg`, ~1.7MB `.wasm`) is installed in the app as
-`@samarthmn/doc-yantra` (pnpm `link:` dependency) and listed in
+The build script generates both Node and browser targets with pinned
+wasm-pack 0.15.0, stamps the package contract, and leaves the publishable output
+under `wasm/pkg`.
+
+The output (`wasm/pkg`, ~1.7MB `.wasm`) is published as
+`@samarthmn/doc-yantra`, pinned exactly by the app, and listed in
 `serverExternalPackages` in `next.config.ts` so Vercel file-traces the
 binary into each function. **`wasm/pkg` must be committed** — Vercel builds
 don't have a Rust toolchain. Rebuild + re-commit after changing Rust code.

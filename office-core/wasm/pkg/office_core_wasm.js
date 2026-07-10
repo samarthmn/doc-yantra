@@ -1,5 +1,46 @@
 /* @ts-self-types="./office_core_wasm.d.ts" */
 
+const DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1 = 50 * 1024 * 1024;
+
+function officeFormatForInputGuard(extension) {
+    switch (extension.toLowerCase()) {
+        case "docx": return "docx";
+        case "pptx": return "pptx";
+        case "xlsx":
+        case "xlsm": return "xlsx";
+        default: throw new Error(`invalid: unsupported extension ${extension}`);
+    }
+}
+
+function guardOfficeProfileInput(bytes, extension) {
+    if (bytes.byteLength <= DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1) return undefined;
+    const format = officeFormatForInputGuard(extension);
+    return JSON.stringify({
+        engine: "office-core",
+        engineVersion: version(),
+        format,
+        supported: false,
+        reasons: [{
+            code: "input_too_large",
+            detail: `${bytes.byteLength} bytes exceeds the in-process limit`,
+        }],
+        warnings: [],
+        stats: {
+            paragraphs: 0,
+            tables: 0,
+            images: 0,
+            fontsUsed: [],
+            fontsMissing: [],
+        },
+    });
+}
+
+function guardOfficeConversionInput(bytes, extension) {
+    if (bytes.byteLength <= DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1) return;
+    officeFormatForInputGuard(extension);
+    throw new Error(`invalid: input (${bytes.byteLength} bytes) exceeds the in-process limit`);
+}
+
 function init() {
     wasm.init();
 }
@@ -8,12 +49,15 @@ exports.init = init;
 /**
  * The DocProfile JSON for a document. Never throws for well-formed calls;
  * container-level failures serialize via `DocProfile::from_error`. Oversized
- * input returns the `input_too_large` profile before copying.
+ * input returns the `input_too_large` profile. The generated JS package
+ * performs this check before copying the input into wasm memory.
  * @param {Uint8Array} bytes
  * @param {string} extension
  * @returns {string}
  */
 function office_profile(bytes, extension) {
+    const oversizedProfile = guardOfficeProfileInput(bytes, extension);
+    if (oversizedProfile !== undefined) return oversizedProfile;
     let deferred4_0;
     let deferred4_1;
     try {
@@ -46,6 +90,7 @@ exports.office_profile = office_profile;
  * @returns {Uint8Array}
  */
 function office_to_pdf(bytes, extension) {
+    guardOfficeConversionInput(bytes, extension);
     const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(extension, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);

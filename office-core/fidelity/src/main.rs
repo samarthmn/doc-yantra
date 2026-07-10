@@ -1,8 +1,8 @@
 //! The fidelity harness runner: seed the corpus, score cases against Word
 //! ground truths, and emit JSON + HTML reports.
 //!
-//! Ground-truth PDFs are produced by a human (task H3); `run` scores only the
-//! cases that have one and `missing-ground-truth` lists the rest.
+//! Ground-truth PDFs are produced by a human. `run` is strict: every selected
+//! case needs a source, manifest, ground truth, and recorded Word provenance.
 
 mod corpus;
 mod ssim;
@@ -32,7 +32,7 @@ struct Cli {
 enum Cmd {
     /// (Re)generate the synthetic corpus `source.docx` files + manifests.
     Seed,
-    /// Score cases that have a ground truth; exit 1 if any core case fails.
+    /// Score the complete reference corpus and enforce its release thresholds.
     Run {
         #[arg(long, default_value = "docx")]
         format: String,
@@ -47,20 +47,13 @@ enum Cmd {
 
 #[derive(Deserialize)]
 struct Manifest {
-    #[serde(default)]
     title: String,
-    #[serde(default = "default_tier")]
     tier: String,
-    #[serde(default = "default_threshold")]
     ssim_threshold: f64,
     #[serde(default)]
     max_page_count_delta: u32,
-}
-fn default_tier() -> String {
-    "extended".into()
-}
-fn default_threshold() -> f64 {
-    0.97
+    word_version: String,
+    ground_truth_exported_at: String,
 }
 
 #[derive(Serialize)]
@@ -113,68 +106,316 @@ fn list_missing() -> Result<()> {
 fn case_dirs(format: &str) -> Result<Vec<PathBuf>> {
     let base = corpus_root().join(format);
     let mut dirs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&base) {
-        for e in entries.flatten() {
-            if e.path().is_dir() {
-                dirs.push(e.path());
-            }
+    let entries = std::fs::read_dir(&base)
+        .with_context(|| format!("read fidelity corpus {}", base.display()))?;
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("read entry under {}", base.display()))?
+            .path();
+        if path.is_dir() {
+            dirs.push(path);
         }
     }
     dirs.sort();
+    if dirs.is_empty() {
+        anyhow::bail!(
+            "no {format} fidelity corpus cases found under {}",
+            base.display()
+        );
+    }
     Ok(dirs)
 }
 
 fn run(format: &str, only: Option<&str>, _update_report: bool) -> Result<()> {
+    if format != "docx" {
+        anyhow::bail!(
+            "no {format} reference corpus is committed; refusing to claim fidelity coverage"
+        );
+    }
     let pages_dir = report_dir().join("pages");
     std::fs::create_dir_all(&pages_dir).ok();
 
     let mut reports = Vec::new();
-    let mut scored = 0;
-    for dir in case_dirs(format)? {
+    let selected: Vec<PathBuf> = case_dirs(format)?
+        .into_iter()
+        .filter(|dir| only.is_none_or(|only| dir.file_name().is_some_and(|name| name == only)))
+        .collect();
+    if selected.is_empty() {
+        anyhow::bail!("selected fidelity case {only:?} does not exist for {format}");
+    }
+
+    for dir in selected {
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        if let Some(only) = only
-            && only != name
-        {
-            continue;
+        let source = dir.join("source.docx");
+        if !source.is_file() {
+            anyhow::bail!("selected case {name} is missing {}", source.display());
         }
         let gt = dir.join("ground-truth.pdf");
-        if !gt.exists() {
-            continue; // reported by missing-ground-truth
+        if !gt.is_file() {
+            anyhow::bail!("selected case {name} is missing {}", gt.display());
         }
-        scored += 1;
-        let manifest: Manifest =
-            toml::from_str(&std::fs::read_to_string(dir.join("manifest.toml")).unwrap_or_default())
-                .unwrap_or_else(|_| Manifest {
-                    title: name.clone(),
-                    tier: default_tier(),
-                    ssim_threshold: default_threshold(),
-                    max_page_count_delta: 0,
-                });
+        let manifest_path = dir.join("manifest.toml");
+        let manifest_contents = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?;
+        let manifest: Manifest = toml::from_str(&manifest_contents)
+            .with_context(|| format!("parse {}", manifest_path.display()))?;
+        validate_manifest_contract(&manifest_path, &manifest)?;
+        validate_provenance(&manifest_path, &manifest, &gt)?;
         reports.push(score_case(&name, &dir, &gt, &manifest, &pages_dir));
     }
 
-    if scored == 0 {
-        println!(
-            "no ground truths present yet — run `fidelity seed` then export Word PDFs (human task H3)."
-        );
-        return Ok(());
-    }
-
     write_reports(&reports)?;
-    let failed_core: Vec<&CaseReport> = reports
+    enforce_thresholds(&reports, only.is_none())?;
+    let core_failures = reports
         .iter()
-        .filter(|r| r.tier == "core" && !r.pass)
-        .collect();
+        .filter(|report| report.tier == "core" && !report.pass)
+        .count();
+    let extended_total = reports
+        .iter()
+        .filter(|report| report.tier == "extended")
+        .count();
+    let extended_passes = reports
+        .iter()
+        .filter(|report| report.tier == "extended" && report.pass)
+        .count();
     println!(
-        "scored {} cases; {} core failures. report: {}",
+        "scored {} cases; {} core failures; {}/{} extended passed. report: {}",
         reports.len(),
-        failed_core.len(),
+        core_failures,
+        extended_passes,
+        extended_total,
         report_dir().join("index.html").display()
     );
-    if !failed_core.is_empty() {
-        std::process::exit(1);
+    Ok(())
+}
+
+fn validate_manifest_contract(path: &Path, manifest: &Manifest) -> Result<()> {
+    if manifest.title.trim().is_empty() {
+        anyhow::bail!("{} has an empty title", path.display());
+    }
+    if manifest.tier != "core" && manifest.tier != "extended" {
+        anyhow::bail!("{} has an unknown fidelity tier", path.display());
+    }
+    if !manifest.ssim_threshold.is_finite() || !(0.90..=1.0).contains(&manifest.ssim_threshold) {
+        anyhow::bail!(
+            "{} must use an SSIM threshold between 0.90 and 1.0",
+            path.display()
+        );
+    }
+    if manifest.max_page_count_delta > 1 {
+        anyhow::bail!("{} allows an excessive page-count delta", path.display());
     }
     Ok(())
+}
+
+fn validate_provenance(path: &Path, manifest: &Manifest, ground_truth: &Path) -> Result<()> {
+    let declared_producer = manifest.word_version.trim();
+    if !declared_producer
+        .to_ascii_lowercase()
+        .starts_with("microsoft word")
+        || declared_producer.to_ascii_lowercase().contains("tbd")
+        || declared_producer
+            .to_ascii_lowercase()
+            .contains("not recorded")
+    {
+        anyhow::bail!("{} has invalid Word producer provenance", path.display());
+    }
+
+    let date = manifest.ground_truth_exported_at.trim();
+    let parts: Vec<&str> = date.split('-').collect();
+    let valid_date = parts.len() == 3
+        && parts[0].len() == 4
+        && parts[1].len() == 2
+        && parts[2].len() == 2
+        && parts
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts[1]
+            .parse::<u8>()
+            .is_ok_and(|month| (1..=12).contains(&month))
+        && parts[2]
+            .parse::<u8>()
+            .is_ok_and(|day| (1..=31).contains(&day));
+    if !valid_date {
+        anyhow::bail!("{} has invalid ground-truth export date", path.display());
+    }
+
+    let pdf =
+        std::fs::read(ground_truth).with_context(|| format!("read {}", ground_truth.display()))?;
+    let metadata = pdf_core::meta::get_metadata(&pdf)
+        .with_context(|| format!("read PDF metadata from {}", ground_truth.display()))?;
+    let actual_producer = metadata.producer.or(metadata.creator).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no PDF Producer or Creator metadata",
+            ground_truth.display()
+        )
+    })?;
+    if !word_producer_matches(declared_producer, &actual_producer) {
+        anyhow::bail!(
+            "{} declares {declared_producer:?}, but PDF metadata reports {actual_producer:?}",
+            path.display()
+        );
+    }
+    let actual_date = embedded_creation_date(&pdf).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no parseable PDF CreationDate",
+            ground_truth.display()
+        )
+    })?;
+    if actual_date != date {
+        anyhow::bail!(
+            "{} declares export date {date}, but PDF metadata reports {actual_date}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn word_producer_matches(declared: &str, actual: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let declared = normalize(declared);
+    let actual = normalize(actual);
+    if !actual.starts_with("microsoftword") {
+        return false;
+    }
+    if declared.contains("ltsc") {
+        return actual.contains("ltsc");
+    }
+    // Subscription Word writes "Microsoft® Word for Microsoft 365" — a family
+    // marker, not a 4-digit year. Without this branch no truthful word_version
+    // can ever pass for an M365 export and every release surface blocks.
+    if declared.contains("365") {
+        return actual.contains("365");
+    }
+    let version: String = declared
+        .chars()
+        .skip_while(|character| !character.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    version.len() == 4 && actual.contains(&version)
+}
+
+fn embedded_creation_date(pdf: &[u8]) -> Option<String> {
+    const KEY: &[u8] = b"/CreationDate";
+    let key_at = pdf.windows(KEY.len()).position(|window| window == KEY)?;
+    let metadata = &pdf[key_at..pdf.len().min(key_at + 96)];
+    let date_at = metadata.windows(2).position(|window| window == b"D:")? + 2;
+    let digits = metadata.get(date_at..date_at + 8)?;
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let digits = std::str::from_utf8(digits).ok()?;
+    Some(format!(
+        "{}-{}-{}",
+        &digits[..4],
+        &digits[4..6],
+        &digits[6..8]
+    ))
+}
+
+fn enforce_thresholds(reports: &[CaseReport], require_both_tiers: bool) -> Result<()> {
+    let core: Vec<&CaseReport> = reports
+        .iter()
+        .filter(|report| report.tier == "core")
+        .collect();
+    let extended: Vec<&CaseReport> = reports
+        .iter()
+        .filter(|report| report.tier == "extended")
+        .collect();
+    if reports
+        .iter()
+        .any(|report| report.tier != "core" && report.tier != "extended")
+    {
+        anyhow::bail!("fidelity manifest has an unknown tier");
+    }
+    if require_both_tiers && (core.is_empty() || extended.is_empty()) {
+        anyhow::bail!("full fidelity corpus must contain both core and extended cases");
+    }
+    if core.iter().any(|report| !report.pass) {
+        anyhow::bail!("core fidelity gate failed: every core case must pass");
+    }
+    let extended_passes = extended.iter().filter(|report| report.pass).count();
+    if !extended.is_empty() && extended_passes * 100 < extended.len() * 90 {
+        anyhow::bail!("extended fidelity gate failed: fewer than 90% of cases passed");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn report(tier: &str, pass: bool) -> CaseReport {
+        CaseReport {
+            name: "case".into(),
+            title: "Case".into(),
+            tier: tier.into(),
+            threshold: 0.9,
+            ssim: if pass { 1.0 } else { 0.0 },
+            diff_pct: 0.0,
+            our_pages: 1,
+            truth_pages: 1,
+            pass,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn release_gate_requires_every_core_case() {
+        assert!(enforce_thresholds(&[report("core", false)], false).is_err());
+    }
+
+    #[test]
+    fn release_gate_allows_exactly_ninety_percent_extended() {
+        let mut reports: Vec<CaseReport> = (0..9).map(|_| report("extended", true)).collect();
+        reports.push(report("extended", false));
+        assert!(enforce_thresholds(&reports, false).is_ok());
+        reports[0].pass = false;
+        assert!(enforce_thresholds(&reports, false).is_err());
+    }
+
+    #[test]
+    fn full_release_gate_requires_both_tiers() {
+        assert!(enforce_thresholds(&[report("core", true)], true).is_err());
+    }
+
+    #[test]
+    fn provenance_helpers_check_word_variant_and_embedded_date() {
+        assert!(word_producer_matches(
+            "Microsoft Word 2021",
+            "Microsoft® Word 2021"
+        ));
+        assert!(word_producer_matches(
+            "Microsoft Word LTSC (exact build unavailable in PDF metadata)",
+            "Microsoft® Word LTSC"
+        ));
+        assert!(!word_producer_matches(
+            "Microsoft Word 2021",
+            "Microsoft Word LTSC"
+        ));
+        assert!(word_producer_matches(
+            "Microsoft Word for Microsoft 365",
+            "Microsoft® Word for Microsoft 365"
+        ));
+        assert!(!word_producer_matches(
+            "Microsoft Word for Microsoft 365",
+            "Microsoft® Word 2021"
+        ));
+        assert!(!word_producer_matches(
+            "Microsoft Word 2021",
+            "Microsoft® Word for Microsoft 365"
+        ));
+        assert_eq!(
+            embedded_creation_date(b"<</CreationDate(D:20260709125924+05'30')>>"),
+            Some("2026-07-09".into())
+        );
+    }
 }
 
 fn score_case(
@@ -486,27 +727,22 @@ mod roundtrip {
     /// (the DocKosha viewer's per-page text depends on it).
     #[test]
     fn pptx_and_xlsx_text_are_selectable() {
-        for (file, format, needle) in [
-            (
-                "../mock-files/pptx/file1.pptx",
-                OfficeFormat::Pptx,
-                "Dummy Document 1",
-            ),
-            (
-                "../mock-files/xlsx/file1.xlsx",
-                OfficeFormat::Xlsx,
-                "Column A",
-            ),
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mock-files");
+        for (relative, format, needle) in [
+            ("pptx/file1.pptx", OfficeFormat::Pptx, "Dummy Document 1"),
+            ("xlsx/file1.xlsx", OfficeFormat::Xlsx, "Column A"),
         ] {
-            let Ok(bytes) = std::fs::read(file) else {
-                continue;
-            };
+            let file = fixtures.join(relative);
+            let bytes = std::fs::read(&file).unwrap_or_else(|error| {
+                panic!("required fixture {} is missing: {error}", file.display())
+            });
             let out = convert(&bytes, format, &ConvertOptions::default())
-                .unwrap_or_else(|e| panic!("convert {file}: {e}"));
+                .unwrap_or_else(|error| panic!("convert {}: {error}", file.display()));
             let text = pdf_core::extract::extract_text(&out.pdf).expect("extract text");
             assert!(
                 text.contains(needle),
-                "{needle:?} missing from {file}: {text:?}",
+                "{needle:?} missing from {}: {text:?}",
+                file.display(),
             );
         }
     }

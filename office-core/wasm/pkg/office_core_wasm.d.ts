@@ -6,7 +6,8 @@ export function init(): void;
 /**
  * The DocProfile JSON for a document. Never throws for well-formed calls;
  * container-level failures serialize via `DocProfile::from_error`. Oversized
- * input returns the `input_too_large` profile before copying.
+ * input returns the `input_too_large` profile. The generated JS package
+ * performs this check before copying the input into wasm memory.
  */
 export function office_profile(bytes: Uint8Array, extension: string): string;
 

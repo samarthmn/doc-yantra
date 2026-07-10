@@ -4,10 +4,9 @@
 #
 # Versioning is fixed at 0.0.x (only the patch increments). This script:
 #   1. finds the next x from existing git tags,
-#   2. writes version = "0.0.x" into BOTH Cargo.tomls (kept in sync — the
-#      package's version() returns the wasm crate's),
-#   3. rebuilds the committed wasm package (pkg/) so it carries the new version,
-#   4. commits pdf-core/, then tags 0.0.x and pushes — the publish-wasm.yml
+#   2. writes version = "0.0.x" into all four engine/wasm Cargo.tomls,
+#   3. rebuilds both committed wasm packages so they carry the new version,
+#   4. tests and commits both engines, then tags 0.0.x and pushes — the workflow
 #      Action publishes to GitHub Packages on the tag.
 #
 # Usage:
@@ -25,10 +24,23 @@ WASM_TOML="wasm/Cargo.toml"
 OFFICE_TOML="../office-core/Cargo.toml"
 OFFICE_WASM_TOML="../office-core/wasm/Cargo.toml"
 
+if [[ "$(git -C "$REPO_ROOT" branch --show-current)" != "main" ]]; then
+  echo "error: releases must be cut from the local main branch." >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$REPO_ROOT" status --short)" ]]; then
+  echo "error: releases require a clean worktree." >&2
+  exit 1
+fi
+
 # ─── Determine the next patch (x) ──────────────────────────────────────────
 # Scan both the current tag form (0.0.x) and the legacy one (wasm-v0.0.x) so
 # the highest patch is found across the naming switch.
-git fetch --tags --quiet 2>/dev/null || true
+git fetch origin main --tags --quiet
+if ! git -C "$REPO_ROOT" merge-base --is-ancestor origin/main HEAD; then
+  echo "error: local main is behind or diverged from origin/main; update it before releasing." >&2
+  exit 1
+fi
 highest="$(git tag --list '0.0.*' 'wasm-v0.0.*' \
   | sed -n -E 's/^(wasm-v)?0\.0\.([0-9]+)$/\2/p' \
   | sort -n | tail -1)"
@@ -62,7 +74,7 @@ if [[ -n "${DRY_RUN:-}" ]]; then
   exit 0
 fi
 
-# ─── 1. Bump both Cargo.tomls (only the first [package] version line) ───────
+# ─── 1. Bump all Cargo.tomls (only the first [package] version line) ────────
 set_version() {
   local file="$1"
   awk -v v="$version" '
@@ -83,11 +95,8 @@ echo "  rebuilding office-core wasm package ..."
 ( cd ../office-core/wasm && ./build.sh )
 
 # ─── 2b. Test gate (R2-Y1) ─────────────────────────────────────────────────
-# CI is waived by decision, so this script is the ONLY thing between a
-# regression and a published, immutable version. Run every suite before we
-# commit/tag/push, so an untested publish is impossible via the supported path.
-# (`workflow_dispatch` and a manual `npm publish` still bypass this — accepted
-# residual risk, noted in publish-wasm.yml.)
+# Run the same release-critical suites that the tag-triggered publish workflow
+# repeats before publishing either immutable package.
 if [[ ! -d pdfium ]]; then
   echo "error: pdf-core/pdfium/ is missing — cargo's default (pdfium) tests need it." >&2
   echo "       Run ./scripts/fetch-pdfium.sh once, then re-run the release." >&2
@@ -98,13 +107,17 @@ cargo test --quiet
 cargo test --quiet --no-default-features --features wasm
 echo "  running office-core cargo tests ..."
 ( cd ../office-core && cargo test --quiet )
+echo "  running fidelity harness unit tests ..."
+( cd ../office-core && cargo test --quiet -p fidelity )
+echo "  running blocking DOCX fidelity corpus ..."
+( cd ../office-core && cargo run --quiet -p fidelity -- run --format docx )
 echo "  running package tests against the rebuilt pkg ..."
-( cd "$REPO_ROOT" && node --test tests/ )
+( cd "$REPO_ROOT" && node --test tests/all.test.mjs )
 
 # ─── 3. Commit, tag, push ──────────────────────────────────────────────────
 git -C "$REPO_ROOT" add pdf-core office-core
 git -C "$REPO_ROOT" commit -m "wasm: v${version}"
 git -C "$REPO_ROOT" tag "$tag"
-git -C "$REPO_ROOT" push origin main "$tag"
+git -C "$REPO_ROOT" push --atomic origin main "$tag"
 
 echo "Done. Pushed ${tag}; publish-wasm.yml will publish ${version} to GitHub Packages."

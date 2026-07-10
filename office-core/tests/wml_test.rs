@@ -45,12 +45,12 @@ fn para_text(p: &office_core::oxml::wml::Paragraph) -> String {
 #[test]
 fn parses_every_mock_docx() {
     let dir = Path::new("../mock-files/docx");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let entries = std::fs::read_dir(dir).expect("required mock-files/docx fixtures");
     let mut checked = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|error| panic!("read fixture under {}: {error}", dir.display()))
+            .path();
         if path.extension().and_then(|e| e.to_str()) != Some("docx") {
             continue;
         }
@@ -61,7 +61,7 @@ fn parses_every_mock_docx() {
         parse_document(xml).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
         checked += 1;
     }
-    assert!(checked > 0);
+    assert!(checked > 0, "no required docx fixtures found");
 }
 
 /// Fixture: the style cascade resolves docDefaults → default style → basedOn

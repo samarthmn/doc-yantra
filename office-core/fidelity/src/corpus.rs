@@ -1,6 +1,6 @@
 //! The fidelity corpus: agent-authored synthetic `source.docx` cases (never
-//! customer content) plus their manifests. `seed` (re)generates the sources;
-//! a human then exports Word ground truths (human task H3).
+//! customer content), their manifests, and committed Microsoft Word PDF
+//! references with recorded provenance. `seed` regenerates only the sources.
 
 use office_core::testkit::{DOC_NAMESPACES, zip_package};
 use std::path::Path;
@@ -382,11 +382,14 @@ pub fn seed(corpus_root: &Path) -> anyhow::Result<usize> {
         let dir = corpus_root.join("docx").join(case.name);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("source.docx"), &case.docx)?;
-        let manifest = format!(
-            "title = {:?}\ntier = {:?}\nssim_threshold = {}\nmax_page_count_delta = 0\nword_version = \"TBD (fill on export)\"\nnotes = \"Synthetic fixture — export ground-truth.pdf from Word (human task H3).\"\n",
-            case.title, case.tier, case.ssim_threshold
-        );
-        std::fs::write(dir.join("manifest.toml"), manifest)?;
+        let manifest_path = dir.join("manifest.toml");
+        if !dir.join("ground-truth.pdf").exists() || !manifest_path.exists() {
+            let manifest = format!(
+                "title = {:?}\ntier = {:?}\nssim_threshold = {}\nmax_page_count_delta = 0\nword_version = \"Not recorded\"\nground_truth_exported_at = \"Not recorded\"\nnotes = \"Synthetic fixture; record the Word producer/build and export date when adding ground-truth.pdf.\"\n",
+                case.title, case.tier, case.ssim_threshold
+            );
+            std::fs::write(manifest_path, manifest)?;
+        }
         count += 1;
     }
     Ok(count)

@@ -1,4 +1,4 @@
 {
   "type": "module",
-  "main": "package-features.test.mjs"
+  "main": "all.test.mjs"
 }

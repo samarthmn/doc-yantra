@@ -8,14 +8,16 @@ use std::path::Path;
 /// Every real OOXML fixture under `../mock-files/` opens and exposes a main part.
 #[test]
 fn opens_every_mock_office_file() {
-    let mut checked = 0;
     for sub in ["docx", "pptx", "xlsx", "xlsm"] {
         let dir = Path::new("../mock-files").join(sub);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|error| {
+            panic!("required fixture directory {}: {error}", dir.display())
+        });
+        let mut checked = 0;
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("read fixture under {}: {error}", dir.display()))
+                .path();
             if path.extension().and_then(|e| e.to_str()) != Some(sub) {
                 continue;
             }
@@ -32,11 +34,8 @@ fn opens_every_mock_office_file() {
             );
             checked += 1;
         }
+        assert!(checked > 0, "no required {sub} fixtures found");
     }
-    assert!(
-        checked > 0,
-        "expected at least one mock office file to check"
-    );
 }
 
 /// A non-zip payload (e.g. a `.bin` renamed to `.docx`) is `Invalid`.

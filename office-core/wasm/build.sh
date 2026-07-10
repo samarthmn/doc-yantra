@@ -16,14 +16,21 @@ OWNER="samarthmn"                          # GitHub owner (user/org) == npm scop
 REPO="doc-yantra"                          # GitHub repo name
 PKG_NAME="@samarthmn/doc-yantra-office"    # published npm package name
 MAX_WASM_MB=25                             # size budget (engine + 20 bundled fonts)
+WASM_PACK_VERSION="0.15.0"                 # generated glue is committed; upgrades are deliberate
 
 wasmpack() {
   if command -v wasm-pack >/dev/null 2>&1; then
+    if [[ "$(wasm-pack --version)" != "wasm-pack ${WASM_PACK_VERSION}" ]]; then
+      echo "error: expected wasm-pack ${WASM_PACK_VERSION}; found $(wasm-pack --version)." >&2
+      exit 1
+    fi
     wasm-pack "$@"
   elif command -v pnpm >/dev/null 2>&1; then
-    pnpm dlx wasm-pack "$@"
+    pnpm dlx "wasm-pack@${WASM_PACK_VERSION}" "$@"
+  elif command -v npx >/dev/null 2>&1; then
+    npx --yes "wasm-pack@${WASM_PACK_VERSION}" "$@"
   else
-    echo "error: need either 'wasm-pack' or 'pnpm' on PATH" >&2
+    echo "error: need wasm-pack ${WASM_PACK_VERSION}, pnpm, or npx on PATH" >&2
     exit 1
   fi
 }
@@ -44,6 +51,13 @@ rmdir pkg-web
 
 # The browser build is ESM; mark it so resolvers never mis-read it as CJS.
 printf '{\n  "type": "module"\n}\n' > pkg/web/package.json
+
+# wasm-bindgen copies `&[u8]` arguments into wasm memory before Rust runs. Patch
+# both generated entry points so the public 50 MiB contract rejects oversized
+# Office input before that allocation/copy occurs.
+node ./postprocess-glue.mjs \
+  pkg/office_core_wasm.js \
+  pkg/web/office_core_wasm.js
 
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \
 node -e '

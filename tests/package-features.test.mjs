@@ -23,7 +23,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const PKG = join(ROOT, "pdf-core", "wasm", "pkg");
 
-const main = require(join(PKG, "pdf_core_wasm.js"));
+const main = require(PKG);
 
 // --- helpers ---------------------------------------------------------------
 

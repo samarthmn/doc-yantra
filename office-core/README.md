@@ -16,8 +16,8 @@ Two contracts anchor everything (see `../hyper-agent/office-engine/README.md`):
 
 | Format | Status | Notes |
 |---|---|---|
-| DOCX | full v1 | paragraphs/runs, style cascade, lists, tables (nested/merges), headers/footers, PAGE/NUMPAGES fields, inline images, hyperlinks, sections, breaks, tracked-changes final view |
-| PPTX | common-deck v1 | master/layout/slide inheritance, placeholder text, fills, pictures, tables (bounding-box geometry — see Deferred) |
+| DOCX | validated v1 envelope | paragraphs/runs, style cascade, lists, tables (nested/merges), headers/footers, PAGE/NUMPAGES fields, inline images, hyperlinks, sections, breaks, tracked-changes final view |
+| PPTX | common-deck v1 | master/layout/slide inheritance, placeholder text, rectangular fills, pictures, tables; non-rectangular geometry fails closed |
 | XLSX | print v1 | number-format engine, MDW column widths, gridlines, cell fills, multi-sheet pagination |
 
 ## Envelope (summary)
@@ -29,9 +29,12 @@ JSON. Out of envelope (routed to the LibreOffice fallback):
 - legacy binary (`.doc`/`.ppt`/`.xls`) → `legacy_format`; encrypted → `encrypted`
 - footnotes/endnotes, text boxes, floating/anchored drawings, multi-column
 - charts, SmartArt, OLE, WordArt, equations
+- PPTX non-rectangular preset geometry and custom geometry
 - complex-script (Arabic/Indic/Thai) and RTL; CJK without a covering font
 - image crops and unsupported image containers (GIF/EMF/WMF/TIFF)
 - xlsx: uncached formulas, sheet drawings/charts, conditional formatting
+- packages past the decompression budgets (entry count, 64 MiB per part,
+  proportional total) → `decompression_limit` — an envelope miss, not corruption
 - anything genuinely unknown → `unknown_element`
 
 ## Quick start
@@ -61,9 +64,13 @@ discarded.
 
 The `fidelity/` harness (dev-only) diffs our output against **Word's own PDF
 export** with SSIM. `cargo run -p fidelity -- seed` regenerates the synthetic
-corpus; a human exports ground truths (plan human task H3); `run --format docx`
-scores and emits `fidelity-report/index.html`. Calibration constants and their
-adjustments are logged in `LAYOUT_CALIBRATION.md`.
+corpus; committed DOCX ground truths were exported from Microsoft Word and
+their producer and export-date provenance are recorded in each manifest.
+`run --format docx` requires every selected ground truth, blocks on any core
+failure or an extended-tier pass rate below 90%, and emits
+`fidelity-report/index.html`.
+Calibration constants and their adjustments are logged in
+`LAYOUT_CALIBRATION.md`.
 
 ## Design notes
 
@@ -79,10 +86,9 @@ adjustments are logged in `LAYOUT_CALIBRATION.md`.
 
 ## Deferred (record, don't build)
 
-- **PPTX preset geometry.** The full DrawingML guide-formula evaluator and
-  `custGeom` path rendering need ECMA-376's `presetShapeDefinitions.xml` (a large
-  vendored asset, like the OFL fonts). v1 renders shape fills against their
-  bounding box; drop the XML in and swap the geometry backend.
+- **PPTX preset geometry.** Non-rectangular presets and custom geometry fail
+  closed. Full DrawingML guide-formula evaluation remains outside the supported
+  fidelity envelope until a representative reference corpus exists.
 - **N-API native addon** (napi-rs v3) — wasm CJS suffices for DocKosha on Vercel;
   a native addon becomes worthwhile for a self-hosted service or >50 MiB docs.
 - **PDF/A-2b** output — for archival requirements.

@@ -53,12 +53,12 @@ fn page_text(page: &Page) -> String {
 #[test]
 fn converts_every_mock_pptx_to_valid_pdf() {
     let dir = std::path::Path::new("../mock-files/pptx");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let entries = std::fs::read_dir(dir).expect("required mock-files/pptx fixtures");
     let mut checked = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|error| panic!("read fixture under {}: {error}", dir.display()))
+            .path();
         if path.extension().and_then(|e| e.to_str()) != Some("pptx") {
             continue;
         }
@@ -108,12 +108,12 @@ fn pptx_profile_reports_slides() {
 #[test]
 fn pptx_profile_agrees_with_convert_on_mock_corpus() {
     let dir = std::path::Path::new("../mock-files/pptx");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let entries = std::fs::read_dir(dir).expect("required mock-files/pptx fixtures");
     let mut checked = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|error| panic!("read fixture under {}: {error}", dir.display()))
+            .path();
         if path.extension().and_then(|e| e.to_str()) != Some("pptx") {
             continue;
         }

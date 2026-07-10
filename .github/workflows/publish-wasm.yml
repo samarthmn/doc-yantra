@@ -7,11 +7,8 @@ on:
   push:
     tags:
       - "0.0.*"
-  # NOTE: the test gate lives in pdf-core/scripts/release.sh (CI is waived by
-  # decision). This workflow only builds + publishes — a tag pushed by any means
-  # OTHER than release.sh (including a workflow_dispatch run below, or a manual
-  # `npm publish`) bypasses the tests. Always cut releases via release.sh.
-  workflow_dispatch: {} # allow manual runs from the Actions tab
+  # The release script runs the same gates before pushing the tag. Repeating
+  # them here prevents a manually-created tag from bypassing release checks.
 
 jobs:
   publish:
@@ -24,6 +21,8 @@ jobs:
         working-directory: pdf-core/wasm
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -37,25 +36,70 @@ jobs:
           registry-url: https://npm.pkg.github.com
           scope: "@samarthmn"
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
       - name: Build wasm package
         run: ./build.sh
 
-      - name: Publish to GitHub Packages
-        working-directory: pdf-core/wasm/pkg
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # office-core rides the same 0.0.* tags. Its publish runs after pdf-core's
-      # and is independent — a failure here does not un-publish pdf-core; re-run
-      # the job to retry (npm refuses double-publish, so we guard with a skip).
       - name: Build office-core wasm package
         working-directory: office-core/wasm
         run: ./build.sh
 
+      - name: Validate tag and package versions
+        working-directory: .
+        run: |
+          case "${GITHUB_REF}" in
+            refs/tags/0.0.*) TAG_VERSION="${GITHUB_REF#refs/tags/}" ;;
+            *) echo "Publishing requires a 0.0.* tag ref; got ${GITHUB_REF}." >&2; exit 1 ;;
+          esac
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main || {
+            echo "Tagged commit ${GITHUB_SHA} is not on origin/main." >&2
+            exit 1
+          }
+          PDF_VERSION="$(node -p "require('./pdf-core/wasm/pkg/package.json').version")"
+          OFFICE_VERSION="$(node -p "require('./office-core/wasm/pkg/package.json').version")"
+          test "${TAG_VERSION}" = "${PDF_VERSION}" || {
+            echo "Tag ${TAG_VERSION} does not match PDF package ${PDF_VERSION}." >&2
+            exit 1
+          }
+          test "${TAG_VERSION}" = "${OFFICE_VERSION}" || {
+            echo "Tag ${TAG_VERSION} does not match Office package ${OFFICE_VERSION}." >&2
+            exit 1
+          }
+
+      - name: Fetch pdfium for native and fidelity tests
+        working-directory: pdf-core
+        run: ./scripts/fetch-pdfium.sh
+
+      - name: Test PDF engine
+        working-directory: pdf-core
+        run: |
+          cargo test
+          cargo test --no-default-features --features wasm
+
+      - name: Test Office engine and blocking fidelity gate
+        working-directory: office-core
+        run: |
+          cargo test
+          cargo test -p fidelity
+          cargo run -p fidelity -- run --format docx
+
+      - name: Test both built packages
+        working-directory: .
+        run: node --test tests/all.test.mjs
+
+      - name: Publish PDF package to GitHub Packages
+        working-directory: pdf-core/wasm/pkg
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@samarthmn/doc-yantra@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "@samarthmn/doc-yantra@${VERSION} already published — skipping."
+          else
+            npm publish
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # office-core rides the same 0.0.* tags. A retry may encounter an already
+      # published PDF package, so the Office publish keeps its idempotent guard.
       - name: Publish office package to GitHub Packages
         working-directory: office-core/wasm/pkg
         run: |
