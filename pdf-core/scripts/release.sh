@@ -95,8 +95,8 @@ echo "  rebuilding office-core wasm package ..."
 ( cd ../office-core/wasm && ./build.sh )
 
 # ─── 2b. Test gate (R2-Y1) ─────────────────────────────────────────────────
-# Run the same release-critical suites that the tag-triggered publish workflow
-# repeats before publishing either immutable package.
+# GitHub publishes the committed packages without rebuilding or retesting them,
+# so the supported release path must complete every gate locally before tagging.
 if [[ ! -d pdfium ]]; then
   echo "error: pdf-core/pdfium/ is missing — cargo's default (pdfium) tests need it." >&2
   echo "       Run ./scripts/fetch-pdfium.sh once, then re-run the release." >&2

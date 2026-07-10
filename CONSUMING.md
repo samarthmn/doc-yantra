@@ -33,10 +33,11 @@ DRY_RUN=1 pdf-core/scripts/release.sh  # preview only
 Published versions are immutable — the script refuses to reuse or go below an
 existing tag; always bump.
 
-The [`publish-wasm`](.github/workflows/publish-wasm.yml) GitHub Action repeats
-the engine, package, and fidelity gates, requires the tag to match both package
-versions, then publishes using the repo’s built-in `GITHUB_TOKEN` (needs
-`packages: write`, already set).
+The [`publish-wasm`](.github/workflows/publish-wasm.yml) GitHub Action requires
+the tagged commit to be on `main`, requires the tag to match both committed
+package versions, then publishes those packages using the repo's built-in
+`GITHUB_TOKEN` (needs `packages: write`, already set). It does not rebuild or
+retest the packages; `release.sh` is the supported local build and test gate.
 
 ## 2. Create an install token
 

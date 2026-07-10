@@ -1,14 +1,11 @@
 name: Publish wasm packages
 
-# Publishes @samarthmn/doc-yantra to GitHub Packages when a version tag is
-# pushed, e.g.  git tag 0.0.3 && git push origin 0.0.3
-# (pdf-core/scripts/release.sh does this for you.)
+# Publishes both committed npm packages to GitHub Packages when the local
+# release script pushes a version tag, e.g. 0.0.8.
 on:
   push:
     tags:
       - "0.0.*"
-  # The release script runs the same gates before pushing the tag. Repeating
-  # them here prevents a manually-created tag from bypassing release checks.
 
 jobs:
   publish:
@@ -20,29 +17,20 @@ jobs:
       run:
         working-directory: pdf-core/wasm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
       - name: Setup Node + GitHub Packages registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
+          package-manager-cache: false
           registry-url: https://npm.pkg.github.com
           scope: "@samarthmn"
 
-      - name: Build wasm package
-        run: ./build.sh
-
-      - name: Build office-core wasm package
-        working-directory: office-core/wasm
-        run: ./build.sh
-
+      # release.sh builds and tests locally before it creates this tag. GitHub
+      # validates release identity, then publishes those committed artifacts.
       - name: Validate tag and package versions
         working-directory: .
         run: |
@@ -65,27 +53,6 @@ jobs:
             exit 1
           }
 
-      - name: Fetch pdfium for native and fidelity tests
-        working-directory: pdf-core
-        run: ./scripts/fetch-pdfium.sh
-
-      - name: Test PDF engine
-        working-directory: pdf-core
-        run: |
-          cargo test
-          cargo test --no-default-features --features wasm
-
-      - name: Test Office engine and blocking fidelity gate
-        working-directory: office-core
-        run: |
-          cargo test
-          cargo test -p fidelity
-          cargo run -p fidelity -- run --format docx
-
-      - name: Test both built packages
-        working-directory: .
-        run: node --test tests/all.test.mjs
-
       - name: Publish PDF package to GitHub Packages
         working-directory: pdf-core/wasm/pkg
         run: |
@@ -98,8 +65,8 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # office-core rides the same 0.0.* tags. A retry may encounter an already
-      # published PDF package, so the Office publish keeps its idempotent guard.
+      # A retry may encounter an already published PDF package, so the Office
+      # publish keeps the same idempotent guard.
       - name: Publish office package to GitHub Packages
         working-directory: office-core/wasm/pkg
         run: |

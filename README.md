@@ -9,8 +9,7 @@ This repo is DocKosha's **proprietary PDF engine** and its distributable
 | `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS — watermark/merge/csv/md, 1.7MB), `./web` (browser ESM — Zone 1 for client-side previews, 1.7MB). Office→PDF is provided by the separate Office package below; out-of-envelope files use the compatibility service. |
 | `office-core/` | The pure-Rust **Office → PDF** engine: DOCX/PPTX/XLSX layout + PDF emission, fail-closed envelope, DocProfile router contract. No LibreOffice/Chromium/pdfium in the conversion path. See [`office-core/README.md`](office-core/README.md). |
 | `office-core/wasm/` | The **`@samarthmn/doc-yantra-office`** npm package (Node CJS + browser ESM). `office_profile()` / `office_to_pdf()` / `register_font()`. DocKosha routes office conversions here engine-first, LibreOffice as fallback. |
-| `.github/workflows/publish-wasm.yml` | Rebuilds and tests both engines/packages, runs the blocking DOCX fidelity gate, validates the tag version, then publishes **both** packages to **GitHub Packages** for a `0.0.*` tag. |
-| `.github/workflows/office-core-ci.yml` | Lints/tests office-core + proves wasm-compilability on every change. |
+| `.github/workflows/publish-wasm.yml` | Validates a `0.0.*` tag against `main` and both committed package versions, then publishes **both** packages to **GitHub Packages** without rebuilding or retesting them. |
 
 > **Not in this repo:** the DocYantra HTTP service (NestJS + Gotenberg —
 > Office→PDF, HTML→PDF, redaction endpoints). That still lives in the
@@ -72,8 +71,9 @@ served by the DocYantra HTTP service instead.
 Releases stay on the **0.0.x** line — only the patch increments. From a clean
 `main`, one script picks the next `x`, bumps all four engine/wasm manifests,
 rebuilds and tests both packages, runs the blocking DOCX fidelity corpus, then
-commits, tags, and atomically pushes `main` + `0.0.x`. The tag workflow repeats
-the gates before publishing to GitHub Packages:
+commits, tags, and atomically pushes `main` + `0.0.x`. The tag workflow verifies
+that the tagged commit is on `main` and both committed package versions match
+the tag, then publishes those artifacts without rebuilding or retesting them:
 
 ```bash
 pdf-core/scripts/release.sh            # auto: next patch, commit, tag, push
