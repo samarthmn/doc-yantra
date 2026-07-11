@@ -1,5 +1,12 @@
 /* @ts-self-types="./pdf_core_wasm.d.ts" */
 
+const DOC_YANTRA_FONT_PRECOPY_GUARD_V1 = 32 * 1024 * 1024;
+
+function guardRegisteredFontInput(bytes) {
+    if (bytes.byteLength <= DOC_YANTRA_FONT_PRECOPY_GUARD_V1) return;
+    throw new Error(`font is ${bytes.byteLength} bytes, over the 32 MiB in-process limit`);
+}
+
 /**
  * Applies a DocYantra-payload watermark to a single PDF.
  * @param {Uint8Array} pdf
@@ -108,6 +115,23 @@ function page_count(pdf) {
     return ret[0] >>> 0;
 }
 exports.page_count = page_count;
+
+/**
+ * Adds an embeddable font to the process-global registry. The generated JS
+ * glue applies the same limit before copying `bytes` into wasm linear memory;
+ * this Rust check is defense in depth for direct wasm callers.
+ * @param {Uint8Array} bytes
+ */
+function register_font(bytes) {
+    guardRegisteredFontInput(bytes);
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.register_font(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+exports.register_font = register_font;
 
 /**
  * Plain text → PDF.

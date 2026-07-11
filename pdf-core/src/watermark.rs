@@ -5,6 +5,7 @@
 
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 
+use crate::embed_font::{FontChoice, FontSession, encode_winansi_literal};
 use crate::error::{PdfCoreError, Result};
 use crate::fonts::StandardFont;
 
@@ -167,34 +168,44 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
     );
 
     struct LineMetric {
-        escaped: Vec<u8>,
+        shown: Vec<u8>,
+        embedded_font: Option<usize>,
         size: f64,
         width: f64,
         line_height: f64,
         gap_before: f64,
     }
 
-    let metrics: Vec<LineMetric> = lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let size = if i == 0 { primary_size } else { meta_size };
-            let gap_before = if i == 0 {
-                0.0
-            } else if i == 1 {
-                size * PRIMARY_TO_META_GAP_FACTOR
-            } else {
-                size * META_TO_META_GAP_FACTOR
-            };
-            LineMetric {
-                escaped: escape_pdf_text(line),
-                size,
-                width: StandardFont::Helvetica.text_width_pt(line, size),
-                line_height: size * PRIMARY_LINE_HEIGHT_FACTOR,
-                gap_before,
+    let mut font_session = FontSession::new()?;
+    let mut metrics = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let size = if i == 0 { primary_size } else { meta_size };
+        let gap_before = if i == 0 {
+            0.0
+        } else if i == 1 {
+            size * PRIMARY_TO_META_GAP_FACTOR
+        } else {
+            size * META_TO_META_GAP_FACTOR
+        };
+        let choice = font_session.resolve(line)?;
+        let width = choice.text_width_pt(line, StandardFont::Helvetica, size)?;
+        let (shown, embedded_font) = match choice {
+            FontChoice::Standard => (escape_pdf_text(line), None),
+            FontChoice::Embedded(face) => {
+                let encoded = font_session.encode(&face, line)?;
+                (encoded.bytes, Some(encoded.resource_index))
             }
-        })
-        .collect();
+        };
+        metrics.push(LineMetric {
+            shown,
+            embedded_font,
+            size,
+            width,
+            line_height: size * PRIMARY_LINE_HEIGHT_FACTOR,
+            gap_before,
+        });
+    }
+    let embedded_fonts = font_session.finish()?;
     let total_text_height: f64 = metrics.iter().map(|m| m.line_height + m.gap_before).sum();
 
     let hybrid_gap = clamp_or(primary_size * 0.6, 4.0, 96.0, primary_size * 0.6);
@@ -217,12 +228,16 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
     ];
 
     // Shared resource objects.
-    let font_id = doc.add_object(dictionary! {
+    let standard_font_id = doc.add_object(dictionary! {
         "Type" => "Font",
         "Subtype" => "Type1",
         "BaseFont" => "Helvetica",
         "Encoding" => "WinAnsiEncoding",
     });
+    let mut embedded_font_ids = Vec::with_capacity(embedded_fonts.len());
+    for font in &embedded_fonts {
+        embedded_font_ids.push(font.add_to_lopdf(&mut doc)?);
+    }
     let gs_id = doc.add_object(dictionary! {
         "Type" => "ExtGState",
         "ca" => opacity,
@@ -238,7 +253,16 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
         // the earlier pass's ops would silently pick up the new opacity or
         // image.
         let gs_name = free_resource_name(&doc, page_id, "ExtGState", GS_RES)?;
-        let font_name = free_resource_name(&doc, page_id, "Font", FONT_RES)?;
+        let standard_font_name = free_resource_name(&doc, page_id, "Font", FONT_RES)?;
+        let mut embedded_font_names = Vec::with_capacity(embedded_font_ids.len());
+        for index in 0..embedded_font_ids.len() {
+            embedded_font_names.push(free_resource_name(
+                &doc,
+                page_id,
+                "Font",
+                &format!("{FONT_RES}{}", index + 2),
+            )?);
+        }
         let img_name = free_resource_name(&doc, page_id, "XObject", IMG_RES)?;
 
         // Anchor centers, mirroring the TS single/grid loops (shifted by the
@@ -296,7 +320,10 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
                     push_ops(
                         &mut ops,
                         &format!(
-                            "BT\n/{font_name} {} Tf\n{} {} {} rg\n{} {} {} {} {} {} Tm\n",
+                            "BT\n/{} {} Tf\n{} {} {} rg\n{} {} {} {} {} {} Tm\n",
+                            m.embedded_font
+                                .map(|index| embedded_font_names[index].as_str())
+                                .unwrap_or(standard_font_name.as_str()),
                             fnum(m.size),
                             fnum(color[0]),
                             fnum(color[1]),
@@ -309,17 +336,25 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
                             fnum(oy),
                         ),
                     );
-                    ops.push(b'(');
-                    ops.extend_from_slice(&m.escaped);
-                    push_ops(&mut ops, ") Tj\nET\n");
+                    if m.embedded_font.is_some() {
+                        push_hex_string(&mut ops, &m.shown);
+                    } else {
+                        ops.push(b'(');
+                        ops.extend_from_slice(&m.shown);
+                        ops.push(b')');
+                    }
+                    push_ops(&mut ops, " Tj\nET\n");
                 }
             }
         }
         push_ops(&mut ops, "Q\n");
 
         let mut entries: Vec<(&str, &str, ObjectId)> = vec![("ExtGState", gs_name.as_str(), gs_id)];
-        if has_text {
-            entries.push(("Font", font_name.as_str(), font_id));
+        if metrics.iter().any(|metric| metric.embedded_font.is_none()) {
+            entries.push(("Font", standard_font_name.as_str(), standard_font_id));
+        }
+        for (index, font_id) in embedded_font_ids.iter().copied().enumerate() {
+            entries.push(("Font", embedded_font_names[index].as_str(), font_id));
         }
         if let Some((img_id, _, _)) = image {
             entries.push(("XObject", img_name.as_str(), img_id));
@@ -457,61 +492,20 @@ fn push_ops(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(s.as_bytes());
 }
 
-/// Maps a char to its WinAnsi (CP1252) byte, best effort; unmappable -> '?'.
-fn winansi_byte(c: char) -> u8 {
-    let cp = c as u32;
-    match cp {
-        0x20..=0x7E => cp as u8,
-        0xA0..=0xFF => cp as u8,
-        _ => match c {
-            '\u{20AC}' => 0x80, // euro
-            '\u{201A}' => 0x82,
-            '\u{0192}' => 0x83,
-            '\u{201E}' => 0x84,
-            '\u{2026}' => 0x85, // ellipsis
-            '\u{2020}' => 0x86,
-            '\u{2021}' => 0x87,
-            '\u{02C6}' => 0x88,
-            '\u{2030}' => 0x89,
-            '\u{0160}' => 0x8A,
-            '\u{2039}' => 0x8B,
-            '\u{0152}' => 0x8C,
-            '\u{017D}' => 0x8E,
-            '\u{2018}' => 0x91, // left single quote
-            '\u{2019}' => 0x92, // right single quote
-            '\u{201C}' => 0x93, // left double quote
-            '\u{201D}' => 0x94, // right double quote
-            '\u{2022}' => 0x95, // bullet
-            '\u{2013}' => 0x96, // en dash
-            '\u{2014}' => 0x97, // em dash
-            '\u{02DC}' => 0x98,
-            '\u{2122}' => 0x99, // trademark
-            '\u{0161}' => 0x9A,
-            '\u{203A}' => 0x9B,
-            '\u{0153}' => 0x9C,
-            '\u{017E}' => 0x9E,
-            '\u{0178}' => 0x9F,
-            _ => b'?',
-        },
+fn push_hex_string(buf: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    buf.push(b'<');
+    for &byte in bytes {
+        buf.push(HEX[usize::from(byte >> 4)]);
+        buf.push(HEX[usize::from(byte & 0x0F)]);
     }
+    buf.push(b'>');
 }
 
 /// Encodes `text` as a PDF literal-string body: WinAnsi bytes with
 /// backslash-escaped `\`, `(`, `)`. Control characters degrade to '?'.
 fn escape_pdf_text(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len() + 4);
-    for c in text.chars() {
-        let byte = winansi_byte(c);
-        match byte {
-            b'\\' | b'(' | b')' => {
-                out.push(b'\\');
-                out.push(byte);
-            }
-            0x00..=0x1F => out.push(b'?'),
-            _ => out.push(byte),
-        }
-    }
-    out
+    encode_winansi_literal(text)
 }
 
 /// Follows reference chains to the concrete object (cycle-guarded).

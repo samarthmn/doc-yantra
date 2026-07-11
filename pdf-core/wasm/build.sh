@@ -59,6 +59,23 @@ rmdir pkg-web
 # never mis-read it as CommonJS (Y-8). The package root is CJS by default.
 printf '{\n  "type": "module"\n}\n' > pkg/web/package.json
 
+# wasm-bindgen copies `&[u8]` arguments into linear memory before Rust runs.
+# Guard runtime font registration in both public JS entry points before that
+# allocation, while retaining the matching Rust-side defense-in-depth check.
+node ./postprocess-glue.mjs \
+  pkg/pdf_core_wasm.js \
+  pkg/web/pdf_core_wasm.js
+
+# Runtime fonts stay outside the wasm binary. Consumers load these package
+# assets and register the faces they need during adapter initialization.
+rm -rf pkg/fonts
+mkdir -p pkg/fonts
+cp \
+  ../../office-core/fonts/liberation/LiberationSans-Regular.ttf \
+  ../../office-core/fonts/liberation/LiberationSans-Bold.ttf \
+  ../../office-core/fonts/liberation/LiberationMono-Regular.ttf \
+  pkg/fonts/
+
 # wasm-pack derives the name from the crate (@OWNER/pdf-core-wasm) and does not
 # emit repository / license / publishConfig / exports; set the final metadata.
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \
@@ -69,7 +86,7 @@ node -e '
   j.repository = { type: "git", url: process.env.REPO_URL };
   j.license = "UNLICENSED";
   j.publishConfig = { registry: "https://npm.pkg.github.com" };
-  j.files = Array.from(new Set([...(j.files || []), "web"]));
+  j.files = Array.from(new Set([...(j.files || []), "web", "fonts"]));
   j.exports = {
     ".": {
       types: "./pdf_core_wasm.d.ts",

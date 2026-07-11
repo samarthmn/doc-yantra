@@ -863,7 +863,9 @@ dependencies = [
  "pdf-writer",
  "pdfium-render",
  "pulldown-cmark",
+ "subsetter",
  "thiserror",
+ "ttf-parser",
 ]
 
 [[package]]

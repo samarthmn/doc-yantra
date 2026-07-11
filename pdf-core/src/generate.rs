@@ -1,10 +1,15 @@
 //! Zone 1 — PDF generation: CSV tables, Markdown documents, plain text, and
-//! image-per-page PDFs. pdf-writer + fonts::StandardFont metrics; replaces the
-//! Chromium html-to-pdf route for csv/md in DocYantra.
+//! image-per-page PDFs. Uses standard-14 fonts for WinAnsi and embedded CID
+//! fonts for supported Unicode runs; replaces the Chromium html-to-pdf route.
+
+use std::collections::BTreeSet;
 
 use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+use crate::embed_font::{
+    EmbeddedFont, FontChoice, FontSession, PdfFontRefs, is_winansi, resource_name,
+};
 use crate::error::{PdfCoreError, Result};
 use crate::fonts::StandardFont;
 
@@ -112,6 +117,43 @@ fn sanitize_code_line(line: &str) -> String {
     out
 }
 
+/// Keeps the legacy byte-for-byte WinAnsi path, while preserving Unicode for
+/// runs that need an embedded font.
+fn sanitize_run(text: &str) -> String {
+    if is_winansi(text) {
+        return sanitize(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        sanitize_unicode_char_into(c, &mut out, ' ');
+    }
+    out
+}
+
+fn sanitize_code_run(line: &str) -> String {
+    if is_winansi(line) {
+        return sanitize_code_line(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    for c in line.chars() {
+        if c == '\t' {
+            out.push_str("    ");
+        } else {
+            sanitize_unicode_char_into(c, &mut out, ' ');
+        }
+    }
+    out
+}
+
+fn sanitize_unicode_char_into(c: char, out: &mut String, ws: char) {
+    match c {
+        '\n' | '\r' | '\t' => out.push(ws),
+        '\u{200B}' | '\u{FEFF}' => {}
+        c if c.is_control() => {}
+        _ => out.push(c),
+    }
+}
+
 fn sanitize_char_into(c: char, out: &mut String, ws: char) {
     match c {
         ' '..='~' => out.push(c),
@@ -174,6 +216,7 @@ struct RgbSamples {
 struct PageData {
     content: Vec<u8>,
     fonts_used: [bool; FONT_COUNT],
+    embedded_fonts_used: BTreeSet<usize>,
     image: Option<RgbSamples>,
 }
 
@@ -184,6 +227,14 @@ struct Run {
     text: String,
 }
 
+/// A logical run after its standard-vs-embedded choice has been frozen.
+#[derive(Debug, Clone)]
+struct ResolvedRun {
+    font: StandardFont,
+    choice: FontChoice,
+    text: String,
+}
+
 /// Minimal top-down layout engine shared by the csv/markdown/text generators.
 /// Tracks a cursor `y` (distance from page bottom), starts new pages when the
 /// cursor would cross the bottom margin, and exposes small drawing helpers.
@@ -191,6 +242,8 @@ struct LayoutEngine {
     pages: Vec<PageData>,
     content: Content,
     fonts_used: [bool; FONT_COUNT],
+    embedded_fonts_used: BTreeSet<usize>,
+    font_session: FontSession,
     page_w: f64,
     page_h: f64,
     margin: f64,
@@ -206,6 +259,8 @@ impl LayoutEngine {
             pages: Vec::new(),
             content: Content::new(),
             fonts_used: [false; FONT_COUNT],
+            embedded_fonts_used: BTreeSet::new(),
+            font_session: FontSession::new()?,
             page_w,
             page_h,
             margin: opts.margin_pt,
@@ -225,9 +280,11 @@ impl LayoutEngine {
     fn break_page(&mut self) {
         let content = std::mem::replace(&mut self.content, Content::new());
         let fonts_used = std::mem::replace(&mut self.fonts_used, [false; FONT_COUNT]);
+        let embedded_fonts_used = std::mem::take(&mut self.embedded_fonts_used);
         self.pages.push(PageData {
             content: content.finish().into_vec(),
             fonts_used,
+            embedded_fonts_used,
             image: None,
         });
         self.y = self.page_h - self.margin;
@@ -244,19 +301,41 @@ impl LayoutEngine {
         self.y -= dy;
     }
 
-    /// Draws one line of already-sanitized ASCII text at an absolute position
-    /// (baseline at `y`).
-    fn draw_text_line(&mut self, font: StandardFont, size: f64, x: f64, y: f64, text: &str) {
+    /// Draws one already-sanitized text run at an absolute baseline.
+    fn draw_text_line(
+        &mut self,
+        font: StandardFont,
+        choice: &FontChoice,
+        size: f64,
+        x: f64,
+        y: f64,
+        text: &str,
+    ) -> Result<()> {
         if text.is_empty() {
-            return;
+            return Ok(());
         }
-        self.fonts_used[font_index(font)] = true;
-        self.content.begin_text();
-        self.content
-            .set_font(Name(FONT_RES_NAMES[font_index(font)]), size as f32);
-        self.content.next_line(x as f32, y as f32);
-        self.content.show(Str(text.as_bytes()));
-        self.content.end_text();
+        match choice {
+            FontChoice::Standard => {
+                self.fonts_used[font_index(font)] = true;
+                self.content.begin_text();
+                self.content
+                    .set_font(Name(FONT_RES_NAMES[font_index(font)]), size as f32);
+                self.content.next_line(x as f32, y as f32);
+                self.content.show(Str(text.as_bytes()));
+                self.content.end_text();
+            }
+            FontChoice::Embedded(face) => {
+                let encoded = self.font_session.encode(face, text)?;
+                self.embedded_fonts_used.insert(encoded.resource_index);
+                let name = resource_name(encoded.resource_index);
+                self.content.begin_text();
+                self.content.set_font(Name(name.as_bytes()), size as f32);
+                self.content.next_line(x as f32, y as f32);
+                self.content.show(Str(&encoded.bytes));
+                self.content.end_text();
+            }
+        }
+        Ok(())
     }
 
     /// Draws a horizontal rule from `x1` to `x2` at height `y`.
@@ -279,12 +358,13 @@ impl LayoutEngine {
     }
 
     /// Draws a sequence of styled runs on one baseline, advancing x per run.
-    fn draw_runs_line(&mut self, runs: &[Run], size: f64, x: f64, y: f64) {
+    fn draw_runs_line(&mut self, runs: &[ResolvedRun], size: f64, x: f64, y: f64) -> Result<()> {
         let mut cx = x;
         for run in runs {
-            self.draw_text_line(run.font, size, cx, y, &run.text);
-            cx += run.font.text_width_pt(&run.text, size);
+            self.draw_text_line(run.font, &run.choice, size, cx, y, &run.text)?;
+            cx += run.choice.text_width_pt(&run.text, run.font, size)?;
         }
+        Ok(())
     }
 
     /// Word-wraps styled runs into the usable width (minus `indent`) and emits
@@ -297,12 +377,12 @@ impl LayoutEngine {
         indent: f64,
         leading_factor: f64,
         marker: Option<(String, StandardFont)>,
-    ) {
+    ) -> Result<()> {
         let max_w = (self.usable_width() - indent).max(size);
-        let mut lines = wrap_runs(runs, size, max_w);
+        let mut lines = wrap_runs(&self.font_session, runs, size, max_w)?;
         if lines.is_empty() {
             if marker.is_none() {
-                return;
+                return Ok(());
             }
             lines.push(Vec::new());
         }
@@ -318,62 +398,88 @@ impl LayoutEngine {
                 let mx = (self.left() + indent - mw - 4.0).max(self.left());
                 let mtext = mtext.clone();
                 let mfont = *mfont;
-                self.draw_text_line(mfont, size, mx, baseline, &mtext);
+                self.draw_text_line(mfont, &FontChoice::Standard, size, mx, baseline, &mtext)?;
             }
-            self.draw_runs_line(line, size, self.left() + indent, baseline);
+            self.draw_runs_line(line, size, self.left() + indent, baseline)?;
         }
+        Ok(())
     }
 
     /// Renders `opts.title` (if any) as a bold heading.
-    fn emit_title(&mut self, opts: &DocOptions) {
+    fn emit_title(&mut self, opts: &DocOptions) -> Result<()> {
         if let Some(title) = &opts.title {
-            let text = sanitize(title);
+            let text = sanitize_run(title);
             if !text.trim().is_empty() {
                 let size = opts.base_font_size_pt * 1.8;
                 let runs = [Run {
                     font: StandardFont::HelveticaBold,
                     text,
                 }];
-                self.emit_paragraph(&runs, size, 0.0, 1.25, None);
+                self.emit_paragraph(&runs, size, 0.0, 1.25, None)?;
                 self.advance(opts.base_font_size_pt * 0.9);
             }
         }
+        Ok(())
     }
 
     /// Finishes the current page and assembles the final PDF bytes.
-    fn finish(mut self) -> Vec<u8> {
+    fn finish(mut self) -> Result<Vec<u8>> {
         self.break_page();
-        assemble(self.pages, self.page_w, self.page_h)
+        let embedded_fonts = self.font_session.finish()?;
+        assemble(self.pages, self.page_w, self.page_h, embedded_fonts)
     }
 }
 
 /// Greedy word-wrap over styled runs; measures every token with its own font.
 /// Words wider than `max_w` are hard-broken by characters.
-fn wrap_runs(runs: &[Run], size: f64, max_w: f64) -> Vec<Vec<Run>> {
+fn wrap_runs(
+    session: &FontSession,
+    runs: &[Run],
+    size: f64,
+    max_w: f64,
+) -> Result<Vec<Vec<ResolvedRun>>> {
+    let resolved: Vec<ResolvedRun> = runs
+        .iter()
+        .map(|run| {
+            Ok(ResolvedRun {
+                font: run.font,
+                choice: session.resolve(&run.text)?,
+                text: run.text.clone(),
+            })
+        })
+        .collect::<Result<_>>()?;
+    wrap_resolved_runs(&resolved, size, max_w)
+}
+
+fn wrap_resolved_runs(
+    runs: &[ResolvedRun],
+    size: f64,
+    max_w: f64,
+) -> Result<Vec<Vec<ResolvedRun>>> {
     // Tokenize into (font, token) where a token is a maximal run of spaces or
     // of non-space characters within a single styled run.
-    let mut tokens: Vec<(StandardFont, String)> = Vec::new();
+    let mut tokens: Vec<(StandardFont, FontChoice, String)> = Vec::new();
     for run in runs {
         let mut cur = String::new();
         let mut cur_is_space: Option<bool> = None;
         for c in run.text.chars() {
             let is_space = c == ' ';
             if cur_is_space != Some(is_space) && !cur.is_empty() {
-                tokens.push((run.font, std::mem::take(&mut cur)));
+                tokens.push((run.font, run.choice.clone(), std::mem::take(&mut cur)));
             }
             cur_is_space = Some(is_space);
             cur.push(c);
         }
         if !cur.is_empty() {
-            tokens.push((run.font, cur));
+            tokens.push((run.font, run.choice.clone(), cur));
         }
     }
 
-    let mut lines: Vec<Vec<Run>> = Vec::new();
-    let mut cur: Vec<Run> = Vec::new();
+    let mut lines: Vec<Vec<ResolvedRun>> = Vec::new();
+    let mut cur: Vec<ResolvedRun> = Vec::new();
     let mut cur_w = 0.0_f64;
 
-    let flush = |cur: &mut Vec<Run>, cur_w: &mut f64, lines: &mut Vec<Vec<Run>>| {
+    let flush = |cur: &mut Vec<ResolvedRun>, cur_w: &mut f64, lines: &mut Vec<Vec<ResolvedRun>>| {
         // Trim trailing spaces from the line.
         while let Some(last) = cur.last_mut() {
             let trimmed = last.text.trim_end_matches(' ').len();
@@ -391,14 +497,14 @@ fn wrap_runs(runs: &[Run], size: f64, max_w: f64) -> Vec<Vec<Run>> {
         *cur_w = 0.0;
     };
 
-    for (font, tok) in tokens {
+    for (font, choice, tok) in tokens {
         let is_space = tok.starts_with(' ');
-        let w = font.text_width_pt(&tok, size);
+        let w = choice.text_width_pt(&tok, font, size)?;
         if is_space {
             // Never start a line with spaces; allow trailing spaces to
             // overflow (they get trimmed on flush).
             if !cur.is_empty() {
-                push_run(&mut cur, font, &tok);
+                push_resolved_run(&mut cur, font, choice, &tok);
                 cur_w += w;
             }
             continue;
@@ -411,10 +517,11 @@ fn wrap_runs(runs: &[Run], size: f64, max_w: f64) -> Vec<Vec<Run>> {
             let mut piece = String::new();
             let mut piece_w = 0.0;
             for c in tok.chars() {
-                let cw = font.glyph_width_milli(c) as f64 * size / 1000.0;
+                let cw = choice.char_width_pt(c, font, size)?;
                 if piece_w + cw > max_w + 0.01 && !piece.is_empty() {
-                    lines.push(vec![Run {
+                    lines.push(vec![ResolvedRun {
                         font,
+                        choice: choice.clone(),
                         text: std::mem::take(&mut piece),
                     }]);
                     piece_w = 0.0;
@@ -423,16 +530,36 @@ fn wrap_runs(runs: &[Run], size: f64, max_w: f64) -> Vec<Vec<Run>> {
                 piece_w += cw;
             }
             if !piece.is_empty() {
-                push_run(&mut cur, font, &piece);
+                push_resolved_run(&mut cur, font, choice, &piece);
                 cur_w += piece_w;
             }
             continue;
         }
-        push_run(&mut cur, font, &tok);
+        push_resolved_run(&mut cur, font, choice, &tok);
         cur_w += w;
     }
     flush(&mut cur, &mut cur_w, &mut lines);
-    lines
+    Ok(lines)
+}
+
+fn push_resolved_run(
+    line: &mut Vec<ResolvedRun>,
+    font: StandardFont,
+    choice: FontChoice,
+    text: &str,
+) {
+    if let Some(last) = line.last_mut()
+        && last.font == font
+        && last.choice == choice
+    {
+        last.text.push_str(text);
+        return;
+    }
+    line.push(ResolvedRun {
+        font,
+        choice,
+        text: text.to_string(),
+    });
 }
 
 /// Appends text to the last run when the font matches, else pushes a new run.
@@ -456,7 +583,21 @@ fn push_run(line: &mut Vec<Run>, font: StandardFont, text: &str) {
 /// Assembles finished pages into a complete PDF: catalog, page tree, shared
 /// Type1 font objects, per-page content streams (uncompressed) and image
 /// XObjects (raw RGB8, no filter).
-fn assemble(pages: Vec<PageData>, page_w: f64, page_h: f64) -> Vec<u8> {
+fn assemble(
+    pages: Vec<PageData>,
+    page_w: f64,
+    page_h: f64,
+    embedded_fonts: Vec<EmbeddedFont>,
+) -> Result<Vec<u8>> {
+    if pages.iter().any(|page| {
+        page.embedded_fonts_used
+            .iter()
+            .any(|&index| index >= embedded_fonts.len())
+    }) {
+        return Err(PdfCoreError::InvalidInput(
+            "page references an unavailable embedded font".to_string(),
+        ));
+    }
     let mut pdf = Pdf::new();
     let mut next_id = 1;
     let mut alloc = || {
@@ -476,6 +617,17 @@ fn assemble(pages: Vec<PageData>, page_w: f64, page_h: f64) -> Vec<u8> {
         }
     }
 
+    let embedded_font_refs: Vec<PdfFontRefs> = embedded_fonts
+        .iter()
+        .map(|_| PdfFontRefs {
+            type0: alloc(),
+            descendant: alloc(),
+            descriptor: alloc(),
+            file: alloc(),
+            to_unicode: alloc(),
+        })
+        .collect();
+
     let page_ids: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
     let content_ids: Vec<Ref> = pages.iter().map(|_| alloc()).collect();
     let image_ids: Vec<Option<Ref>> = pages
@@ -494,6 +646,9 @@ fn assemble(pages: Vec<PageData>, page_w: f64, page_h: f64) -> Vec<u8> {
                 .base_font(Name(ALL_FONTS[i].base_name().as_bytes()));
         }
     }
+    for (font, refs) in embedded_fonts.iter().zip(&embedded_font_refs) {
+        font.write_pdf_writer(&mut pdf, *refs);
+    }
 
     let media_box = Rect::new(0.0, 0.0, page_w as f32, page_h as f32);
     for (i, page) in pages.iter().enumerate() {
@@ -503,7 +658,7 @@ fn assemble(pages: Vec<PageData>, page_w: f64, page_h: f64) -> Vec<u8> {
         p.contents(content_ids[i]);
         {
             let mut resources = p.resources();
-            if page.fonts_used.iter().any(|&u| u) {
+            if page.fonts_used.iter().any(|&u| u) || !page.embedded_fonts_used.is_empty() {
                 let mut fonts = resources.fonts();
                 for j in 0..FONT_COUNT {
                     if page.fonts_used[j]
@@ -511,6 +666,10 @@ fn assemble(pages: Vec<PageData>, page_w: f64, page_h: f64) -> Vec<u8> {
                     {
                         fonts.pair(Name(FONT_RES_NAMES[j]), fid);
                     }
+                }
+                for &index in &page.embedded_fonts_used {
+                    let name = resource_name(index);
+                    fonts.pair(Name(name.as_bytes()), embedded_font_refs[index].type0);
                 }
                 fonts.finish();
             }
@@ -532,7 +691,7 @@ fn assemble(pages: Vec<PageData>, page_w: f64, page_h: f64) -> Vec<u8> {
         }
     }
 
-    pdf.finish()
+    Ok(pdf.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -543,27 +702,28 @@ fn assemble(pages: Vec<PageData>, page_w: f64, page_h: f64) -> Vec<u8> {
 pub fn text_to_pdf(text: &str, opts: &DocOptions) -> Result<Vec<u8>> {
     let opts = effective_opts(opts)?;
     let mut eng = LayoutEngine::new(&opts)?;
-    eng.emit_title(&opts);
+    eng.emit_title(&opts)?;
     let size = opts.base_font_size_pt;
 
     // Blank lines separate paragraphs; consecutive non-blank lines re-flow.
     let mut paragraph = String::new();
-    let flush_para = |eng: &mut LayoutEngine, paragraph: &mut String| {
-        let cleaned = sanitize(paragraph);
+    let flush_para = |eng: &mut LayoutEngine, paragraph: &mut String| -> Result<()> {
+        let cleaned = sanitize_run(paragraph);
         *paragraph = String::new();
         if cleaned.trim().is_empty() {
-            return;
+            return Ok(());
         }
         let runs = [Run {
             font: StandardFont::Helvetica,
             text: cleaned,
         }];
-        eng.emit_paragraph(&runs, size, 0.0, 1.3, None);
+        eng.emit_paragraph(&runs, size, 0.0, 1.3, None)?;
         eng.advance(size * 0.65);
+        Ok(())
     };
     for line in text.lines() {
         if line.trim().is_empty() {
-            flush_para(&mut eng, &mut paragraph);
+            flush_para(&mut eng, &mut paragraph)?;
         } else {
             if !paragraph.is_empty() {
                 paragraph.push(' ');
@@ -571,9 +731,9 @@ pub fn text_to_pdf(text: &str, opts: &DocOptions) -> Result<Vec<u8>> {
             paragraph.push_str(line.trim_end());
         }
     }
-    flush_para(&mut eng, &mut paragraph);
+    flush_para(&mut eng, &mut paragraph)?;
 
-    Ok(eng.finish())
+    eng.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +750,7 @@ pub fn csv_to_pdf(csv_bytes: &[u8], opts: &DocOptions) -> Result<Vec<u8>> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for record in reader.records() {
         let record = record?;
-        rows.push(record.iter().map(sanitize).collect());
+        rows.push(record.iter().map(sanitize_run).collect());
     }
     if rows.is_empty() {
         return Err(PdfCoreError::InvalidInput(
@@ -599,10 +759,10 @@ pub fn csv_to_pdf(csv_bytes: &[u8], opts: &DocOptions) -> Result<Vec<u8>> {
     }
 
     let mut eng = LayoutEngine::new(&opts)?;
-    eng.emit_title(&opts);
-    render_table(&mut eng, &rows, opts.base_font_size_pt);
+    eng.emit_title(&opts)?;
+    render_table(&mut eng, &rows, opts.base_font_size_pt)?;
 
-    Ok(eng.finish())
+    eng.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -623,23 +783,18 @@ fn table_col_floor(size: f64) -> f64 {
 
 /// Natural (content-driven) column widths at `size`: the widest cell per
 /// column (header row measured bold) plus padding on both sides.
-fn table_natural_widths(rows: &[Vec<String>], ncols: usize, size: f64) -> Vec<f64> {
+fn table_natural_widths(rows: &[Vec<ResolvedRun>], ncols: usize, size: f64) -> Result<Vec<f64>> {
     let pad = size * 0.5;
     let mut widths = vec![2.0 * pad; ncols];
-    for (ri, row) in rows.iter().enumerate() {
-        let font = if ri == 0 {
-            StandardFont::HelveticaBold
-        } else {
-            StandardFont::Helvetica
-        };
+    for row in rows {
         for (ci, cell) in row.iter().enumerate() {
-            let w = font.text_width_pt(cell, size) + 2.0 * pad;
+            let w = cell.choice.text_width_pt(&cell.text, cell.font, size)? + 2.0 * pad;
             if w > widths[ci] {
                 widths[ci] = w;
             }
         }
     }
-    widths
+    Ok(widths)
 }
 
 /// Squeezes `natural` column widths into `usable` points: widths shrink
@@ -694,52 +849,48 @@ fn squeeze_widths(natural: &[f64], floor: f64, usable: f64) -> Vec<f64> {
 /// readable floor; and when even the floors cannot fit, the whole table's
 /// font shrinks by the needed factor (never below [`TABLE_MIN_FONT_PT`]).
 fn table_layout(
-    rows: &[Vec<String>],
+    rows: &[Vec<ResolvedRun>],
     ncols: usize,
     base_size: f64,
     usable: f64,
-) -> (f64, Vec<f64>) {
+) -> Result<(f64, Vec<f64>)> {
     let mut size = base_size;
-    let mut natural = table_natural_widths(rows, ncols, size);
+    let mut natural = table_natural_widths(rows, ncols, size)?;
     let floors_total: f64 = natural.iter().map(|&w| w.min(table_col_floor(size))).sum();
     if floors_total > usable {
         // All metrics are linear in font size, so this factor is exact.
         size = (size * usable / floors_total).max(TABLE_MIN_FONT_PT);
-        natural = table_natural_widths(rows, ncols, size);
+        natural = table_natural_widths(rows, ncols, size)?;
     }
     let widths = squeeze_widths(&natural, table_col_floor(size), usable);
-    (size, widths)
+    Ok((size, widths))
 }
 
 /// Wraps one cell into lines that fit `avail_w`, capping at
 /// [`MAX_CELL_LINES`] with a trailing ellipsis when content is cut.
-fn wrap_cell(text: &str, font: StandardFont, size: f64, avail_w: f64) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
+fn wrap_cell(cell: &ResolvedRun, size: f64, avail_w: f64) -> Result<Vec<String>> {
+    if cell.text.is_empty() {
+        return Ok(Vec::new());
     }
-    let runs = [Run {
-        font,
-        text: text.to_string(),
-    }];
-    let mut lines: Vec<String> = wrap_runs(&runs, size, avail_w)
+    let mut lines: Vec<String> = wrap_resolved_runs(std::slice::from_ref(cell), size, avail_w)?
         .into_iter()
         .map(|line| line.into_iter().map(|r| r.text).collect())
         .collect();
     if lines.len() > MAX_CELL_LINES {
         lines.truncate(MAX_CELL_LINES);
         let last = lines.last_mut().expect("MAX_CELL_LINES > 0");
-        *last = ellipsize(last, font, size, avail_w);
+        *last = ellipsize(last, cell, size, avail_w)?;
     }
-    lines
+    Ok(lines)
 }
 
 /// Trims `text` so that it plus a trailing "..." fits in `avail_w` points.
-fn ellipsize(text: &str, font: StandardFont, size: f64, avail_w: f64) -> String {
-    let ell_w = font.text_width_pt("...", size);
+fn ellipsize(text: &str, run: &ResolvedRun, size: f64, avail_w: f64) -> Result<String> {
+    let ell_w = run.choice.text_width_pt("...", run.font, size)?;
     let mut out = String::new();
     let mut w = 0.0;
     for c in text.chars() {
-        let cw = font.glyph_width_milli(c) as f64 * size / 1000.0;
+        let cw = run.choice.char_width_pt(c, run.font, size)?;
         if w + cw + ell_w > avail_w + 0.01 {
             break;
         }
@@ -747,31 +898,51 @@ fn ellipsize(text: &str, font: StandardFont, size: f64, avail_w: f64) -> String 
         w += cw;
     }
     out.push_str("...");
-    out
+    Ok(out)
 }
 
 /// Draws `rows` as a zebra-striped table with a bold header repeated on
 /// every page. Cells word-wrap within their column; the row grows to its
 /// tallest cell.
-fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) {
+fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) -> Result<()> {
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
+    let resolved_rows: Vec<Vec<ResolvedRun>> = rows
+        .iter()
+        .enumerate()
+        .map(|(ri, row)| {
+            let font = if ri == 0 {
+                StandardFont::HelveticaBold
+            } else {
+                StandardFont::Helvetica
+            };
+            row.iter()
+                .map(|text| {
+                    Ok(ResolvedRun {
+                        font,
+                        choice: eng.font_session.resolve(text)?,
+                        text: text.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .collect::<Result<_>>()?;
     let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
     let usable = eng.usable_width();
-    let (size, widths) = table_layout(rows, ncols, base_size, usable);
+    let (size, widths) = table_layout(&resolved_rows, ncols, base_size, usable)?;
     let pad = size * 0.5;
     let lead = size * 1.2;
     let table_w: f64 = widths.iter().sum();
     let left = eng.left();
 
-    let wrap_row = |cells: &[String], font: StandardFont| -> Vec<Vec<String>> {
+    let wrap_row = |cells: &[ResolvedRun]| -> Result<Vec<Vec<String>>> {
         widths
             .iter()
             .enumerate()
             .map(|(ci, w)| match cells.get(ci) {
-                Some(cell) => wrap_cell(cell, font, size, (w - 2.0 * pad).max(1.0)),
-                None => Vec::new(),
+                Some(cell) => wrap_cell(cell, size, (w - 2.0 * pad).max(1.0)),
+                None => Ok(Vec::new()),
             })
             .collect()
     };
@@ -782,8 +953,9 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) {
 
     let draw_row = |eng: &mut LayoutEngine,
                     cell_lines: &[Vec<String>],
-                    font: StandardFont,
-                    bg: Option<f64>| {
+                    cells: &[ResolvedRun],
+                    bg: Option<f64>|
+     -> Result<()> {
         let row_h = row_height(cell_lines);
         let top = eng.y;
         if let Some(gray) = bg {
@@ -794,35 +966,47 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) {
             if let Some(lines) = cell_lines.get(ci) {
                 for (li, line) in lines.iter().enumerate() {
                     let baseline = top - lead * (li as f64 + 1.0);
-                    eng.draw_text_line(font, size, cx + pad, baseline, line);
+                    if let Some(cell) = cells.get(ci) {
+                        eng.draw_text_line(
+                            cell.font,
+                            &cell.choice,
+                            size,
+                            cx + pad,
+                            baseline,
+                            line,
+                        )?;
+                    }
                 }
             }
             cx += width;
         }
         eng.advance(row_h);
+        Ok(())
     };
 
-    let header_lines = wrap_row(&rows[0], StandardFont::HelveticaBold);
+    let header_lines = wrap_row(&resolved_rows[0])?;
     let header_h = row_height(&header_lines);
-    let draw_header = |eng: &mut LayoutEngine| {
-        draw_row(eng, &header_lines, StandardFont::HelveticaBold, Some(0.88));
+    let draw_header = |eng: &mut LayoutEngine| -> Result<()> {
+        draw_row(eng, &header_lines, &resolved_rows[0], Some(0.88))?;
         eng.draw_rule(left, left + table_w, eng.y, 0.7);
+        Ok(())
     };
 
     eng.ensure_room(header_h + lead + size);
-    draw_header(eng);
+    draw_header(eng)?;
 
-    for (ri, row) in rows.iter().enumerate().skip(1) {
-        let cell_lines = wrap_row(row, StandardFont::Helvetica);
+    for (ri, row) in resolved_rows.iter().enumerate().skip(1) {
+        let cell_lines = wrap_row(row)?;
         let row_h = row_height(&cell_lines);
         if eng.y - row_h < eng.margin - 0.01 {
             eng.break_page();
-            draw_header(eng);
+            draw_header(eng)?;
         }
         // Zebra stripes on even data rows.
         let bg = if ri % 2 == 0 { Some(0.955) } else { None };
-        draw_row(eng, &cell_lines, StandardFont::Helvetica, bg);
+        draw_row(eng, &cell_lines, row, bg)?;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -846,7 +1030,7 @@ fn heading_scale(level: HeadingLevel) -> f64 {
 pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
     let opts = effective_opts(opts)?;
     let mut eng = LayoutEngine::new(&opts)?;
-    eng.emit_title(&opts);
+    eng.emit_title(&opts)?;
     let base = opts.base_font_size_pt;
 
     // Inline state.
@@ -885,15 +1069,16 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
         leading: f64,
         marker: &mut Option<String>,
         gap_after: f64,
-    ) {
+    ) -> Result<()> {
         let marker_arg = marker.take().map(|m| (m, StandardFont::Helvetica));
         if runs.iter().all(|r| r.text.trim().is_empty()) && marker_arg.is_none() {
             runs.clear();
-            return;
+            return Ok(());
         }
         let block = std::mem::take(runs);
-        eng.emit_paragraph(&block, size, indent, leading, marker_arg);
+        eng.emit_paragraph(&block, size, indent, leading, marker_arg)?;
         eng.advance(gap_after);
+        Ok(())
     }
 
     for event in Parser::new_ext(markdown, Options::ENABLE_TABLES) {
@@ -919,7 +1104,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                             1.3,
                             &mut pending_marker,
                             base * 0.2,
-                        );
+                        )?;
                     }
                     lists.push(start);
                 }
@@ -935,7 +1120,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                             1.3,
                             &mut pending_marker,
                             base * 0.2,
-                        );
+                        )?;
                     }
                     let marker = match lists.last_mut() {
                         Some(Some(n)) => {
@@ -981,7 +1166,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         1.25,
                         &mut pending_marker,
                         base * 0.55,
-                    );
+                    )?;
                     in_heading = None;
                 }
                 TagEnd::Paragraph => {
@@ -999,7 +1184,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         1.3,
                         &mut pending_marker,
                         gap,
-                    );
+                    )?;
                 }
                 TagEnd::Item => {
                     // Tight list items carry inline text without a Paragraph.
@@ -1012,7 +1197,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         1.3,
                         &mut pending_marker,
                         base * 0.2,
-                    );
+                    )?;
                 }
                 TagEnd::List(_) => {
                     lists.pop();
@@ -1025,19 +1210,19 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 TagEnd::CodeBlock => {
                     in_code_block = false;
                     let indent = 18.0 * lists.len() as f64;
-                    render_code_block(&mut eng, &code_buf, base, indent);
+                    render_code_block(&mut eng, &code_buf, base, indent)?;
                     code_buf.clear();
                 }
                 TagEnd::HtmlBlock => {
                     if let Some(html) = html_block.take() {
-                        let text = sanitize(&strip_html_tags(&html));
+                        let text = sanitize_run(&strip_html_tags(&html));
                         if !text.trim().is_empty() {
                             let block = [Run {
                                 font: StandardFont::Helvetica,
                                 text,
                             }];
                             let indent = 18.0 * lists.len() as f64;
-                            eng.emit_paragraph(&block, base, indent, 1.3, None);
+                            eng.emit_paragraph(&block, base, indent, 1.3, None)?;
                             eng.advance(base * 0.65);
                         }
                     }
@@ -1047,7 +1232,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         && !rows.is_empty()
                     {
                         eng.advance(base * 0.35);
-                        render_table(&mut eng, &rows, base);
+                        render_table(&mut eng, &rows, base)?;
                         eng.advance(base * 0.45);
                     }
                     table_row.clear();
@@ -1060,7 +1245,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 }
                 TagEnd::TableCell => {
                     if let Some(cell) = table_cell.take() {
-                        table_row.push(sanitize(&cell));
+                        table_row.push(sanitize_run(&cell));
                     }
                 }
                 TagEnd::Image => skip_depth = skip_depth.saturating_sub(1),
@@ -1077,7 +1262,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                     code_buf.push_str(&text);
                 } else {
                     let font = inline_font(bold, emph, in_heading.is_some());
-                    push_run(&mut runs, font, &sanitize(&text));
+                    push_run(&mut runs, font, &sanitize_run(&text));
                 }
             }
             Event::Code(text) => {
@@ -1085,7 +1270,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                     if let Some(cell) = table_cell.as_mut() {
                         cell.push_str(&text);
                     } else {
-                        push_run(&mut runs, StandardFont::Courier, &sanitize(&text));
+                        push_run(&mut runs, StandardFont::Courier, &sanitize_run(&text));
                     }
                 }
             }
@@ -1119,7 +1304,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 } else if let Some(cell) = table_cell.as_mut() {
                     cell.push_str(&strip_html_tags(&html));
                 } else {
-                    let text = sanitize(&strip_html_tags(&html));
+                    let text = sanitize_run(&strip_html_tags(&html));
                     if !text.trim().is_empty() {
                         let font = inline_font(bold, emph, in_heading.is_some());
                         push_run(&mut runs, font, &text);
@@ -1144,10 +1329,10 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
             1.3,
             &mut pending_marker,
             0.0,
-        );
+        )?;
     }
 
-    Ok(eng.finish())
+    eng.finish()
 }
 
 /// Crude raw-HTML handling: drops `<...>` tag spans (each removed tag leaves
@@ -1175,10 +1360,9 @@ fn strip_html_tags(html: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Renders a code block: Courier text on per-line light-gray background
-/// rectangles (they tile vertically), hard-wrapping long lines by character
-/// count. Handles page breaks mid-block.
-fn render_code_block(eng: &mut LayoutEngine, code: &str, base: f64, indent: f64) {
+/// Renders a code block on per-line light-gray background rectangles. Standard
+/// Courier keeps its character-count wrapping; embedded runs use hmtx widths.
+fn render_code_block(eng: &mut LayoutEngine, code: &str, base: f64, indent: f64) -> Result<()> {
     let size = base * 0.9;
     let pad = 6.0;
     let lead = size * 1.4;
@@ -1190,15 +1374,35 @@ fn render_code_block(eng: &mut LayoutEngine, code: &str, base: f64, indent: f64)
     eng.advance(base * 0.35);
     let left = eng.left() + indent;
     for raw_line in code.lines() {
-        let line = sanitize_code_line(raw_line);
-        let chunks: Vec<String> = if line.is_empty() {
-            vec![String::new()]
-        } else {
-            line.chars()
+        let line = sanitize_code_run(raw_line);
+        let choice = eng.font_session.resolve(&line)?;
+        let chunks: Vec<String> = match &choice {
+            _ if line.is_empty() => vec![String::new()],
+            FontChoice::Standard => line
+                .chars()
                 .collect::<Vec<_>>()
                 .chunks(max_chars)
                 .map(|c| c.iter().collect())
-                .collect()
+                .collect(),
+            FontChoice::Embedded(_) => {
+                let max_width = (block_w - 2.0 * pad).max(1.0);
+                let mut chunks = Vec::new();
+                let mut chunk = String::new();
+                let mut width = 0.0;
+                for ch in line.chars() {
+                    let char_width = choice.char_width_pt(ch, StandardFont::Courier, size)?;
+                    if width + char_width > max_width + 0.01 && !chunk.is_empty() {
+                        chunks.push(std::mem::take(&mut chunk));
+                        width = 0.0;
+                    }
+                    chunk.push(ch);
+                    width += char_width;
+                }
+                if !chunk.is_empty() {
+                    chunks.push(chunk);
+                }
+                chunks
+            }
         };
         for chunk in chunks {
             eng.ensure_room(lead);
@@ -1206,10 +1410,18 @@ fn render_code_block(eng: &mut LayoutEngine, code: &str, base: f64, indent: f64)
             eng.draw_rect_fill(left, top - lead, block_w, lead, 0.93);
             eng.advance(lead);
             let baseline = eng.y + size * 0.32;
-            eng.draw_text_line(StandardFont::Courier, size, left + pad, baseline, &chunk);
+            eng.draw_text_line(
+                StandardFont::Courier,
+                &choice,
+                size,
+                left + pad,
+                baseline,
+                &chunk,
+            )?;
         }
     }
     eng.advance(base * 0.65);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,6 +1470,7 @@ pub fn images_to_pdf(images: &[&[u8]], opts: &DocOptions) -> Result<Vec<u8>> {
         pages.push(PageData {
             content: content.finish().into_vec(),
             fonts_used: [false; FONT_COUNT],
+            embedded_fonts_used: BTreeSet::new(),
             image: Some(RgbSamples {
                 width: iw,
                 height: ih,
@@ -1266,7 +1479,7 @@ pub fn images_to_pdf(images: &[&[u8]], opts: &DocOptions) -> Result<Vec<u8>> {
         });
     }
 
-    Ok(assemble(pages, page_w, page_h))
+    assemble(pages, page_w, page_h, Vec::new())
 }
 
 /// Converts any decoded image to RGB8, compositing alpha over white.

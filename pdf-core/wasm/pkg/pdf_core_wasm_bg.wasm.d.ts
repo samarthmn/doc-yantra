@@ -6,6 +6,7 @@ export const csv_to_pdf: (a: number, b: number) => [number, number, number, numb
 export const markdown_to_pdf: (a: number, b: number) => [number, number, number, number];
 export const merge_pdfs: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const page_count: (a: number, b: number) => [number, number, number];
+export const register_font: (a: number, b: number) => [number, number];
 export const text_to_pdf: (a: number, b: number) => [number, number, number, number];
 export const validate_pdf: (a: number, b: number) => [number, number, number, number];
 export const version: () => [number, number];

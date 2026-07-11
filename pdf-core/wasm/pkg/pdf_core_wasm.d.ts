@@ -33,6 +33,13 @@ export function merge_pdfs(pdfs: Uint8Array[], watermark_json?: string | null, w
 export function page_count(pdf: Uint8Array): number;
 
 /**
+ * Adds an embeddable font to the process-global registry. The generated JS
+ * glue applies the same limit before copying `bytes` into wasm linear memory;
+ * this Rust check is defense in depth for direct wasm callers.
+ */
+export function register_font(bytes: Uint8Array): void;
+
+/**
  * Plain text → PDF.
  */
 export function text_to_pdf(text: string): Uint8Array;

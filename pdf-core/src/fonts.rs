@@ -1,8 +1,8 @@
 //! Standard-14 font metrics (Adobe AFM widths, 1/1000 em units).
 //!
 //! Only ASCII 32..=126 is tabulated; other characters fall back to an average
-//! width. This is sufficient for watermark centering and simple document
-//! generation; full Unicode text needs an embedded font (deferred).
+//! width. WinAnsi runs keep this legacy path; other supported scripts use a
+//! runtime-registered CID font through [`crate::embed_font`].
 
 /// PDF standard-14 fonts supported by pdf-core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

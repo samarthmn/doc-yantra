@@ -29,6 +29,7 @@ fn err(e: impl std::fmt::Display) -> JsError {
 /// consumers.
 const MAX_INPUT_BYTES: usize = 100 * 1024 * 1024; // 100 MiB per document
 const MAX_MERGE_TOTAL_BYTES: usize = 200 * 1024 * 1024; // 200 MiB per merge set
+const MAX_FONT_BYTES: usize = 32 * 1024 * 1024; // 32 MiB per registered face
 
 fn guard_input_size(len: usize, limit: usize, what: &str) -> Result<(), JsError> {
     if len > limit {
@@ -212,6 +213,20 @@ fn spec_from_payload(
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
+
+/// Adds an embeddable font to the process-global registry. The generated JS
+/// glue applies the same limit before copying `bytes` into wasm linear memory;
+/// this Rust check is defense in depth for direct wasm callers.
+#[wasm_bindgen]
+pub fn register_font(bytes: &[u8]) -> Result<(), JsError> {
+    if bytes.len() > MAX_FONT_BYTES {
+        return Err(JsError::new(&format!(
+            "font is {} bytes, over the 32 MiB in-process limit",
+            bytes.len()
+        )));
+    }
+    pdf_core::embed_font::register_font(bytes).map_err(err)
+}
 
 /// Merges one or more PDFs and optionally applies a watermark — the local
 /// equivalent of DocYantra's `POST /docyantra/pdf/merge`. `watermark_json`

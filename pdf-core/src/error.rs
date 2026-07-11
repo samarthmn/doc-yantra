@@ -25,6 +25,10 @@ pub enum PdfCoreError {
     #[error("unsupported operation: {0}")]
     Unsupported(String),
 
+    /// Machine-readable fail-closed text/font rejection.
+    #[error("unsupported:{code}: {message}")]
+    TextUnsupported { code: &'static str, message: String },
+
     #[error("encoding error: {0}")]
     Encoding(String),
 }

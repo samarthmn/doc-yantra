@@ -6,7 +6,8 @@
     "pdf_core_wasm_bg.wasm",
     "pdf_core_wasm.js",
     "pdf_core_wasm.d.ts",
-    "web"
+    "web",
+    "fonts"
   ],
   "main": "pdf_core_wasm.js",
   "types": "pdf_core_wasm.d.ts",

@@ -17,13 +17,20 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import zlib from "node:zlib";
+import { transformPdfGlue } from "../pdf-core/wasm/postprocess-glue.mjs";
 
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const PKG = join(ROOT, "pdf-core", "wasm", "pkg");
+const PACKAGED_FONTS = [
+  "LiberationSans-Regular.ttf",
+  "LiberationSans-Bold.ttf",
+  "LiberationMono-Regular.ttf",
+];
 
 const main = require(PKG);
+let packagedFontsRegistered = false;
 
 // --- helpers ---------------------------------------------------------------
 
@@ -40,6 +47,20 @@ function isPdf(u8) {
 /** Bytewise inequality — cheap "the operation changed something" assertion. */
 function differs(a, b) {
   return Buffer.compare(Buffer.from(a), Buffer.from(b)) !== 0;
+}
+
+/** Register package-shipped runtime faces exactly once in this test process. */
+function registerPackagedFonts() {
+  if (packagedFontsRegistered) return;
+  for (const name of PACKAGED_FONTS) {
+    main.register_font(readFileSync(join(PKG, "fonts", name)));
+  }
+  packagedFontsRegistered = true;
+}
+
+/** Predicate for recoverable fail-closed text errors crossing wasm. */
+function isUnsupportedError(error) {
+  return error instanceof Error && error.message.startsWith("unsupported:");
 }
 
 /**
@@ -101,6 +122,97 @@ describe("engine metadata", () => {
 
   test("validate_pdf() rejects garbage", () => {
     assert.throws(() => main.validate_pdf(new Uint8Array([0, 1, 2, 3])));
+  });
+});
+
+// --- embedded Unicode fonts -----------------------------------------------
+
+describe("embedded Unicode fonts", () => {
+  test("register_font() accepts all packaged Liberation faces", () => {
+    const manifest = JSON.parse(readFileSync(join(PKG, "package.json"), "utf8"));
+    assert.ok(manifest.files.includes("fonts"), "npm package includes runtime fonts");
+    assert.doesNotThrow(registerPackagedFonts);
+  });
+
+  test("Cyrillic merge-time watermark produces a valid embedded-font PDF", () => {
+    registerPackagedFonts();
+    const a = mock("pdf", "file1.pdf");
+    const b = mock("pdf", "file2.pdf");
+    const expectedPages = main.page_count(a) + main.page_count(b);
+    const merged = main.merge_pdfs(
+      [a, b],
+      JSON.stringify({ lines: ["Конфиденциально"] }),
+    );
+
+    assert.ok(isPdf(merged), "has %PDF magic");
+    assert.equal(main.page_count(merged), expectedPages);
+    assert.equal(JSON.parse(main.validate_pdf(merged)).pageCount, expectedPages);
+    assert.ok(
+      Buffer.from(merged).includes(Buffer.from("/FontFile2")),
+      "watermark embeds a TrueType font",
+    );
+  });
+
+  test("Cyrillic and Greek CSV produces a valid embedded-font PDF", () => {
+    registerPackagedFonts();
+    const csv = Buffer.from(
+      "language,value\nRussian,Конфиденциально\nGreek,Εμπιστευτικό\n",
+      "utf8",
+    );
+    const pdf = main.csv_to_pdf(csv);
+
+    assert.ok(isPdf(pdf), "has %PDF magic");
+    assert.ok(main.page_count(pdf) >= 1);
+    assert.equal(JSON.parse(main.validate_pdf(pdf)).pageCount, main.page_count(pdf));
+  });
+
+  test("Arabic watermark fails closed with an unsupported prefix", () => {
+    registerPackagedFonts();
+    assert.throws(
+      () => main.apply_watermark(mock("pdf"), JSON.stringify({ lines: ["مرحبا"] })),
+      (error) => isUnsupportedError(error) && error.message.startsWith("unsupported:script:"),
+    );
+  });
+
+  test("CJK without a covering face fails closed with an unsupported prefix", () => {
+    registerPackagedFonts();
+    assert.throws(
+      () => main.apply_watermark(mock("pdf"), JSON.stringify({ lines: ["你好"] })),
+      (error) =>
+        isUnsupportedError(error) && error.message.startsWith("unsupported:glyph-coverage:"),
+    );
+  });
+
+  test("register_font rejects over 32 MiB before wasm allocation", () => {
+    assert.throws(
+      () => main.register_font(new Uint8Array(32 * 1024 * 1024 + 1)),
+      /font is 33554433 bytes, over the 32 MiB in-process limit/,
+    );
+  });
+
+  test("register_font pre-copy guard is present in both generated targets", () => {
+    for (const relative of ["pdf_core_wasm.js", "web/pdf_core_wasm.js"]) {
+      const source = readFileSync(join(PKG, relative), "utf8");
+      const functionStart = source.indexOf("function register_font(bytes)");
+      const guardAt = source.indexOf("guardRegisteredFontInput(bytes);", functionStart);
+      const copyAt = source.indexOf("passArray8ToWasm0(bytes", functionStart);
+      assert.notEqual(functionStart, -1, `${relative}: register_font missing`);
+      assert.ok(guardAt > functionStart, `${relative}: pre-copy guard missing`);
+      assert.ok(copyAt > guardAt, `${relative}: wasm copy occurs before guard`);
+    }
+  });
+
+  test("font glue postprocessor is deterministic and idempotent", () => {
+    const generated = [
+      "/* generated */",
+      "export function register_font(bytes) {",
+      "    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);",
+      "}",
+      "",
+    ].join("\n");
+    const once = transformPdfGlue(generated, "fixture.js");
+    assert.equal(transformPdfGlue(generated, "fixture.js"), once);
+    assert.equal(transformPdfGlue(once, "fixture.js"), once);
   });
 });
 

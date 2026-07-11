@@ -8,6 +8,7 @@
 //! stays IO-agnostic and embeddable (service, N-API, or WASM for Zone 1).
 
 pub mod assembly;
+pub mod embed_font;
 pub mod error;
 #[cfg(feature = "pdfium")]
 pub mod extract;
