@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "office-core"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "image",
  "miniz_oxide",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "office-core-wasm"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
