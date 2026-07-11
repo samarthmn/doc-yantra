@@ -132,7 +132,7 @@ if (profile.supported) {
   `"invalid: …"` / `"internal: …"` otherwise. Parse the `unsupported:` prefix to
   record the fallback reason.
 - The built Node and browser glue reject inputs over **50 MiB** before copying
-  into wasm memory; defer them to the DocYantra compatibility service.
+  into wasm memory; treat that as a terminal input-too-large error.
 - Trap contract is identical to `@samarthmn/doc-yantra`: `JsError` is
   recoverable; a panic/OOM traps and the instance must be discarded.
 
@@ -140,8 +140,9 @@ DocKosha's adapter is `src/server/officeCoreWasm.ts` (mirrors `pdfCoreWasm.ts`).
 
 Office → PDF is provided by the separate
 `@samarthmn/doc-yantra-office` package for supported DOCX/PPTX/XLSX/XLSM
-documents. Legacy formats and documents outside its fail-closed envelope use
-the DocYantra LibreOffice compatibility service.
+documents. Legacy binary formats (.doc/.ppt/.xls) are unsupported, and
+documents outside the fail-closed envelope surface `unsupported:<code>`
+errors the app records as conversion failures.
 
 ```ts
 import * as pdf from "@samarthmn/doc-yantra";
@@ -164,11 +165,10 @@ pdf.redact_pdf(
 ```
 
 In DocKosha this is wrapped by `src/server/pdfCoreWasm.ts`, which keeps wasm
-errors recoverable. Compatible merge, watermark, and conversion failures can
-fall back to DocYantra HTTP. Redaction cannot: callers must handle an
-unsupported or oversized redaction without sending it to an HTTP redaction
-endpoint. Text outside the engine's registered font coverage in csv/md
-conversion or watermark lines can still use the compatible HTTP route.
+errors recoverable and treats every failure as terminal for that operation —
+there is no HTTP fallback for any operation. Text outside the registered font
+coverage in csv/md conversion or watermark lines fails closed with an
+`unsupported:*` error; register a covering face to widen coverage.
 
 ---
 

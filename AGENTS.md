@@ -9,11 +9,11 @@ distributable **npm package** `@samarthmn/doc-yantra` (`pdf-core/wasm/`, the Zon
 engine compiled to WebAssembly). Consumers install the package and run PDF ops
 in-process — no Rust toolchain, no network hop.
 
-**Not in this repo:** the DocYantra HTTP service (NestJS + Gotenberg/LibreOffice/
-Chromium/pdfium) still lives in the DocKosha app repo at `doc-kosha/doc-yantra/`.
-It keeps serving heavy conversion features such as arbitrary HTML→PDF and is a
-fallback for compatible wasm operations; redaction now runs in-process. When
-you see references to the "service" or an HTTP fallback, that code is elsewhere.
+**History note:** the DocYantra HTTP service (NestJS + Gotenberg/LibreOffice/
+Chromium/pdfium) that once served heavy conversions and fallbacks has been
+**retired and deleted** from the DocKosha app repo. The wasm packages are the
+only conversion path; operations the engines cannot prove fail closed with an
+`unsupported:*` error instead of falling back anywhere.
 
 ## Zone 1 vs Zone 2 — the core architectural split
 
@@ -38,9 +38,9 @@ IO-agnostic and embeddable.
 
 `pdf-core/wasm/build.sh` produces `pkg/` from Zone 1 only. The wasm crate
 (`pdf-core/wasm/src/lib.rs`) is a thin wasm-bindgen wrapper whose watermark JSON
-payload is a **faithful port of `parseWatermark`** from the service's
-`pdf.service.ts` — so callers switch between the HTTP service and this package
-without reshaping data.
+payload is a **faithful port of `parseWatermark`** from the retired HTTP
+service — DocKosha kept the same payload shape across the migration, so the
+package accepts exactly what the service did.
 
 | Import | Build | Contents |
 | --- | --- | --- |
@@ -135,8 +135,10 @@ bump plus the regenerated `pkg/` together.
   **uncatchable trap** that poisons the instance. Zone 1 exports reject oversized
   inputs (~100 MiB/doc, ~200 MiB/merge) as a normal `JsError` before touching
   linear memory. See `CONSUMING.md` § "Panic / trap contract".
-- **Fonts are standard-14 only** (WinAnsi/CP1252). Non-Latin-1 text becomes `?`;
-  consumers route such text to the HTTP service. Full Unicode needs embedded fonts (deferred).
+- **Fonts: standard-14 (WinAnsi/CP1252) plus runtime-registered Unicode faces.**
+  Non-WinAnsi text renders through `register_font()`-supplied faces as embedded
+  CID subsets; complex-script/RTL text and uncovered glyphs fail closed with
+  `unsupported:*` (no HTTP fallback exists).
 
 ## Cargo features
 

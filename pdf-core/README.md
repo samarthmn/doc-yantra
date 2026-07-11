@@ -27,8 +27,9 @@ MIT/Apache-2.0; pdfium: BSD — the AGPL PyMuPDF dependency is gone).
 | `redact` | legacy pdfium redactor retained for native cross-validation of `redact_pure` |
 | `forms` | AcroForm field listing, text-field fill, flatten |
 
-**Out of scope (stays on heavy engines):** Office → PDF (LibreOffice),
-arbitrary HTML → PDF (Chromium). Those are served by the DocYantra HTTP service, which lives in the DocKosha app repo (`doc-kosha/doc-yantra/`).
+**Out of scope:** Office → PDF (see the sibling `office-core` crate) and
+arbitrary HTML → PDF (dropped with the retired DocYantra HTTP service — no
+Chromium remains in the stack).
 
 ## Speed (measured, release build, Apple Silicon)
 
@@ -132,8 +133,8 @@ The output (`wasm/pkg`, ~2.8MB `.wasm`) is published as
 binary into each function. **`wasm/pkg` must be committed** — Vercel builds
 don't have a Rust toolchain. Rebuild + re-commit after changing Rust code.
 
-Wired in the app. Compatible merge, watermark, and conversion failures can
-fall back to DocYantra HTTP; redaction runs only in-process:
+Wired in the app; every operation is in-process and failures are terminal
+(the DocYantra HTTP service is retired):
 - `src/server/pdfCoreWasm.ts` — adapter (lazy load, never throws)
 - `src/server/watermarkService.ts` — merge + watermark (all download routes)
 - `src/server/conversionService.ts` — csv/md conversion (no more Chromium)
@@ -144,11 +145,12 @@ lopdf's rayon, which cannot run threads in wasm).
 
 ## Deferred (roadmap)
 
-Embedded TTF fonts + full Unicode · AES-256 encryption · linearization ·
+Complex-script/RTL shaping (embedded CID fonts shipped; shaping still fails
+closed) · AES-256 encryption · linearization ·
 attachments/bookmarks editing · annotations API · OCR (Zone 3) · PAdES
 signing (Zone 3) · N-API packaging.
 
 ## Remaining DocYantra usage after WASM integration
 
-Office→PDF (LibreOffice) · arbitrary HTML→PDF (Chromium) · compatible
-merge, watermark, and conversion fallbacks. Redaction has no HTTP fallback.
+None — the HTTP service is retired and deleted. The npm packages are the
+only processing path in DocKosha.
