@@ -1,8 +1,8 @@
 //! # pdf-core — DocKosha's native PDF engine
 //!
 //! Zone 1 (pure Rust, lopdf/pdf-writer): assembly, watermarking, metadata,
-//! generation. Zone 2 (pdfium, BSD-licensed): rasterization, text extraction,
-//! redaction, forms.
+//! generation, redaction. Zone 2 (pdfium, BSD-licensed): rasterization, text
+//! extraction, legacy redaction cross-validation, forms.
 //!
 //! All operations take and return `&[u8]`/`Vec<u8>` PDF bytes so the crate
 //! stays IO-agnostic and embeddable (service, N-API, or WASM for Zone 1).
@@ -23,6 +23,8 @@ pub mod pdfium;
 pub mod raster;
 #[cfg(feature = "pdfium")]
 pub mod redact;
+pub mod redact_pure;
+pub mod redact_types;
 pub mod testkit;
 pub mod watermark;
 

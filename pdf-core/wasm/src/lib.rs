@@ -10,6 +10,7 @@ use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 use pdf_core::watermark::{Pattern, WatermarkImage, WatermarkSpec};
+use pdf_core::{PdfCoreError, redact_types::RedactArea};
 
 const DEFAULT_COLOR: [u8; 3] = [0x4B, 0x55, 0x63];
 const DEFAULT_ROTATION_DEG: f64 = -40.0;
@@ -18,15 +19,24 @@ fn err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }
 
+fn redact_err(error: PdfCoreError) -> JsError {
+    match error {
+        PdfCoreError::Unsupported(message) => JsError::new(&format!("unsupported:{message}")),
+        PdfCoreError::TextUnsupported { code, message } => {
+            JsError::new(&format!("unsupported:{code}: {message}"))
+        }
+        other => err(other),
+    }
+}
+
 /// Hard ceilings on inputs handed to the wasm engine (Y-6). wasm32 linear
 /// memory is capped and practical OOM happens well before that; a merge
 /// additionally holds every input plus the merged copy at once. Oversized
 /// inputs are rejected here as a NORMAL `JsError` (never an uncatchable trap)
-/// so consumers can fall back to the HTTP service instead of risking an
-/// OOM-abort that poisons the instance — see the panic/trap contract in
-/// CONSUMING.md. These limits sit ABOVE the consumer-side guards (DocKosha
-/// routes to DocYantra well below them); this is the backstop for direct
-/// consumers.
+/// instead of risking an OOM-abort that poisons the instance — see the
+/// panic/trap contract in CONSUMING.md. These are backstops for direct
+/// consumers; operations which still have a service implementation may use it
+/// as their fallback, while redaction must be retried with a smaller input.
 const MAX_INPUT_BYTES: usize = 100 * 1024 * 1024; // 100 MiB per document
 const MAX_MERGE_TOTAL_BYTES: usize = 200 * 1024 * 1024; // 200 MiB per merge set
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024; // 32 MiB per registered face
@@ -34,7 +44,7 @@ const MAX_FONT_BYTES: usize = 32 * 1024 * 1024; // 32 MiB per registered face
 fn guard_input_size(len: usize, limit: usize, what: &str) -> Result<(), JsError> {
     if len > limit {
         return Err(JsError::new(&format!(
-            "{what} is {len} bytes, over the {} MiB in-process limit; use the HTTP service for inputs this large",
+            "{what} is {len} bytes, over the {} MiB in-process limit",
             limit / (1024 * 1024)
         )));
     }
@@ -79,6 +89,28 @@ struct ImagePayload {
     data_url: Option<String>,
     width_pt: Option<f64>,
     height_pt: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RedactAreaPayload {
+    page_index: u32,
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+}
+
+impl From<RedactAreaPayload> for RedactArea {
+    fn from(area: RedactAreaPayload) -> Self {
+        Self {
+            page_index: area.page_index,
+            left: area.left,
+            top: area.top,
+            width: area.width,
+            height: area.height,
+        }
+    }
 }
 
 /// Ports DocYantra's `parseHexColor`: 3- or 6-digit hex (with or without
@@ -294,6 +326,48 @@ pub fn apply_watermark(
     }
     let spec = spec_from_payload(watermark_json, watermark_image).map_err(|e| JsError::new(&e))?;
     pdf_core::watermark::apply_watermark(pdf, &spec).map_err(err)
+}
+
+/// Permanently redacts service-compatible percentage areas from a PDF.
+///
+/// `areas_json` must be an array of
+/// `{pageIndex,left,top,width,height}` objects measured on displayed pages.
+#[wasm_bindgen]
+pub fn redact_pdf(pdf: &[u8], areas_json: &str) -> Result<Vec<u8>, JsError> {
+    guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
+    guard_input_size(areas_json.len(), MAX_INPUT_BYTES, "redaction JSON")?;
+    let payload: Vec<RedactAreaPayload> = serde_json::from_str(areas_json)
+        .map_err(|_| JsError::new("Invalid redaction payload (must be a JSON array)"))?;
+    if payload.is_empty() {
+        return Err(JsError::new("redactions must be a non-empty array"));
+    }
+    if payload.len() > 800 {
+        return Err(JsError::new("redactions exceed maximum allowed (800)"));
+    }
+    for (index, area) in payload.iter().enumerate() {
+        if area.left < 0.0 || area.top < 0.0 || area.width <= 0.0 || area.height <= 0.0 {
+            return Err(JsError::new(&format!(
+                "redactions[{index}] must have positive size and non-negative position"
+            )));
+        }
+        if area.left > 100.0
+            || area.top > 100.0
+            || area.width > 100.0
+            || area.height > 100.0
+        {
+            return Err(JsError::new(&format!(
+                "redactions[{index}] values must be within 0..100"
+            )));
+        }
+        if area.left + area.width > 100.0 || area.top + area.height > 100.0 {
+            return Err(JsError::new(&format!(
+                "redactions[{index}] exceeds page bounds"
+            )));
+        }
+    }
+    let areas: Vec<RedactArea> = payload.into_iter().map(Into::into).collect();
+    let output = pdf_core::redact_pure::redact_pure(pdf, &areas).map_err(redact_err)?;
+    Ok(output.pdf)
 }
 
 /// CSV bytes → paginated PDF table (replaces the csv→HTML→Chromium route,

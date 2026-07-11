@@ -5,17 +5,16 @@ This repo is DocKosha's **proprietary PDF engine** and its distributable
 
 | Path | What it is |
 | --- | --- |
-| `pdf-core/` | The Rust engine: merge, split, watermark, metadata, CSV/Markdown/text/image → PDF (Zone 1), plus pdfium-backed raster/extract/redact/forms (Zone 2, native-only). See [`pdf-core/README.md`](pdf-core/README.md). |
-| `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS — watermark/merge/csv/md, 1.7MB), `./web` (browser ESM — Zone 1 for client-side previews, 1.7MB). Office→PDF is provided by the separate Office package below; out-of-envelope files use the compatibility service. |
+| `pdf-core/` | The Rust engine: merge, split, watermark, metadata, CSV/Markdown/text/image → PDF, and pure-Rust redaction (Zone 1), plus pdfium-backed raster/extract/forms and legacy redaction cross-validation (Zone 2, native-only). See [`pdf-core/README.md`](pdf-core/README.md). |
+| `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS), `./web` (browser ESM); both expose Zone 1, including fail-closed redaction. Office→PDF is provided by the separate Office package below. |
 | `office-core/` | The pure-Rust **Office → PDF** engine: DOCX/PPTX/XLSX layout + PDF emission, fail-closed envelope, DocProfile router contract. No LibreOffice/Chromium/pdfium in the conversion path. See [`office-core/README.md`](office-core/README.md). |
 | `office-core/wasm/` | The **`@samarthmn/doc-yantra-office`** npm package (Node CJS + browser ESM). `office_profile()` / `office_to_pdf()` / `register_font()`. DocKosha routes office conversions here engine-first, LibreOffice as fallback. |
 | `.github/workflows/publish-wasm.yml` | Validates a `0.0.*` tag against `main` and both committed package versions, then publishes **both** packages to **GitHub Packages** without rebuilding or retesting them. |
 
 > **Not in this repo:** the DocYantra HTTP service (NestJS + Gotenberg —
-> Office→PDF, HTML→PDF, redaction endpoints). That still lives in the
-> DocKosha app repo at `doc-kosha/doc-yantra/` and keeps serving the
-> features that need LibreOffice/Chromium/pdfium. This repo is only the
-> ported, in-process engine.
+> Office→PDF and HTML→PDF endpoints). That still lives in the
+> DocKosha app repo at `doc-kosha/doc-yantra/` and keeps serving configured
+> heavy features. Redaction has no HTTP endpoint; it runs in-process here.
 
 ## Quick start (consume the package)
 
@@ -63,8 +62,9 @@ cd wasm && ./build.sh
 ```
 
 Requires Rust ≥ 1.89 (`rust-version` is pinned in both Cargo.tomls). The wasm build compiles Zone 1 only
-(`--no-default-features --features wasm`); Zone 2 needs native pdfium and is
-served by the DocYantra HTTP service instead.
+(`--no-default-features --features wasm`); Zone 2 needs native pdfium and stays
+out of the package. Its legacy redactor exists only for native
+cross-validation. Zone-1 redaction has no HTTP fallback.
 
 ## Releasing
 

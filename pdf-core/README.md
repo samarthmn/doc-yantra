@@ -16,6 +16,7 @@ MIT/Apache-2.0; pdfium: BSD — the AGPL PyMuPDF dependency is gone).
 | `watermark` | text/image/hybrid watermarks (single + grid, rotation, opacity) — an exact port of DocYantra's pdf-lib algorithm; page-number / Bates stamping |
 | `meta` | page count, validate, page sizes, metadata get/set, compress, encrypt (RC4-128) |
 | `generate` | CSV → PDF (paginated tables), Markdown → PDF, text → PDF, images → PDF — replaces the Chromium html-to-pdf route for csv/md |
+| `redact_pure` | fail-closed content-stream redaction: displayed-page percentage rects, text/Form/annotation removal, image preservation, black coverage, and mandatory reload verification |
 
 **Zone 2 — Rust + pdfium (bundled BSD dylib):**
 
@@ -23,7 +24,7 @@ MIT/Apache-2.0; pdfium: BSD — the AGPL PyMuPDF dependency is gone).
 |---|---|
 | `raster` | page rendering, thumbnails (PNG/JPEG) |
 | `extract` | full/per-page text extraction (rotation-safe), search with match rects |
-| `redact` | **true redaction** — text objects removed from content (unextractable), black box drawn; DocYantra-compatible percent rects, rotation-aware (`/Rotate` pages measured as displayed); recurses into Form XObjects; deletes intersecting annotations; fails closed (`Unsupported`) rather than ever returning output with secret text surviving |
+| `redact` | legacy pdfium redactor retained for native cross-validation of `redact_pure` |
 | `forms` | AcroForm field listing, text-field fill, flatten |
 
 **Out of scope (stays on heavy engines):** Office → PDF (LibreOffice),
@@ -88,12 +89,11 @@ pdfium resolution order: `PDFIUM_DYNAMIC_LIB_PATH` env var → crate-local
   `RedactOutput::warnings` reports any removal that meaningfully exceeds the
   requested rect so the UI can inform the user. Images/vector art are
   covered, not removed (matches `PDF_REDACT_IMAGE_NONE`).
-- **Redaction fails closed:** text inside Form XObjects is removed
-  recursively; intersecting annotations are deleted; if pdfium cannot
-  guarantee removal (or its content regeneration would drop unrelated text —
-  seen with Type3-font PDFs), `redact()` returns `Unsupported` instead of a
-  silently-leaky or silently-gutted document. The saved output is re-verified
-  before it is returned.
+- **Pure redaction fails closed:** content streams are decoded strictly;
+  Type3 fonts, non-Identity Type0 CMaps, unresolved geometry, malformed inline
+  images, and encrypted input return `Unsupported`. Intersecting Form
+  invocations are removed in full, annotations are deleted, orphaned streams
+  are pruned, and saved output is reloaded and re-analyzed before return.
 - **Redaction leak workaround:** the bundled pdfium segfaults destroying
   removed text objects, so their tiny handles are deliberately leaked
   (`mem::forget`, ~1.2KB per removed object, process-lifetime, bounded).
@@ -126,13 +126,14 @@ The build script generates both Node and browser targets with pinned
 wasm-pack 0.15.0, stamps the package contract, and leaves the publishable output
 under `wasm/pkg`.
 
-The output (`wasm/pkg`, ~1.7MB `.wasm`) is published as
+The output (`wasm/pkg`, ~2.8MB `.wasm`) is published as
 `@samarthmn/doc-yantra`, pinned exactly by the app, and listed in
 `serverExternalPackages` in `next.config.ts` so Vercel file-traces the
 binary into each function. **`wasm/pkg` must be committed** — Vercel builds
 don't have a Rust toolchain. Rebuild + re-commit after changing Rust code.
 
-Wired in the app (wasm-first, DocYantra HTTP fallback on any failure):
+Wired in the app. Compatible merge, watermark, and conversion failures can
+fall back to DocYantra HTTP; redaction runs only in-process:
 - `src/server/pdfCoreWasm.ts` — adapter (lazy load, never throws)
 - `src/server/watermarkService.ts` — merge + watermark (all download routes)
 - `src/server/conversionService.ts` — csv/md conversion (no more Chromium)
@@ -145,9 +146,9 @@ lopdf's rayon, which cannot run threads in wasm).
 
 Embedded TTF fonts + full Unicode · AES-256 encryption · linearization ·
 attachments/bookmarks editing · annotations API · OCR (Zone 3) · PAdES
-signing (Zone 3) · N-API packaging · redaction in-app (needs pdfium-wasm).
+signing (Zone 3) · N-API packaging.
 
 ## Remaining DocYantra usage after WASM integration
 
-Office→PDF (LibreOffice) · arbitrary HTML→PDF (Chromium) · redaction
-(pdfium, Zone 2) · fallback for every wasm-covered operation.
+Office→PDF (LibreOffice) · arbitrary HTML→PDF (Chromium) · compatible
+merge, watermark, and conversion fallbacks. Redaction has no HTTP fallback.

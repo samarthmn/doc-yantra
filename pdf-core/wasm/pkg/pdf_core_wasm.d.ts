@@ -33,6 +33,14 @@ export function merge_pdfs(pdfs: Uint8Array[], watermark_json?: string | null, w
 export function page_count(pdf: Uint8Array): number;
 
 /**
+ * Permanently redacts service-compatible percentage areas from a PDF.
+ *
+ * `areas_json` must be an array of
+ * `{pageIndex,left,top,width,height}` objects measured on displayed pages.
+ */
+export function redact_pdf(pdf: Uint8Array, areas_json: string): Uint8Array;
+
+/**
  * Adds an embeddable font to the process-global registry. The generated JS
  * glue applies the same limit before copying `bytes` into wasm linear memory;
  * this Rust check is defense in depth for direct wasm callers.

@@ -197,6 +197,9 @@ fn font_index(font: StandardFont) -> usize {
         StandardFont::HelveticaBoldOblique => 3,
         StandardFont::Courier => 4,
         StandardFont::CourierBold => 5,
+        // Document generation intentionally exposes six faces. Remaining
+        // Standard-14 variants exist for PDF analysis, not layout selection.
+        _ => unreachable!("font_index called with a non-generator font"),
     }
 }
 

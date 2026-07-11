@@ -29,121 +29,10 @@ use std::collections::BTreeMap;
 use pdfium_render::prelude::*;
 
 use crate::error::{PdfCoreError, Result};
-
-/// One redaction area as percentages (0..=100) of the DISPLAYED page
-/// width/height (rotation applied), top-left origin — identical to the
-/// DocYantra redaction payload.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RedactionRect {
-    pub left_pct: f64,
-    pub top_pct: f64,
-    pub width_pct: f64,
-    pub height_pct: f64,
-}
-
-/// Redaction output.
-#[derive(Debug, Clone)]
-pub struct RedactOutput {
-    pub pdf: Vec<u8>,
-    pub page_count: u32,
-    /// Human-readable notices emitted when redaction removed whole objects
-    /// whose bounds meaningfully exceed the requested rects (whole-object
-    /// removal semantics). The excess area is always covered with a black
-    /// box; these strings let the caller inform the user what else vanished.
-    pub warnings: Vec<String>,
-}
-
-/// A redaction area resolved to page points (PDF bottom-left origin).
-#[derive(Debug, Clone, Copy)]
-struct BoxPts {
-    left: f32,
-    right: f32,
-    bottom: f32,
-    top: f32,
-}
-
-impl BoxPts {
-    /// Axis-aligned bounding-box overlap with strictly positive area.
-    fn intersects(&self, left: f32, right: f32, bottom: f32, top: f32) -> bool {
-        self.left < right && self.right > left && self.bottom < top && self.top > bottom
-    }
-
-    fn area(&self) -> f32 {
-        (self.right - self.left).max(0.0) * (self.top - self.bottom).max(0.0)
-    }
-
-    /// Area of the overlap between `self` and another box.
-    fn overlap_area(&self, other: &BoxPts) -> f32 {
-        let w = self.right.min(other.right) - self.left.max(other.left);
-        let h = self.top.min(other.top) - self.bottom.max(other.bottom);
-        w.max(0.0) * h.max(0.0)
-    }
-}
-
-/// Maps a percent-based, top-left-origin [RedactionRect] onto a page of
-/// `page_w` x `page_h` points, returning `None` for degenerate or non-finite
-/// rects (which are silently skipped, matching DocYantra behavior).
-fn resolve_rect(rect: &RedactionRect, page_w: f64, page_h: f64) -> Option<BoxPts> {
-    // Clamp percentages to [0, 100] before mapping, per DocYantra semantics.
-    let left_p = rect.left_pct.clamp(0.0, 100.0);
-    let right_p = (rect.left_pct + rect.width_pct).clamp(0.0, 100.0);
-    let top_p = rect.top_pct.clamp(0.0, 100.0);
-    let bottom_p = (rect.top_pct + rect.height_pct).clamp(0.0, 100.0);
-
-    let x0 = left_p / 100.0 * page_w;
-    let x1 = right_p / 100.0 * page_w;
-    let y_top = page_h - (top_p / 100.0 * page_h);
-    let y_bottom = page_h - (bottom_p / 100.0 * page_h);
-
-    // NaN percentages survive clamp(); treat them as degenerate.
-    if !(x0.is_finite() && x1.is_finite() && y_top.is_finite() && y_bottom.is_finite()) {
-        return None;
-    }
-    if x1 <= x0 || y_top <= y_bottom {
-        return None;
-    }
-
-    Some(BoxPts {
-        left: x0 as f32,
-        right: x1 as f32,
-        bottom: y_bottom as f32,
-        top: y_top as f32,
-    })
-}
-
-/// Maps a redaction box from DISPLAYED page coordinates (`/Rotate` applied,
-/// bottom-left origin, `disp_w` x `disp_h` points) into unrotated PDF user
-/// space, where pdfium reports object bounds and draws path objects.
-///
-/// Forward mapping (unrotated -> displayed), verified empirically against
-/// pdfium's renderer: 90° -> (x', y') = (y, W - x); 180° -> (W - x, H - y);
-/// 270° -> (x', y') = (H - y, x), with W x H the unrotated page size.
-fn derotate_box(b: BoxPts, rotation: PdfPageRenderRotation, disp_w: f32, disp_h: f32) -> BoxPts {
-    match rotation {
-        PdfPageRenderRotation::None => b,
-        // Unrotated width W = disp_h. Inverse: x = W - y', y = x'.
-        PdfPageRenderRotation::Degrees90 => BoxPts {
-            left: disp_h - b.top,
-            right: disp_h - b.bottom,
-            bottom: b.left,
-            top: b.right,
-        },
-        // Inverse: x = W - x', y = H - y'.
-        PdfPageRenderRotation::Degrees180 => BoxPts {
-            left: disp_w - b.right,
-            right: disp_w - b.left,
-            bottom: disp_h - b.top,
-            top: disp_h - b.bottom,
-        },
-        // Unrotated height H = disp_w. Inverse: x = y', y = H - x'.
-        PdfPageRenderRotation::Degrees270 => BoxPts {
-            left: b.bottom,
-            right: b.top,
-            bottom: disp_w - b.right,
-            top: disp_w - b.left,
-        },
-    }
-}
+pub use crate::redact_types::{
+    BoxPts, PageRotation, RedactArea, RedactOutput, RedactionRect, derotate_box, exceeds_requested,
+    resolve_rect,
+};
 
 /// Returns `true` if any text object at any nesting depth inside `form`
 /// intersects one of `boxes`. pdfium reports child bounds in page space
@@ -187,26 +76,6 @@ fn form_contains_intersecting_text(
         }
     }
     Ok(false)
-}
-
-/// True when removed-object bounds meaningfully exceed the redaction rect
-/// they overlap most: area > 1.5x the rect's, or extending past any rect edge
-/// by more than 2% of the corresponding page dimension.
-fn exceeds_requested(bounds: &BoxPts, boxes: &[BoxPts], page_w: f32, page_h: f32) -> bool {
-    let Some(best) = boxes
-        .iter()
-        .max_by(|a, b| bounds.overlap_area(a).total_cmp(&bounds.overlap_area(b)))
-        .copied()
-    else {
-        return true;
-    };
-    let eps_x = 0.02 * page_w;
-    let eps_y = 0.02 * page_h;
-    bounds.area() > 1.5 * best.area()
-        || bounds.left < best.left - eps_x
-        || bounds.right > best.right + eps_x
-        || bounds.bottom < best.bottom - eps_y
-        || bounds.top > best.top + eps_y
 }
 
 /// Removes every text object, text-bearing Form XObject, and annotation whose
@@ -438,7 +307,12 @@ pub fn redact(pdf: &[u8], redactions: &BTreeMap<u32, Vec<RedactionRect>>) -> Res
         // displayed), which is exactly the space the percent rects refer to.
         let disp_w = f64::from(page.width().value);
         let disp_h = f64::from(page.height().value);
-        let rotation = page.rotation()?;
+        let rotation = match page.rotation()? {
+            PdfPageRenderRotation::None => PageRotation::None,
+            PdfPageRenderRotation::Degrees90 => PageRotation::Degrees90,
+            PdfPageRenderRotation::Degrees180 => PageRotation::Degrees180,
+            PdfPageRenderRotation::Degrees270 => PageRotation::Degrees270,
+        };
         let boxes: Vec<BoxPts> = rects
             .iter()
             .filter_map(|r| resolve_rect(r, disp_w, disp_h))
@@ -449,9 +323,7 @@ pub fn redact(pdf: &[u8], redactions: &BTreeMap<u32, Vec<RedactionRect>>) -> Res
         }
         // Unrotated page size — the space of object bounds and drawn boxes.
         let (page_w, page_h) = match rotation {
-            PdfPageRenderRotation::Degrees90 | PdfPageRenderRotation::Degrees270 => {
-                (disp_h as f32, disp_w as f32)
-            }
+            PageRotation::Degrees90 | PageRotation::Degrees270 => (disp_h as f32, disp_w as f32),
             _ => (disp_w as f32, disp_h as f32),
         };
         let survivors = redact_page(&mut page, &boxes, page_index, page_w, page_h, &mut warnings)?;

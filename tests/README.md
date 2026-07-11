@@ -7,6 +7,7 @@ DocKosha's suites use):
 | Layer | Location | Runner | What it proves |
 | --- | --- | --- | --- |
 | **PDF npm package** (`@samarthmn/doc-yantra`) | `tests/package-features.test.mjs` | `node --test` | Every PDF export of the built wasm package behaves correctly on real files. |
+| **Redaction package contract** | `tests/redact-package.test.mjs` | `node --test` | `redact_pdf` removes content, validates JSON, preserves recoverable errors, and guards wasm allocation. |
 | **Office npm package** (`@samarthmn/doc-yantra-office`) | `tests/office.test.mjs` | `node --test` | Profile, deterministic conversion, format coverage, size guard, and font registration work through the built package. |
 | **Release contract** | `tests/release-contract.test.mjs` | `node --test` | Both native crates, wasm crates, package manifests, and built engines carry the same immutable version. |
 | **Rust engine** (`pdf-core`) | `pdf-core/tests/*.rs` | `cargo test` | The crate's features, plus a real-file end-to-end pipeline. |
@@ -41,11 +42,12 @@ Office wasm yet may run the Rust suites, but it is not release-ready until
   exists only so the `node --test tests/` **path form** resolves on Node 24+
   (which treats a positional path as a glob and no longer scans a bare
   directory).
-- Equivalent version-agnostic invocations, if you prefer them:
+- To run the aggregate entry point directly:
   ```bash
-  node --test                 # from repo root: auto-discovers *.test.mjs
-  node --test 'tests/*.mjs'   # explicit glob
+  node --test tests/all.test.mjs
   ```
+- Avoid bare `node --test`: auto-discovery runs each suite directly and again
+  through `all.test.mjs`, doubling the test run.
 - Requires a Node with the stable test runner (Node ≥ 18; developed on 26).
 
 ### What the package suite covers
@@ -62,6 +64,9 @@ Main module (`@samarthmn/doc-yantra`):
 - `merge_pdfs` — with and without a watermark payload; asserts merged
   `page_count == sum of inputs`, single-input passthrough, and error on an empty
   list / an invalid member.
+- `redact_pdf` — removes selected text, returns a valid PDF, rejects malformed
+  JSON, prefixes fail-closed misses with `unsupported:`, and guards input before
+  the wasm copy.
 
 Office → PDF is covered through the separate
 `@samarthmn/doc-yantra-office` package. Inputs outside its fail-closed envelope

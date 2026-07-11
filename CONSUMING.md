@@ -103,7 +103,7 @@ The package has two entry points:
 
 | Import | Runtime | Contents |
 | --- | --- | --- |
-| `@samarthmn/doc-yantra` | Node (CJS) | watermark, merge, csv/md/text → PDF, validate (1.7MB) |
+| `@samarthmn/doc-yantra` | Node (CJS) | watermark, merge, csv/md/text → PDF, redaction, validate (~2.8MB) |
 | `@samarthmn/doc-yantra/web` | Browser (ESM) | Zone 1 for client-side previews; call `await mod.default(wasmUrl)` first and serve `web/pdf_core_wasm_bg.wasm` yourself |
 | `@samarthmn/doc-yantra-office` | Node (CJS) | **Office → PDF**: `office_profile()`, `office_to_pdf()`, `register_font()` |
 | `@samarthmn/doc-yantra-office/web` | Browser (ESM) | same API for in-browser conversion |
@@ -157,13 +157,18 @@ pdf.csv_to_pdf(new Uint8Array(csvBytes)); // → Uint8Array (landscape table)
 pdf.markdown_to_pdf(markdownString);
 pdf.page_count(new Uint8Array(pdfBytes)); // → number
 pdf.validate_pdf(new Uint8Array(pdfBytes)); // → JSON string
+pdf.redact_pdf(
+  new Uint8Array(pdfBytes),
+  JSON.stringify([{ pageIndex: 0, left: 10, top: 8, width: 25, height: 6 }]),
+); // → Uint8Array; unsupported cases throw with an "unsupported:" prefix
 ```
 
-In DocKosha this is wrapped by `src/server/pdfCoreWasm.ts`, which never throws
-and falls back to the DocYantra HTTP service on any failure. Text outside the
-WinAnsi/CP1252 repertoire — in csv/md conversion or watermark lines — is routed
-to DocYantra (the engine has standard-14 fonts only), so the local path is
-always a pure speed win.
+In DocKosha this is wrapped by `src/server/pdfCoreWasm.ts`, which keeps wasm
+errors recoverable. Compatible merge, watermark, and conversion failures can
+fall back to DocYantra HTTP. Redaction cannot: callers must handle an
+unsupported or oversized redaction without sending it to an HTTP redaction
+endpoint. Text outside the engine's registered font coverage in csv/md
+conversion or watermark lines can still use the compatible HTTP route.
 
 ---
 
@@ -203,8 +208,9 @@ The wasm boundary distinguishes two failure modes, and consumers must treat
 them differently:
 
 - **`Err` → thrown `JsError`** (recoverable): invalid input, unsupported
-  format, or an over-size rejection (see below). Catch it and fall back; the
-  instance stays healthy and can be reused.
+  format, or an over-size rejection (see below). Catch it; the instance stays
+  healthy and can be reused. Fall back only when that operation has a
+  compatible HTTP endpoint. Redaction does not.
 - **Panic / OOM → trap** (fatal to the instance): a Rust `panic!` or an
   out-of-memory abort in wasm is **not** a catchable `JsError` —
   `console_error_panic_hook` only *logs* it. A trap can leave the module's
@@ -214,7 +220,8 @@ them differently:
 The Zone-1 input path has no known reachable `panic!`, but very large inputs can
 still OOM-abort. To keep that recoverable, the exports **reject oversized inputs
 as a normal `JsError`** before touching linear memory (≈100 MiB per document,
-≈200 MiB per merge set). Consumers should apply their own, lower limits and
-route large jobs to the HTTP service (DocKosha does this in
-`src/server/pdfCoreWasm.ts`), and — because merge/watermark/csv/md run on one
-shared instance — treat a trapped instance as recreate-and-fall-back.
+≈200 MiB per merge set). Consumers should apply their own, lower limits.
+Route only operations with compatible endpoints to HTTP; reject oversized
+redactions locally. Because merge/watermark/csv/md/redaction run on one shared
+instance, discard and recreate the instance after a trap before applying the
+operation's fallback policy.

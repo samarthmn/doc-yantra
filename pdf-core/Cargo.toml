@@ -16,7 +16,7 @@ required-features = ["cli", "pdfium"]
 
 [features]
 default = ["pdfium", "cli", "parallel"]
-# Zone 2 (pdfium-backed): raster, extract, redact, forms. Native-only.
+# Zone 2 (pdfium-backed): raster, extract, legacy redaction cross-checks, forms. Native-only.
 pdfium = ["dep:pdfium-render"]
 # The pdfcore CLI binary.
 cli = ["dep:clap"]

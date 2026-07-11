@@ -60,8 +60,8 @@ rmdir pkg-web
 printf '{\n  "type": "module"\n}\n' > pkg/web/package.json
 
 # wasm-bindgen copies `&[u8]` arguments into linear memory before Rust runs.
-# Guard runtime font registration in both public JS entry points before that
-# allocation, while retaining the matching Rust-side defense-in-depth check.
+# Guard runtime font registration and redaction PDFs in both public JS entry
+# points before those allocations, while retaining Rust-side checks.
 node ./postprocess-glue.mjs \
   pkg/pdf_core_wasm.js \
   pkg/web/pdf_core_wasm.js

@@ -11,23 +11,25 @@ in-process — no Rust toolchain, no network hop.
 
 **Not in this repo:** the DocYantra HTTP service (NestJS + Gotenberg/LibreOffice/
 Chromium/pdfium) still lives in the DocKosha app repo at `doc-kosha/doc-yantra/`.
-It keeps serving the heavy features (arbitrary HTML→PDF, redaction) and is the
-fallback for everything the wasm package covers. When you see references to the
-"service" or an HTTP fallback, that code is elsewhere.
+It keeps serving heavy conversion features such as arbitrary HTML→PDF and is a
+fallback for compatible wasm operations; redaction now runs in-process. When
+you see references to the "service" or an HTTP fallback, that code is elsewhere.
 
 ## Zone 1 vs Zone 2 — the core architectural split
 
 Every module belongs to one zone, and the zone dictates where it can run:
 
 - **Zone 1 — pure Rust** (lopdf + pdf-writer): `assembly`, `watermark`, `meta`,
-  `generate` (csv/md/text/image→PDF). Lock-free, parallel-safe, and the **only**
+  `generate` (csv/md/text/image→PDF), `redact_pure`. Lock-free, parallel-safe,
+  and the **only**
   zone that compiles to wasm. This is what ships in the npm package. (Office →
   PDF is NOT in this engine — it is served by the DocYantra LibreOffice HTTP
   service.)
-- **Zone 2 — Rust + pdfium** (bundled BSD dylib): `raster`, `extract`, `redact`,
-  `forms`. **Native-only** — needs the pdfium dynamic library, cannot run in
+- **Zone 2 — Rust + pdfium** (bundled BSD dylib): `raster`, `extract`, legacy
+  `redact`, `forms`. **Native-only** — needs the pdfium dynamic library, cannot run in
   wasm. Gated behind the `pdfium` cargo feature (`#[cfg(feature = "pdfium")]` in
-  `src/lib.rs`). In production these are served by the HTTP service, not the package.
+  `src/lib.rs`). Legacy redaction remains for native cross-validation; the
+  package ships `redact_pure`.
 
 All engine functions take and return `&[u8]`/`Vec<u8>` PDF bytes, keeping the crate
 IO-agnostic and embeddable.
@@ -42,7 +44,7 @@ without reshaping data.
 
 | Import | Build | Contents |
 | --- | --- | --- |
-| `@samarthmn/doc-yantra` | Node CJS (`--target nodejs`) | watermark/merge/csv/md/text/validate (~1.7 MB) |
+| `@samarthmn/doc-yantra` | Node CJS (`--target nodejs`) | watermark/merge/csv/md/text/redact/validate (~2.8 MB) |
 | `@samarthmn/doc-yantra/web` | Browser ESM (`--target web`) | Zone 1 for in-browser previews |
 
 ## office-core — the Office → PDF engine (separate crate)
@@ -121,9 +123,10 @@ bump plus the regenerated `pkg/` together.
 - **pdfium is not thread-safe.** All Zone 2 work must go through
   `crate::pdfium::lock()` (a process-wide mutex); Zone 2 ops serialize per process.
   Zone 1 stays lock-free and parallel.
-- **Redaction fails closed.** `redact()` returns `Unsupported` rather than ever
+- **Redaction fails closed.** `redact_pure()` and legacy `redact()` return
+  `Unsupported` rather than ever
   emitting output where secret text could survive. It removes text objects
-  (unextractable, not just covered), recurses into Form XObjects, deletes
+  (unextractable, not just covered), remove Form XObject content, delete
   intersecting annotations, and **re-verifies the saved output**. Object-level
   granularity is intentional (more aggressive than character-level = safe direction).
   Don't loosen these guarantees.

@@ -17,7 +17,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import zlib from "node:zlib";
-import { transformPdfGlue } from "../pdf-core/wasm/postprocess-glue.mjs";
+import {
+  transformPdfGlue,
+  utf8ByteLengthExceedsLimit,
+} from "../pdf-core/wasm/postprocess-glue.mjs";
 
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -208,11 +211,20 @@ describe("embedded Unicode fonts", () => {
       "export function register_font(bytes) {",
       "    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);",
       "}",
+      "export function redact_pdf(pdf, areas_json) {",
+      "    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);",
+      "}",
       "",
     ].join("\n");
     const once = transformPdfGlue(generated, "fixture.js");
     assert.equal(transformPdfGlue(generated, "fixture.js"), once);
     assert.equal(transformPdfGlue(once, "fixture.js"), once);
+  });
+
+  test("redaction JSON guard counts UTF-8 bytes, not UTF-16 code units", () => {
+    assert.equal(utf8ByteLengthExceedsLimit("abc", 3), false);
+    assert.equal(utf8ByteLengthExceedsLimit("éé", 3), true);
+    assert.equal(utf8ByteLengthExceedsLimit("😀", 3), true);
   });
 });
 

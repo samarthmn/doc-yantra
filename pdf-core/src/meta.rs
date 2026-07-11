@@ -242,7 +242,7 @@ fn is_encrypted_doc(pdf: &[u8], doc: &Document) -> bool {
 /// document (and thereby corrupt it or strip its protection), otherwise
 /// [`PdfCoreError::InvalidInput`] for read-only queries whose results would be
 /// misleading (zero pages / all-`None` metadata).
-fn ensure_not_encrypted(pdf: &[u8], doc: &Document, write_op: bool) -> Result<()> {
+pub(crate) fn ensure_not_encrypted(pdf: &[u8], doc: &Document, write_op: bool) -> Result<()> {
     const MSG: &str = "encrypted PDF; decrypt before processing";
     if is_encrypted_doc(pdf, doc) {
         return Err(if write_op {

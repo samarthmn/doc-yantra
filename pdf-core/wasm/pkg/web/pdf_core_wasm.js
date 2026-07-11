@@ -1,10 +1,45 @@
 /* @ts-self-types="./pdf_core_wasm.d.ts" */
 
 const DOC_YANTRA_FONT_PRECOPY_GUARD_V1 = 32 * 1024 * 1024;
+const DOC_YANTRA_PDF_PRECOPY_GUARD_V1 = 100 * 1024 * 1024;
+
+function utf8ByteLengthExceedsLimit(value, limit) {
+  if (value.length > limit) return true;
+  let bytes = 0;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index++;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > limit) return true;
+  }
+  return false;
+}
 
 function guardRegisteredFontInput(bytes) {
     if (bytes.byteLength <= DOC_YANTRA_FONT_PRECOPY_GUARD_V1) return;
     throw new Error(`font is ${bytes.byteLength} bytes, over the 32 MiB in-process limit`);
+}
+
+function guardRedactPdfInput(pdf, areas_json) {
+    if (pdf.byteLength > DOC_YANTRA_PDF_PRECOPY_GUARD_V1) {
+        throw new Error(`PDF is ${pdf.byteLength} bytes, over the 100 MiB in-process limit`);
+    }
+    if (utf8ByteLengthExceedsLimit(areas_json, DOC_YANTRA_PDF_PRECOPY_GUARD_V1)) {
+        throw new Error("redaction JSON is over the 100 MiB in-process limit");
+    }
 }
 
 /**
@@ -108,6 +143,30 @@ export function page_count(pdf) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return ret[0] >>> 0;
+}
+
+/**
+ * Permanently redacts service-compatible percentage areas from a PDF.
+ *
+ * `areas_json` must be an array of
+ * `{pageIndex,left,top,width,height}` objects measured on displayed pages.
+ * @param {Uint8Array} pdf
+ * @param {string} areas_json
+ * @returns {Uint8Array}
+ */
+export function redact_pdf(pdf, areas_json) {
+    guardRedactPdfInput(pdf, areas_json);
+    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(areas_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.redact_pdf(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
 }
 
 /**
