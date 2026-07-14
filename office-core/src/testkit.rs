@@ -356,6 +356,155 @@ pub fn non_convergent_page_float_docx() -> Vec<u8> {
     image_docx(&format!("{lead}<w:p><w:r>{anchor}</w:r></w:p>"))
 }
 
+/// A page float where reflow grows the first paragraph past the band bottom.
+/// The sentinel paragraph must use its new Y, not the previous pass's stale Y.
+pub fn stale_page_band_schedule_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        2_921_000,
+        698_500,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    let growing = "Growing paragraph words for the page band fixpoint. ".repeat(5);
+    image_docx(&format!(
+        "<w:p><w:r><w:t>{growing}</w:t></w:r></w:p><w:p><w:r><w:t>Schedule sentinel</w:t></w:r></w:p><w:p><w:r>{anchor}</w:r></w:p>"
+    ))
+}
+
+/// Two vertically disjoint left page-float bands crossed by one long paragraph.
+pub fn disjoint_left_page_floats_docx() -> Vec<u8> {
+    let upper = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:posOffset>0</wp:posOffset>",
+        977_900,
+        635_000,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    let lower = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:posOffset>2540000</wp:posOffset>",
+        977_900,
+        635_000,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        2,
+    );
+    let body =
+        "Disjoint band paragraph words keep flowing across both separated exclusion regions. "
+            .repeat(25);
+    image_docx(&format!(
+        "<w:p><w:r><w:t>{body}</w:t></w:r></w:p><w:p><w:r>{upper}{lower}</w:r></w:p>"
+    ))
+}
+
+/// A continuous two-column boundary carried by the anchored paragraph itself.
+pub fn continuous_multicolumn_anchor_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "paragraph",
+        "<wp:posOffset>0</wp:posOffset>",
+        254_000,
+        254_000,
+        "<wp:wrapNone/>",
+        1,
+    );
+    image_docx(&format!(
+        r#"<w:p><w:r><w:t>Single-column lead</w:t></w:r></w:p><w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:cols w:num="2"/></w:sectPr></w:pPr><w:r>{anchor}</w:r></w:p><w:sectPr><w:cols w:num="1"/></w:sectPr>"#
+    ))
+}
+
+/// Paragraph-relative vertical anchor whose horizontal origin is the page box.
+pub fn paragraph_float_with_page_horizontal_origin_docx(aligned: bool) -> Vec<u8> {
+    let horizontal = if aligned {
+        "<wp:align>right</wp:align>"
+    } else {
+        "<wp:posOffset>228600</wp:posOffset>"
+    };
+    let anchor = picture_anchor(
+        "page",
+        horizontal,
+        "paragraph",
+        "<wp:posOffset>0</wp:posOffset>",
+        254_000,
+        254_000,
+        "<wp:wrapNone/>",
+        1,
+    );
+    image_docx(&format!("<w:p><w:r>{anchor}</w:r></w:p>"))
+}
+
+/// Page float in a vertically centered or bottom-aligned body section.
+pub fn vertically_aligned_body_page_float_docx(alignment: &str) -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        977_900,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    image_docx(&format!(
+        r#"<w:p><w:r><w:t>Vertically aligned body text</w:t></w:r></w:p><w:p><w:r>{anchor}</w:r></w:p><w:sectPr><w:vAlign w:val="{alignment}"/></w:sectPr>"#
+    ))
+}
+
+/// A page float carried by a continuous, vertically aligned section boundary.
+/// The final top-aligned section would otherwise swallow this unsupported span.
+pub fn continuous_vertically_aligned_page_float_docx(alignment: &str) -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        977_900,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    image_docx(&format!(
+        r#"<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:vAlign w:val="{alignment}"/></w:sectPr></w:pPr><w:r><w:t>Continuous vertically aligned text</w:t>{anchor}</w:r></w:p><w:sectPr><w:vAlign w:val="top"/></w:sectPr>"#
+    ))
+}
+
+/// One left page band with less than 36pt remaining; no opposite band exists.
+pub fn single_narrow_page_float_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        5_715_000,
+        635_000,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    image_docx(&format!(
+        "<w:p><w:r><w:t>Narrow surviving text window</w:t></w:r></w:p><w:p><w:r>{anchor}</w:r></w:p>"
+    ))
+}
+
+/// Floating table used to freeze legacy block-flow height semantics.
+pub fn floating_table_block_flow_docx(
+    table_width_twips: u32,
+    vertical_anchor: &str,
+    side_clearance_twips: u32,
+) -> Vec<u8> {
+    minimal_docx(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="{table_width_twips}" w:type="dxa"/><w:tblpPr w:vertAnchor="{vertical_anchor}" w:horzAnchor="text" w:tblpX="0" w:tblpY="1" w:leftFromText="{side_clearance_twips}" w:rightFromText="0"/></w:tblPr><w:tblGrid><w:gridCol w:w="{table_width_twips}"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Legacy block table</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>Legacy next paragraph</w:t></w:r></w:p>"#
+    ))
+}
+
 /// Builds a compact Google-Docs-style DOCX conformance fixture.
 ///
 /// The package intentionally combines producer idioms that are individually

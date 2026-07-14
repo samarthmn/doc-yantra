@@ -2,11 +2,15 @@
 
 use office_core::layout::{Item, LaidOutDocument, Page, WordDoc, layout_docx};
 use office_core::testkit::{
-    floating_table_side_wrap_docx, full_and_side_page_floats_docx, margin_top_left_float_docx,
-    minimal_docx, multicolumn_anchor_docx, non_convergent_page_float_docx,
-    opposite_page_floats_docx, overlapping_page_floats_docx, page_center_float_docx,
-    page_floats_without_text_window_docx, page_top_bottom_float_docx,
-    paragraph_column_top_bottom_float_docx, two_paragraph_floats_docx, wrap_document, zip_package,
+    continuous_multicolumn_anchor_docx, continuous_vertically_aligned_page_float_docx,
+    disjoint_left_page_floats_docx, floating_table_block_flow_docx, floating_table_side_wrap_docx,
+    full_and_side_page_floats_docx, margin_top_left_float_docx, minimal_docx,
+    multicolumn_anchor_docx, non_convergent_page_float_docx, opposite_page_floats_docx,
+    overlapping_page_floats_docx, page_center_float_docx, page_floats_without_text_window_docx,
+    page_top_bottom_float_docx, paragraph_column_top_bottom_float_docx,
+    paragraph_float_with_page_horizontal_origin_docx, single_narrow_page_float_docx,
+    stale_page_band_schedule_docx, two_paragraph_floats_docx,
+    vertically_aligned_body_page_float_docx, wrap_document, zip_package,
 };
 use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
 
@@ -285,6 +289,159 @@ fn page_float_fixpoint_is_bounded_and_fails_typed_on_non_convergence() {
         &non_convergent_page_float_docx(),
         "page-anchored drawing did not converge",
     );
+}
+
+#[test]
+fn page_band_fixpoint_uses_current_block_y_instead_of_stale_schedule_y() {
+    let bytes = stale_page_band_schedule_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let page = &laid.pages[0];
+    let image = page
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("page float");
+    let sentinel = glyph_runs(page)
+        .into_iter()
+        .find(|(text, ..)| text.contains("Schedule sentinel"))
+        .expect("sentinel text");
+    assert!(
+        sentinel.2 > image.y_pt + 55.0 + 9.0,
+        "fixture must move sentinel below the band: image={image:?}, sentinel={sentinel:?}"
+    );
+    assert!(
+        (sentinel.1 - 72.0).abs() <= 0.15,
+        "a stale schedule kept below-band text narrowed: {sentinel:?}"
+    );
+}
+
+#[test]
+fn disjoint_same_side_page_bands_both_narrow_a_long_paragraph() {
+    let bytes = disjoint_left_page_floats_docx();
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(predicted.supported, "reasons: {:?}", predicted.reasons);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let page = &laid.pages[0];
+    assert_eq!(
+        page.items
+            .iter()
+            .filter(|positioned| matches!(positioned.item, Item::Image { .. }))
+            .count(),
+        2
+    );
+    let runs = glyph_runs(page);
+    let between = runs
+        .iter()
+        .find(|(_, _, y, _)| *y > 150.0 && *y < 240.0)
+        .expect("text between disjoint bands");
+    assert!((between.1 - 72.0).abs() <= 0.15, "between={between:?}");
+    let lower = runs
+        .iter()
+        .find(|(_, _, y, _)| *y > 275.0 && *y < 325.0)
+        .expect("text crossing lower band");
+    assert!(lower.1 >= 158.0 - 0.15, "lower={lower:?}");
+}
+
+#[test]
+fn floating_table_block_fallback_preserves_legacy_side_padding_height() {
+    let next_y = |bytes: Vec<u8>| {
+        let doc = WordDoc::open(&bytes, &opts()).expect("open");
+        let (laid, _) = layout_docx(&doc).expect("layout");
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .find(|(text, ..)| text.contains("Legacy next paragraph"))
+            .expect("next paragraph")
+            .2
+    };
+    let no_padding = next_y(floating_table_block_flow_docx(8800, "text", 0));
+    let padded = next_y(floating_table_block_flow_docx(8800, "text", 400));
+    assert!(
+        (padded - no_padding - 20.0).abs() <= 0.15,
+        "no_padding={no_padding}, padded={padded}"
+    );
+}
+
+#[test]
+fn absolute_floating_table_preserves_legacy_block_height() {
+    let next_y = |bytes: Vec<u8>| {
+        let doc = WordDoc::open(&bytes, &opts()).expect("open");
+        let (laid, _) = layout_docx(&doc).expect("layout");
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .find(|(text, ..)| text.contains("Legacy next paragraph"))
+            .expect("next paragraph")
+            .2
+    };
+    let no_padding = next_y(floating_table_block_flow_docx(2880, "margin", 0));
+    let padded = next_y(floating_table_block_flow_docx(2880, "margin", 400));
+    assert!(
+        (padded - no_padding - 20.0).abs() <= 0.15,
+        "no_padding={no_padding}, padded={padded}"
+    );
+}
+
+#[test]
+fn continuous_column_change_anchor_fails_profile_convert_parity() {
+    assert_anchor_rejection_parity(
+        &continuous_multicolumn_anchor_docx(),
+        "anchored drawing in a multi-column section",
+    );
+}
+
+#[test]
+fn paragraph_float_page_horizontal_offset_uses_page_box() {
+    let bytes = paragraph_float_with_page_horizontal_origin_docx(false);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let image = laid.pages[0]
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("page-relative paragraph float");
+    assert!((image.x_pt - 18.0).abs() <= 0.15, "image_x={}", image.x_pt);
+}
+
+#[test]
+fn paragraph_float_page_horizontal_alignment_uses_page_box() {
+    let bytes = paragraph_float_with_page_horizontal_origin_docx(true);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let image = laid.pages[0]
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("page-relative paragraph float");
+    assert!((image.x_pt - 592.0).abs() <= 0.15, "image_x={}", image.x_pt);
+}
+
+#[test]
+fn page_float_with_non_top_body_alignment_fails_profile_convert_parity() {
+    for alignment in ["center", "bottom"] {
+        assert_anchor_rejection_parity(
+            &vertically_aligned_body_page_float_docx(alignment),
+            "page-anchored drawing with non-top body alignment",
+        );
+    }
+}
+
+#[test]
+fn continuous_non_top_body_alignment_page_float_fails_profile_convert_parity() {
+    for alignment in ["center", "bottom"] {
+        assert_anchor_rejection_parity(
+            &continuous_vertically_aligned_page_float_docx(alignment),
+            "page-anchored drawing with non-top body alignment",
+        );
+    }
+}
+
+#[test]
+fn one_narrow_side_page_band_is_not_rejected_by_opposite_band_floor() {
+    let bytes = single_narrow_page_float_docx();
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(predicted.supported, "reasons: {:?}", predicted.reasons);
+    convert(&bytes, OfficeFormat::Docx, &opts()).expect("single side band converts");
 }
 
 #[test]

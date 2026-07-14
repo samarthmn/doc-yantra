@@ -52,6 +52,29 @@ pub fn layout_table(
     avail_width_pt: f64,
     table_left: f64,
     counters: &mut ListCounters,
+) -> Result<Vec<RowLayout>> {
+    Ok(layout_table_with_width(
+        doc,
+        warnings,
+        table,
+        rels,
+        avail_width_pt,
+        table_left,
+        counters,
+    )?
+    .rows)
+}
+
+/// Internal additive form used by floating-table flow to retain the resolved
+/// grid width without changing the public Rust API.
+pub(crate) fn layout_table_with_width(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    table: &Table,
+    rels: &HashMap<String, String>,
+    avail_width_pt: f64,
+    table_left: f64,
+    counters: &mut ListCounters,
 ) -> Result<TableLayout> {
     let cols = resolve_columns(table, avail_width_pt);
     let table_width: f64 = cols.iter().sum();
@@ -375,8 +398,7 @@ fn layout_cell(
                 y += layout.space_after_pt;
             }
             BlockContent::Table(t) => {
-                let table_layout = layout_table(doc, warnings, t, rels, width, 0.0, counters)?;
-                for row in table_layout.rows {
+                for row in layout_table(doc, warnings, t, rels, width, 0.0, counters)? {
                     for li in &row.items {
                         items.push(LineItem {
                             x_pt: li.x_pt,

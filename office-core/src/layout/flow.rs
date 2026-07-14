@@ -9,10 +9,10 @@ use super::assemble::WordDoc;
 use super::numbering_layout::{ListCounters, PlacedLabel, build_label};
 use super::page::PageGeometry;
 use super::paragraph::{
-    AnchoredLineItem, ExclusionBand, FieldContext, LineItem, PageFloat, ParaLayout, WrapExclusion,
-    layout_paragraph, layout_paragraph_with_wrap,
+    AnchoredLineItem, ExclusionBand, FieldContext, LineItem, PageFloat, PageHorizontalContext,
+    ParaLayout, WrapExclusion, layout_paragraph, layout_paragraph_with_page_wrap,
 };
-use super::table::layout_table;
+use super::table::{layout_table, layout_table_with_width};
 use super::{EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned};
 use crate::oxml::numbering::{NumFmt, format_number};
 use crate::oxml::wml::{
@@ -74,6 +74,7 @@ enum PageBandSide {
 
 #[derive(Debug, Clone, Copy)]
 struct ResolvedPageBand {
+    carrier: FloatCarrier,
     side: PageBandSide,
     top_pt: f64,
     bottom_pt: f64,
@@ -87,7 +88,7 @@ struct FloatCarrier {
     float_index: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PageBandSchedule {
     block_placements: HashMap<usize, (usize, f64)>,
     bands: HashMap<usize, Vec<ResolvedPageBand>>,
@@ -103,13 +104,14 @@ struct SectionPass {
 impl PageBandSchedule {
     fn wrap_for_block(&self, block_index: usize, content_width: f64) -> Option<WrapExclusion> {
         let (page_index, unit_top) = self.block_placements.get(&block_index).copied()?;
-        let mut left_band = None;
-        let mut right_band = None;
+        let mut left_bands = Vec::new();
+        let mut right_bands = Vec::new();
         for band in self.bands.get(&page_index).into_iter().flatten() {
             if band.bottom_pt <= unit_top + 0.01 {
                 continue;
             }
             let edge = ExclusionBand {
+                source: Some((band.carrier.block_index, band.carrier.float_index)),
                 top_remaining_pt: (band.top_pt - unit_top).max(0.0),
                 remaining_pt: band.bottom_pt - unit_top,
                 inset_pt: if band.side == PageBandSide::Full {
@@ -120,38 +122,33 @@ impl PageBandSchedule {
                 uses_text_baseline: band.uses_text_baseline,
             };
             match band.side {
-                PageBandSide::Left | PageBandSide::Full => {
-                    if left_band.is_none() {
-                        left_band = Some(edge);
-                    }
-                }
-                PageBandSide::Right => {
-                    if right_band.is_none() {
-                        right_band = Some(edge);
-                    }
-                }
+                PageBandSide::Left | PageBandSide::Full => left_bands.push(edge),
+                PageBandSide::Right => right_bands.push(edge),
             }
         }
-        (left_band.is_some() || right_band.is_some()).then_some(WrapExclusion {
-            left_band,
-            right_band,
+        (!left_bands.is_empty() || !right_bands.is_empty()).then_some(WrapExclusion {
+            left_bands,
+            right_bands,
         })
     }
 }
 
 fn advance_wrap(wrap: WrapExclusion, distance: f64) -> Option<WrapExclusion> {
-    let advance = |band: Option<ExclusionBand>| {
-        band.and_then(|mut band| {
-            band.top_remaining_pt = (band.top_remaining_pt - distance).max(0.0);
-            band.remaining_pt -= distance;
-            (band.remaining_pt > 0.01).then_some(band)
-        })
+    let advance = |bands: Vec<ExclusionBand>| {
+        bands
+            .into_iter()
+            .filter_map(|mut band| {
+                band.top_remaining_pt = (band.top_remaining_pt - distance).max(0.0);
+                band.remaining_pt -= distance;
+                (band.remaining_pt > 0.01).then_some(band)
+            })
+            .collect::<Vec<_>>()
     };
     let advanced = WrapExclusion {
-        left_band: advance(wrap.left_band),
-        right_band: advance(wrap.right_band),
+        left_bands: advance(wrap.left_bands),
+        right_bands: advance(wrap.right_bands),
     };
-    (advanced.left_band.is_some() || advanced.right_band.is_some()).then_some(advanced)
+    (!advanced.left_bands.is_empty() || !advanced.right_bands.is_empty()).then_some(advanced)
 }
 
 fn combine_wraps(
@@ -161,35 +158,48 @@ fn combine_wraps(
     match (active, scheduled) {
         (None, other) | (other, None) => Ok(other),
         (Some(active), Some(scheduled)) => {
-            let merge_edge = |active: Option<ExclusionBand>,
-                              scheduled: Option<ExclusionBand>|
-             -> Result<Option<ExclusionBand>> {
-                match (active, scheduled) {
-                    (None, other) | (other, None) => Ok(other),
-                    (Some(active), Some(scheduled))
-                        if (active.inset_pt - scheduled.inset_pt).abs() <= 0.01
-                            && active.uses_text_baseline == scheduled.uses_text_baseline =>
+            let merge_edge = |mut active: Vec<ExclusionBand>,
+                              scheduled: Vec<ExclusionBand>|
+             -> Result<Vec<ExclusionBand>> {
+                for candidate in scheduled {
+                    if candidate.source.is_some()
+                        && active.iter().any(|band| band.source == candidate.source)
                     {
-                        Ok(Some(scheduled))
+                        // `active` has already been advanced using the current
+                        // pass's real preceding block geometry. Keep it rather
+                        // than replacing it with the previous pass's schedule.
+                        continue;
                     }
-                    (Some(_), Some(_)) => Err(OfficeError::unsupported(
-                        UnsupportedCode::AnchoredDrawing,
-                        "overlapping anchored drawing exclusions",
-                    )),
+                    if active.iter().any(|band| {
+                        band.top_remaining_pt < candidate.remaining_pt - 0.01
+                            && candidate.top_remaining_pt < band.remaining_pt - 0.01
+                    }) {
+                        return Err(OfficeError::unsupported(
+                            UnsupportedCode::AnchoredDrawing,
+                            "overlapping anchored drawing exclusions",
+                        ));
+                    }
+                    active.push(candidate);
                 }
+                active.sort_by(|left, right| {
+                    left.top_remaining_pt
+                        .partial_cmp(&right.top_remaining_pt)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                Ok(active)
             };
             Ok(Some(WrapExclusion {
-                left_band: merge_edge(active.left_band, scheduled.left_band)?,
-                right_band: merge_edge(active.right_band, scheduled.right_band)?,
+                left_bands: merge_edge(active.left_bands, scheduled.left_bands)?,
+                right_bands: merge_edge(active.right_bands, scheduled.right_bands)?,
             }))
         }
     }
 }
 
 fn wrap_remaining(wrap: WrapExclusion) -> f64 {
-    wrap.left_band
+    wrap.left_bands
         .into_iter()
-        .chain(wrap.right_band)
+        .chain(wrap.right_bands)
         .map(|band| band.remaining_pt)
         .fold(0.0, f64::max)
 }
@@ -211,6 +221,7 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
             BlockContent::Table(_) => None,
         })
         .collect();
+    validate_anchor_section_envelope(&doc.document.body, &boundaries, &doc.document.final_sect)?;
     let mut all_sections: Vec<&SectPr> = boundaries.iter().map(|(_, section)| *section).collect();
     all_sections.push(&doc.document.final_sect);
     for pair in all_sections.windows(2) {
@@ -251,6 +262,12 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
                 "anchored drawing in a multi-column section",
             ));
         }
+        if section.vertical_align != PageVAlign::Top && blocks_contain_page_floats(blocks) {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::AnchoredDrawing,
+                "page-anchored drawing with non-top body alignment",
+            ));
+        }
         let counter_start = counters.clone();
         let mut pass = run_section_pass(
             doc,
@@ -263,10 +280,9 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
             None,
         )?;
         if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
-            let mut previous_carriers = float_carriers(&pass.pages);
+            let mut schedule = page_band_schedule(&pass.units, &pass.pages);
             let mut converged = false;
             for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
-                let schedule = page_band_schedule(&pass.units, &pass.pages);
                 let next = run_section_pass(
                     doc,
                     blocks,
@@ -277,13 +293,14 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
                     &counter_start,
                     Some(&schedule),
                 )?;
-                let next_carriers = float_carriers(&next.pages);
+                let next_schedule = page_band_schedule(&next.units, &next.pages);
+                let stable = page_band_schedules_equivalent(&schedule, &next_schedule);
                 pass = next;
-                if next_carriers == previous_carriers {
+                if stable {
                     converged = true;
                     break;
                 }
-                previous_carriers = next_carriers;
+                schedule = next_schedule;
             }
             if !converged {
                 return Err(OfficeError::unsupported(
@@ -424,6 +441,63 @@ fn geometry_differs(left: &SectPr, right: &SectPr) -> bool {
         || left.margins.gutter != right.margins.gutter
 }
 
+fn columns_differ(left: &ColumnSpec, right: &ColumnSpec) -> bool {
+    left.num != right.num
+        || left.cols != right.cols
+        || left.space_pt != right.space_pt
+        || left.spaces != right.spaces
+}
+
+fn validate_anchor_section_envelope(
+    blocks: &[BlockContent],
+    boundaries: &[(usize, &SectPr)],
+    final_section: &SectPr,
+) -> Result<()> {
+    let mut start = 0usize;
+    for (boundary_index, (block_index, section)) in boundaries.iter().enumerate() {
+        let next = boundaries
+            .get(boundary_index + 1)
+            .map(|(_, section)| *section)
+            .unwrap_or(final_section);
+        if section.sect_type == SectType::Continuous
+            && !geometry_differs(section, next)
+            && !columns_differ(&section.cols, &next.cols)
+            && section.vertical_align == next.vertical_align
+        {
+            continue;
+        }
+        let section_blocks = &blocks[start..=*block_index];
+        if section.cols.is_multi() && blocks_contain_anchors(section_blocks) {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::AnchoredDrawing,
+                "anchored drawing in a multi-column section",
+            ));
+        }
+        if section.vertical_align != PageVAlign::Top && blocks_contain_page_floats(section_blocks) {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::AnchoredDrawing,
+                "page-anchored drawing with non-top body alignment",
+            ));
+        }
+        start = *block_index + 1;
+    }
+    if final_section.cols.is_multi() && blocks_contain_anchors(&blocks[start..]) {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::AnchoredDrawing,
+            "anchored drawing in a multi-column section",
+        ));
+    }
+    if final_section.vertical_align != PageVAlign::Top
+        && blocks_contain_page_floats(&blocks[start..])
+    {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::AnchoredDrawing,
+            "page-anchored drawing with non-top body alignment",
+        ));
+    }
+    Ok(())
+}
+
 fn clone_images(images: &[EncodedImage]) -> Vec<EncodedImage> {
     images.to_vec()
 }
@@ -466,6 +540,10 @@ fn run_section_pass(
         layout_width,
         &mut counters,
         &mut table_headers,
+        PageHorizontalContext {
+            content_left_pt: geo.content_left_pt,
+            page_width_pt: geo.width_pt,
+        },
         schedule,
     )?;
     let pages = paginate(&units, geo, &table_headers, column_widths, column_offsets);
@@ -487,6 +565,7 @@ fn build_units(
     content_w: f64,
     counters: &mut ListCounters,
     table_headers: &mut HashMap<usize, Vec<Unit>>,
+    page_horizontal: PageHorizontalContext,
     page_schedule: Option<&PageBandSchedule>,
 ) -> Result<Vec<Unit>> {
     let mut units = Vec::new();
@@ -533,15 +612,15 @@ fn build_units(
                     .max(1.0);
                 if pending_break || pending_column_break || effective_para.page_break_before {
                     active_wrap = None;
-                } else if let Some(wrap) = active_wrap {
+                } else if let Some(wrap) = active_wrap.take() {
                     let gap =
                         prev_after.max(effective_para.spacing.before_pt.unwrap_or(0.0).max(0.0));
                     active_wrap = advance_wrap(wrap, gap);
                 }
                 let scheduled_wrap = page_schedule
                     .and_then(|schedule| schedule.wrap_for_block(block_index, frame_width));
-                let paragraph_wrap = combine_wraps(active_wrap, scheduled_wrap)?;
-                let layout = layout_paragraph_with_wrap(
+                let paragraph_wrap = combine_wraps(active_wrap.take(), scheduled_wrap)?;
+                let mut layout = layout_paragraph_with_page_wrap(
                     doc,
                     warnings,
                     p,
@@ -550,8 +629,9 @@ fn build_units(
                     label,
                     None,
                     paragraph_wrap,
+                    page_horizontal,
                 )?;
-                active_wrap = layout.wrap_after;
+                active_wrap = layout.wrap_after.take();
                 if let Some(frame) = frame {
                     push_frame_unit(
                         layout,
@@ -581,7 +661,7 @@ fn build_units(
             BlockContent::Table(t) => {
                 let scheduled_wrap = page_schedule
                     .and_then(|schedule| schedule.wrap_for_block(block_index, content_w));
-                active_wrap = combine_wraps(active_wrap, scheduled_wrap)?;
+                active_wrap = combine_wraps(active_wrap.take(), scheduled_wrap)?;
                 // A table cannot occupy the single text interval beside an
                 // active float. Clear it below the exclusion before laying out
                 // the table, matching Word's block-flow behavior.
@@ -593,7 +673,8 @@ fn build_units(
                 let table_id = table_counter;
                 table_counter += 1;
                 keep_next_group = None;
-                let table_layout = layout_table(doc, warnings, t, rels, content_w, 0.0, counters)?;
+                let table_layout =
+                    layout_table_with_width(doc, warnings, t, rels, content_w, 0.0, counters)?;
                 if let Some(floating) = t.props.floating {
                     let mut items = Vec::new();
                     let mut row_y = 0.0;
@@ -613,26 +694,28 @@ fn build_units(
                     let (side_wrap, text_window) = if left_hugging {
                         (
                             Some(WrapExclusion {
-                                left_band: Some(ExclusionBand {
+                                left_bands: vec![ExclusionBand {
+                                    source: None,
                                     top_remaining_pt: floating.y_pt.max(0.0),
                                     remaining_pt: floating.y_pt + row_y + dist_bottom,
                                     inset_pt: floating.x_pt + table_layout.width_pt + dist_right,
                                     uses_text_baseline: false,
-                                }),
-                                right_band: None,
+                                }],
+                                right_bands: Vec::new(),
                             }),
                             content_w - floating.x_pt - table_layout.width_pt - dist_right,
                         )
                     } else if right_hugging {
                         (
                             Some(WrapExclusion {
-                                left_band: None,
-                                right_band: Some(ExclusionBand {
+                                left_bands: Vec::new(),
+                                right_bands: vec![ExclusionBand {
+                                    source: None,
                                     top_remaining_pt: floating.y_pt.max(0.0),
                                     remaining_pt: floating.y_pt + row_y + dist_bottom,
                                     inset_pt: content_w - floating.x_pt + dist_left,
                                     uses_text_baseline: false,
-                                }),
+                                }],
                             }),
                             floating.x_pt - dist_left,
                         )
@@ -655,7 +738,7 @@ fn build_units(
                         height: if wraps_text {
                             0.0
                         } else {
-                            floating.y_pt.max(0.0) + row_y + dist_bottom
+                            floating.y_pt + row_y + floating.wrap_padding_pt
                         },
                         gap_before: table_gap,
                         float_leading: 0.0,
@@ -745,6 +828,40 @@ fn blocks_contain_anchors(blocks: &[BlockContent]) -> bool {
             .iter()
             .flat_map(|row| &row.cells)
             .any(|cell| blocks_contain_anchors(&cell.content)),
+    })
+}
+
+fn blocks_contain_page_floats(blocks: &[BlockContent]) -> bool {
+    fn run_has_page_float(run: &Run) -> bool {
+        run.content.iter().any(|content| {
+            matches!(
+                content,
+                RunContent::Drawing(drawing)
+                    if drawing.anchor.is_some_and(|anchor| {
+                        anchor.relative_from_v != AnchorOrigin::Paragraph
+                    })
+            )
+        })
+    }
+
+    fn inline_has_page_float(inline: &InlineContent) -> bool {
+        match inline {
+            InlineContent::Run(run) => run_has_page_float(run),
+            InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_page_float),
+            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                field.content.iter().any(inline_has_page_float)
+            }
+            InlineContent::Math(_) => false,
+        }
+    }
+
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => paragraph.runs.iter().any(inline_has_page_float),
+        BlockContent::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .any(|cell| blocks_contain_page_floats(&cell.content)),
     })
 }
 
@@ -1169,21 +1286,6 @@ fn paginate(
     pages
 }
 
-fn float_carriers(pages: &[WorkPage]) -> Vec<(FloatCarrier, usize)> {
-    let mut carriers = pages
-        .iter()
-        .enumerate()
-        .flat_map(|(page_index, page)| {
-            page.float_carriers
-                .iter()
-                .copied()
-                .map(move |carrier| (carrier, page_index))
-        })
-        .collect::<Vec<_>>();
-    carriers.sort_unstable();
-    carriers
-}
-
 fn page_band_schedule(units: &[Unit], pages: &[WorkPage]) -> PageBandSchedule {
     let mut schedule = PageBandSchedule::default();
     for (page_index, page) in pages.iter().enumerate() {
@@ -1200,18 +1302,38 @@ fn page_band_schedule(units: &[Unit], pages: &[WorkPage]) -> PageBandSchedule {
     schedule
 }
 
+fn page_band_schedules_equivalent(previous: &PageBandSchedule, next: &PageBandSchedule) -> bool {
+    if previous.block_placements.len() != next.block_placements.len()
+        || previous.bands.len() != next.bands.len()
+    {
+        return false;
+    }
+    let same_blocks = previous.block_placements.iter().all(|(block, (page, y))| {
+        next.block_placements
+            .get(block)
+            .is_some_and(|(next_page, next_y)| page == next_page && (y - next_y).abs() <= 0.01)
+    });
+    if !same_blocks {
+        return false;
+    }
+    previous.bands.iter().all(|(page, bands)| {
+        let Some(next_bands) = next.bands.get(page) else {
+            return false;
+        };
+        bands.len() == next_bands.len()
+            && bands.iter().zip(next_bands).all(|(left, right)| {
+                left.carrier == right.carrier
+                    && left.side == right.side
+                    && (left.top_pt - right.top_pt).abs() <= 0.01
+                    && (left.bottom_pt - right.bottom_pt).abs() <= 0.01
+                    && (left.inset_pt - right.inset_pt).abs() <= 0.01
+                    && left.uses_text_baseline == right.uses_text_baseline
+            })
+    })
+}
+
 fn validate_page_bands(pages: &[WorkPage], content_width: f64) -> Result<()> {
     for page in pages {
-        for band in &page.float_bands {
-            if band.side != PageBandSide::Full
-                && content_width - band.inset_pt < MIN_TEXT_WINDOW_PT - 0.01
-            {
-                return Err(OfficeError::unsupported(
-                    UnsupportedCode::AnchoredDrawing,
-                    "anchored drawings leave no text window",
-                ));
-            }
-        }
         for (index, left) in page.float_bands.iter().enumerate() {
             for right in &page.float_bands[index + 1..] {
                 if left.top_pt >= right.bottom_pt - 0.01 || right.top_pt >= left.bottom_pt - 0.01 {
@@ -1369,10 +1491,11 @@ fn place_page_float(
                 .push((page_float.relative_height, positioned));
         }
     }
-    page.float_carriers.push(FloatCarrier {
+    let carrier = FloatCarrier {
         block_index,
         float_index,
-    });
+    };
+    page.float_carriers.push(carrier);
     let [dist_top, dist_bottom, dist_left, dist_right] = page_float.distances_pt;
     let top_pt = y - dist_top;
     let bottom_pt = y + page_float.h_pt + dist_bottom;
@@ -1381,6 +1504,7 @@ fn place_page_float(
     let band = match page_float.wrap {
         WrapMode::None => None,
         WrapMode::TopAndBottom => Some(ResolvedPageBand {
+            carrier,
             side: PageBandSide::Full,
             top_pt,
             bottom_pt,
@@ -1403,6 +1527,7 @@ fn place_page_float(
                     )
                 };
             Some(ResolvedPageBand {
+                carrier,
                 side,
                 top_pt,
                 bottom_pt,
@@ -1576,6 +1701,10 @@ fn place_footnotes(
                 geo.content_width_pt(),
                 &mut counters,
                 &mut table_headers,
+                PageHorizontalContext {
+                    content_left_pt: geo.content_left_pt,
+                    page_width_pt: geo.width_pt,
+                },
                 None,
             )?);
         }
@@ -1659,6 +1788,10 @@ fn append_endnotes(
             geo.content_width_pt(),
             &mut counters,
             &mut table_headers,
+            PageHorizontalContext {
+                content_left_pt: geo.content_left_pt,
+                page_width_pt: geo.width_pt,
+            },
             None,
         )?);
     }
@@ -1859,8 +1992,7 @@ fn place_hf(
                 block_y += layout.space_after_pt;
             }
             BlockContent::Table(table) => {
-                for row in
-                    layout_table(doc, warnings, table, rels, content_w, 0.0, &mut counters)?.rows
+                for row in layout_table(doc, warnings, table, rels, content_w, 0.0, &mut counters)?
                 {
                     for item in row.items {
                         placed.push((block_y + item.y_pt, item));

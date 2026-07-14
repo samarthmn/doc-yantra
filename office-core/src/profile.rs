@@ -1083,7 +1083,10 @@ fn add_anchor_column_reasons(profile: &mut DocProfile, document: &wml::Document)
             .get(boundary_index + 1)
             .map(|(_, section)| *section)
             .unwrap_or(&document.final_sect);
-        if section.sect_type == SectType::Continuous && !section_geometry_differs(section, next) {
+        if section.sect_type == SectType::Continuous
+            && !section_geometry_differs(section, next)
+            && !section_columns_differ(&section.cols, &next.cols)
+        {
             continue;
         }
         if section.cols.is_multi() && blocks_have_body_anchor(&document.body[start..=*block_index])
@@ -1119,6 +1122,13 @@ fn section_geometry_differs(left: &SectPr, right: &SectPr) -> bool {
         || left.margins.bottom != right.margins.bottom
         || left.margins.left != right.margins.left
         || left.margins.gutter != right.margins.gutter
+}
+
+fn section_columns_differ(left: &wml::ColumnSpec, right: &wml::ColumnSpec) -> bool {
+    left.num != right.num
+        || left.cols != right.cols
+        || left.space_pt != right.space_pt
+        || left.spaces != right.spaces
 }
 
 /// Resolves each requested font family, accumulating warnings + missing fonts,

@@ -79,6 +79,9 @@ pub struct ParaLayout {
 /// One edge of a rectangular exclusion carried across paragraphs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExclusionBand {
+    /// Stable page-float identity used to deduplicate a scheduled band from
+    /// the same band already advanced through preceding blocks.
+    pub source: Option<(usize, usize)>,
     /// Remaining distance to the top of the exclusion.
     pub top_remaining_pt: f64,
     /// Remaining vertical extent from the next paragraph's content top.
@@ -91,24 +94,31 @@ pub(crate) struct ExclusionBand {
 }
 
 /// Edge-aligned rectangular exclusions; both edges may be active together.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct WrapExclusion {
-    pub(crate) left_band: Option<ExclusionBand>,
-    pub(crate) right_band: Option<ExclusionBand>,
+    pub(crate) left_bands: Vec<ExclusionBand>,
+    pub(crate) right_bands: Vec<ExclusionBand>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct EdgeWrapBand {
+    source: Option<(usize, usize)>,
     top_pt: f64,
     bottom_pt: f64,
     inset_pt: f64,
     uses_text_baseline: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct WrapBand {
-    left: Option<EdgeWrapBand>,
-    right: Option<EdgeWrapBand>,
+    left: Vec<EdgeWrapBand>,
+    right: Vec<EdgeWrapBand>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PageHorizontalContext {
+    pub(crate) content_left_pt: f64,
+    pub(crate) page_width_pt: f64,
 }
 
 impl EdgeWrapBand {
@@ -130,6 +140,28 @@ impl EdgeWrapBand {
             top < self.bottom_pt - 0.01 && bottom > self.top_pt + 0.01
         }
     }
+}
+
+fn resolve_paragraph_anchor_x(
+    anchor: AnchorProps,
+    width_pt: f64,
+    content_width_pt: f64,
+    page: Option<PageHorizontalContext>,
+) -> f64 {
+    let (reference_width, relative_shift) = if anchor.relative_from_h == AnchorOrigin::Page {
+        page.map_or((content_width_pt, 0.0), |page| {
+            (page.page_width_pt, page.content_left_pt)
+        })
+    } else {
+        (content_width_pt, 0.0)
+    };
+    let resolved = match anchor.x_align {
+        Some(FrameAlign::Start) => 0.0,
+        Some(FrameAlign::Center) => (reference_width - width_pt).max(0.0) / 2.0,
+        Some(FrameAlign::End) => (reference_width - width_pt).max(0.0),
+        None => anchor.x_pt,
+    };
+    resolved - relative_shift
 }
 
 /// One laid-out line: items positioned relative to the line's top-left.
@@ -294,6 +326,58 @@ pub(crate) fn layout_paragraph_with_wrap(
     field_ctx: Option<FieldContext>,
     incoming_wrap: Option<WrapExclusion>,
 ) -> Result<ParaLayout> {
+    layout_paragraph_with_wrap_context(
+        doc,
+        warnings,
+        para,
+        rels,
+        avail_width_pt,
+        label_override,
+        field_ctx,
+        incoming_wrap,
+        None,
+    )
+}
+
+/// Lays out a body paragraph with the page box available for page-relative
+/// horizontal paragraph anchors.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layout_paragraph_with_page_wrap(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    para: &Paragraph,
+    rels: &HashMap<String, String>,
+    avail_width_pt: f64,
+    label_override: Option<PlacedLabel>,
+    field_ctx: Option<FieldContext>,
+    incoming_wrap: Option<WrapExclusion>,
+    page_horizontal: PageHorizontalContext,
+) -> Result<ParaLayout> {
+    layout_paragraph_with_wrap_context(
+        doc,
+        warnings,
+        para,
+        rels,
+        avail_width_pt,
+        label_override,
+        field_ctx,
+        incoming_wrap,
+        Some(page_horizontal),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_paragraph_with_wrap_context(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    para: &Paragraph,
+    rels: &HashMap<String, String>,
+    avail_width_pt: f64,
+    label_override: Option<PlacedLabel>,
+    field_ctx: Option<FieldContext>,
+    incoming_wrap: Option<WrapExclusion>,
+    page_horizontal: Option<PageHorizontalContext>,
+) -> Result<ParaLayout> {
     let eff_para = doc.styles.para_props(&para.props);
     if let Some(detail) = eff_para.borders.unsupported_detail(&doc.theme) {
         return Err(OfficeError::unsupported(
@@ -437,37 +521,47 @@ pub(crate) fn layout_paragraph_with_wrap(
     let mut wrap_band = incoming_wrap
         .map(|wrap| WrapBand {
             left: wrap
-                .left_band
+                .left_bands
+                .into_iter()
                 .filter(|band| band.remaining_pt > 0.01)
                 .map(|band| EdgeWrapBand {
+                    source: band.source,
                     top_pt: band.top_remaining_pt.max(0.0),
                     bottom_pt: band.remaining_pt,
                     inset_pt: band.inset_pt,
                     uses_text_baseline: band.uses_text_baseline,
-                }),
+                })
+                .collect(),
             right: wrap
-                .right_band
+                .right_bands
+                .into_iter()
                 .filter(|band| band.remaining_pt > 0.01)
                 .map(|band| EdgeWrapBand {
+                    source: band.source,
                     top_pt: band.top_remaining_pt.max(0.0),
                     bottom_pt: band.remaining_pt,
                     inset_pt: band.inset_pt,
                     uses_text_baseline: band.uses_text_baseline,
-                }),
+                })
+                .collect(),
         })
-        .filter(|wrap| wrap.left.is_some() || wrap.right.is_some());
-    let mut full_width_band = wrap_band.as_mut().and_then(|band| {
-        if band.right.is_none()
-            && band
-                .left
-                .is_some_and(|left| left.inset_pt >= avail_width_pt - 0.01)
-        {
-            band.left.take()
-        } else {
-            None
+        .filter(|wrap| !wrap.left.is_empty() || !wrap.right.is_empty());
+    let mut full_width_bands = Vec::new();
+    if let Some(band) = &mut wrap_band {
+        let mut side_bands = Vec::new();
+        for left in band.left.drain(..) {
+            if left.inset_pt >= avail_width_pt - 0.01 {
+                full_width_bands.push(left);
+            } else {
+                side_bands.push(left);
+            }
         }
-    });
-    if wrap_band.is_some_and(|band| band.left.is_none() && band.right.is_none()) {
+        band.left = side_bands;
+    }
+    if wrap_band
+        .as_ref()
+        .is_some_and(|band| band.left.is_empty() && band.right.is_empty())
+    {
         wrap_band = None;
     }
     let mut top_bottom_reserve = None;
@@ -484,14 +578,8 @@ pub(crate) fn layout_paragraph_with_wrap(
                         "overlapping anchored drawing exclusions",
                     ));
                 }
-                let x_pt = match anchor.x_align {
-                    Some(crate::oxml::wml::FrameAlign::Start) => 0.0,
-                    Some(crate::oxml::wml::FrameAlign::Center) => {
-                        (avail_width_pt - w_pt).max(0.0) / 2.0
-                    }
-                    Some(crate::oxml::wml::FrameAlign::End) => (avail_width_pt - w_pt).max(0.0),
-                    None => anchor.x_pt,
-                };
+                let x_pt =
+                    resolve_paragraph_anchor_x(anchor, w_pt, avail_width_pt, page_horizontal);
                 let is_left_edge = x_pt <= 0.01;
                 let is_right_edge = x_pt + w_pt >= avail_width_pt - 0.01;
                 let [dist_top, dist_bottom, dist_left, dist_right] = anchor.distances_pt;
@@ -507,6 +595,7 @@ pub(crate) fn layout_paragraph_with_wrap(
                         0.0
                     };
                 let edge = EdgeWrapBand {
+                    source: None,
                     top_pt: (anchor_y_for_wrap - dist_top).max(0.0),
                     bottom_pt: (anchor_y_for_wrap + h_pt + dist_bottom).max(0.0),
                     inset_pt: if use_right_interval {
@@ -518,13 +607,13 @@ pub(crate) fn layout_paragraph_with_wrap(
                 };
                 wrap_band = Some(if use_right_interval {
                     WrapBand {
-                        left: Some(edge),
-                        right: None,
+                        left: vec![edge],
+                        right: Vec::new(),
                     }
                 } else {
                     WrapBand {
-                        left: None,
-                        right: Some(edge),
+                        left: Vec::new(),
+                        right: vec![edge],
                     }
                 });
             }
@@ -537,17 +626,23 @@ pub(crate) fn layout_paragraph_with_wrap(
 
     let constrained_width = |line_index: usize, base_width: f64, base_x: f64| {
         let left_inset = wrap_band
-            .and_then(|band| band.left)
+            .as_ref()
+            .into_iter()
+            .flat_map(|band| &band.left)
             .filter(|band| {
                 band.applies_to_line(line_index, nominal_line_height, nominal_baseline_offset)
             })
-            .map_or(0.0, |band| band.inset_pt);
+            .map(|band| band.inset_pt)
+            .fold(0.0, f64::max);
         let right_inset = wrap_band
-            .and_then(|band| band.right)
+            .as_ref()
+            .into_iter()
+            .flat_map(|band| &band.right)
             .filter(|band| {
                 band.applies_to_line(line_index, nominal_line_height, nominal_baseline_offset)
             })
-            .map_or(0.0, |band| band.inset_pt);
+            .map(|band| band.inset_pt)
+            .fold(0.0, f64::max);
         let left_shift = (left_inset - base_x).max(0.0);
         let right_cut = (right_inset - right).max(0.0);
         (
@@ -600,6 +695,7 @@ pub(crate) fn layout_paragraph_with_wrap(
             &tab_stops,
             this_label,
             rtl,
+            page_horizontal,
         ));
     }
 
@@ -614,18 +710,17 @@ pub(crate) fn layout_paragraph_with_wrap(
         });
     }
 
-    let mut full_width_after = None;
-    if let Some(band) = full_width_band.take() {
+    full_width_bands.sort_by(|left, right| {
+        left.top_pt
+            .partial_cmp(&right.top_pt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for band in &full_width_bands {
         let occupied_before: f64 = lines.iter().map(|line| line.height_pt).sum();
         if occupied_before <= band.top_pt + 0.01 {
-            full_width_after = Some(ExclusionBand {
-                top_remaining_pt: (band.top_pt - occupied_before).max(0.0),
-                remaining_pt: band.bottom_pt - occupied_before,
-                inset_pt: band.inset_pt,
-                uses_text_baseline: false,
-            });
+            continue;
         } else if band.top_pt <= 0.01 {
-            float_leading_pt = float_leading_pt.max(band.bottom_pt.max(0.0));
+            prepend_line_clearance(&mut lines, band.bottom_pt.max(0.0));
         } else {
             let mut before = 0.0;
             let mut lines_before = 0usize;
@@ -637,7 +732,7 @@ pub(crate) fn layout_paragraph_with_wrap(
                 lines_before += 1;
             }
             if lines_before == 0 {
-                float_leading_pt = float_leading_pt.max(band.bottom_pt.max(0.0));
+                prepend_line_clearance(&mut lines, band.bottom_pt.max(0.0));
             } else if let Some(previous) = lines.get_mut(lines_before - 1) {
                 previous.height_pt += (band.bottom_pt - before).max(0.0);
             }
@@ -708,31 +803,34 @@ pub(crate) fn layout_paragraph_with_wrap(
     }
 
     let occupied_height: f64 = lines.iter().map(|line| line.height_pt).sum();
-    let wrap_after = wrap_band
-        .and_then(|band| {
-            let carry = |edge: Option<EdgeWrapBand>| {
-                edge.and_then(|edge| {
-                    let remaining_pt = edge.bottom_pt - occupied_height;
-                    (remaining_pt > 0.01).then_some(ExclusionBand {
-                        top_remaining_pt: (edge.top_pt - occupied_height).max(0.0),
-                        remaining_pt,
-                        inset_pt: edge.inset_pt,
-                        uses_text_baseline: edge.uses_text_baseline,
-                    })
+    let occupied_for_bands = occupied_height;
+    let carry = |edges: Vec<EdgeWrapBand>| {
+        edges
+            .into_iter()
+            .filter_map(|edge| {
+                let remaining_pt = edge.bottom_pt - occupied_for_bands;
+                (remaining_pt > 0.01).then_some(ExclusionBand {
+                    source: edge.source,
+                    top_remaining_pt: (edge.top_pt - occupied_for_bands).max(0.0),
+                    remaining_pt,
+                    inset_pt: edge.inset_pt,
+                    uses_text_baseline: edge.uses_text_baseline,
                 })
-            };
-            let exclusion = WrapExclusion {
-                left_band: full_width_after.or_else(|| carry(band.left)),
-                right_band: carry(band.right),
-            };
-            (exclusion.left_band.is_some() || exclusion.right_band.is_some()).then_some(exclusion)
-        })
-        .or_else(|| {
-            full_width_after.map(|left_band| WrapExclusion {
-                left_band: Some(left_band),
-                right_band: None,
             })
-        });
+            .collect::<Vec<_>>()
+    };
+    let mut left_edges = wrap_band
+        .as_ref()
+        .map(|band| band.left.clone())
+        .unwrap_or_default();
+    left_edges.extend(full_width_bands);
+    let right_edges = wrap_band.map(|band| band.right).unwrap_or_default();
+    let wrap_after = WrapExclusion {
+        left_bands: carry(left_edges),
+        right_bands: carry(right_edges),
+    };
+    let wrap_after = (!wrap_after.left_bands.is_empty() || !wrap_after.right_bands.is_empty())
+        .then_some(wrap_after);
 
     Ok(ParaLayout {
         space_before_pt: eff_para.spacing.before_pt.unwrap_or(0.0).max(0.0),
@@ -751,6 +849,21 @@ pub(crate) fn layout_paragraph_with_wrap(
         float_leading_pt,
         page_floats,
     })
+}
+
+fn prepend_line_clearance(lines: &mut [Line], clearance_pt: f64) {
+    if clearance_pt <= 0.01 {
+        return;
+    }
+    if let Some(first) = lines.first_mut() {
+        for item in &mut first.items {
+            item.y_pt += clearance_pt;
+        }
+        for item in &mut first.anchored_items {
+            item.y_pt += clearance_pt;
+        }
+        first.height_pt += clearance_pt;
+    }
 }
 
 fn paragraph_note_refs(para: &Paragraph) -> Vec<(NoteKind, i64)> {
@@ -1278,9 +1391,7 @@ fn text_box_items(
                     width,
                     0.0,
                     &mut counters,
-                )?
-                .rows
-                {
+                )? {
                     for item in row.items {
                         items.push(LineItem {
                             x_pt: 4.0 + item.x_pt,
@@ -1670,6 +1781,7 @@ fn place_line(
     tab_stops: &[TabStop],
     label: Option<&PlacedLabel>,
     rtl: bool,
+    page_horizontal: Option<PageHorizontalContext>,
 ) -> Line {
     let visual_indices = visual_run_order(atoms, indices, rtl);
     let indices = visual_indices.as_slice();
@@ -1997,16 +2109,12 @@ fn place_line(
                 );
                 let (origin_x, origin_y) = anchor
                     .map(|position| {
-                        let origin_x = match position.x_align {
-                            Some(crate::oxml::wml::FrameAlign::Start) => 0.0,
-                            Some(crate::oxml::wml::FrameAlign::Center) => {
-                                (anchor_width_pt - w_pt).max(0.0) / 2.0
-                            }
-                            Some(crate::oxml::wml::FrameAlign::End) => {
-                                (anchor_width_pt - w_pt).max(0.0)
-                            }
-                            None => position.x_pt,
-                        };
+                        let origin_x = resolve_paragraph_anchor_x(
+                            position,
+                            *w_pt,
+                            anchor_width_pt,
+                            page_horizontal,
+                        );
                         let origin_y = match position.y_align {
                             Some(crate::oxml::wml::FrameAlign::Start) => 0.0,
                             Some(crate::oxml::wml::FrameAlign::Center) => {
@@ -2207,6 +2315,7 @@ mod tests {
     #[test]
     fn tight_wrap_releases_a_line_when_its_baseline_clears_the_polygon() {
         let tight = EdgeWrapBand {
+            source: None,
             top_pt: 0.0,
             bottom_pt: 31.0,
             inset_pt: 100.0,
