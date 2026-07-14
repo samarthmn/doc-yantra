@@ -284,6 +284,42 @@ fn only_the_page_with_a_footnote_reserves_the_note_band() {
 }
 
 #[test]
+fn late_second_column_footnote_reserves_the_entire_physical_page() {
+    let first_column = (0..9)
+        .map(|index| exact_paragraph(&format!("COLUMN BODY {index}")))
+        .collect::<String>();
+    let note_boundary = format!(
+        r#"<w:p><w:pPr><w:spacing w:line="480" w:lineRule="exact"/><w:sectPr>{SHORT_SECTION}{TWO_COLUMNS}</w:sectPr></w:pPr><w:r><w:t>LATE COLUMN NOTE</w:t><w:footnoteReference w:id="1"/></w:r></w:p>"#
+    );
+    let body = format!(
+        "{first_column}{note_boundary}{}<w:sectPr>{SHORT_SECTION}</w:sectPr>",
+        exact_paragraph("AFTER NOTE PAGE")
+    );
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="1"><w:p><w:r><w:t>LATE NOTE TEXT</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let laid = open_layout(&package_with_parts(
+        &body,
+        rels,
+        vec![("word/footnotes.xml", footnotes.into_bytes())],
+    ));
+
+    assert_eq!(
+        laid.pages.len(),
+        2,
+        "page texts: {:?}",
+        laid.pages.iter().map(page_text).collect::<Vec<_>>()
+    );
+    assert!(page_text(&laid.pages[0]).contains("LATE NOTE TEXT"));
+    assert!(page_text(&laid.pages[1]).contains("AFTER NOTE PAGE"));
+    assert!(
+        text_position(&laid.pages[0], "COLUMN BODY 6").0 > 200.0,
+        "the first column crossed the page-local footnote boundary"
+    );
+}
+
+#[test]
 fn balanced_columns_include_each_repeated_table_header_height() {
     let row = |label: &str, line_twips: u32, header: bool| {
         let header = if header { "<w:tblHeader/>" } else { "" };
@@ -393,6 +429,71 @@ fn continuous_page_float_under_prior_non_top_alignment_fails_with_profile_parity
             detail,
         }) if detail == "page-anchored drawing with non-top body alignment"
     ));
+}
+
+#[test]
+fn centered_continuous_run_float_rejects_after_spilling_to_its_governing_page() {
+    let first = section_end("TOP FIRST", SHORT_SECTION);
+    let spill = (0..9)
+        .map(|index| exact_paragraph(&format!("CENTERED SPILL {index}")))
+        .collect::<String>();
+    let anchor = page_float(977_900, 977_900);
+    let body = format!(
+        r#"{first}{spill}<w:p><w:r>{anchor}</w:r></w:p><w:sectPr><w:type w:val="continuous"/>{SHORT_SECTION}<w:vAlign w:val="center"/></w:sectPr>"#
+    );
+    let bytes = image_docx(&body);
+
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(predicted.reasons.iter().any(|reason| {
+        reason.code == UnsupportedCode::AnchoredDrawing
+            && reason.detail == "page-anchored drawing with non-top body alignment"
+    }));
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()),
+        Err(OfficeError::Unsupported {
+            code: UnsupportedCode::AnchoredDrawing,
+            detail,
+        }) if detail == "page-anchored drawing with non-top body alignment"
+    ));
+}
+
+#[test]
+fn top_continuous_run_float_is_allowed_after_spilling_off_a_centered_page() {
+    let first = section_end(
+        "CENTERED FIRST",
+        &format!(r#"{SHORT_SECTION}<w:vAlign w:val="center"/>"#),
+    );
+    let spill = (0..9)
+        .map(|index| exact_paragraph(&format!("TOP SPILL {index}")))
+        .collect::<String>();
+    let anchor = page_float(977_900, 977_900);
+    let body = format!(
+        r#"{first}{spill}<w:p><w:r>{anchor}</w:r></w:p><w:sectPr><w:type w:val="continuous"/>{SHORT_SECTION}<w:vAlign w:val="top"/></w:sectPr>"#
+    );
+    let bytes = image_docx(&body);
+
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(
+        predicted.supported,
+        "profile reasons: {:?}",
+        predicted.reasons
+    );
+    convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
+        .expect("top-governed float must convert");
+    let laid = open_layout(&bytes);
+    assert!(laid.pages.len() >= 2);
+    assert!(
+        !laid.pages[0]
+            .items
+            .iter()
+            .any(|positioned| matches!(positioned.item, Item::Image { .. }))
+    );
+    assert!(
+        laid.pages[1]
+            .items
+            .iter()
+            .any(|positioned| matches!(positioned.item, Item::Image { .. }))
+    );
 }
 
 #[test]

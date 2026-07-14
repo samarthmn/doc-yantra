@@ -23,10 +23,11 @@ use crate::oxml::wml::{
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
 use crate::{OfficeError, Result, UnsupportedCode};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 const MIN_TEXT_WINDOW_PT: f64 = 36.0;
 const PAGE_FLOAT_REFLOW_LIMIT: usize = 3;
+const FOOTNOTE_REFLOW_LIMIT: usize = 4;
 
 /// A single flow unit (one paragraph line or one table row).
 struct Unit {
@@ -368,7 +369,7 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
             BlockContent::Table(_) => None,
         })
         .collect();
-    validate_anchor_section_envelope(&doc.document.body, &boundaries, &doc.document.final_sect)?;
+    validate_anchor_column_envelope(&doc.document.body, &boundaries, &doc.document.final_sect)?;
     let section_runs = build_section_runs(doc, &boundaries);
     for pair in section_runs.windows(2) {
         let previous = pair[0].sect;
@@ -403,6 +404,8 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
             ));
         }
     }
+
+    validate_page_float_alignment(&section_runs, &pass.pages)?;
 
     let mut warnings = pass.warnings;
     let units = pass.units;
@@ -552,17 +555,13 @@ fn geometry_differs(left: &SectPr, right: &SectPr) -> bool {
         || left.margins.gutter != right.margins.gutter
 }
 
-fn validate_anchor_section_envelope(
+fn validate_anchor_column_envelope(
     blocks: &[BlockContent],
     boundaries: &[(usize, &SectPr)],
     final_section: &SectPr,
 ) -> Result<()> {
     let mut start = 0usize;
-    let mut governing_alignment = None;
-    for (run_index, (block_index, section)) in boundaries.iter().enumerate() {
-        if run_index == 0 || section.sect_type != SectType::Continuous {
-            governing_alignment = Some(section.vertical_align);
-        }
+    for (block_index, section) in boundaries {
         let section_blocks = &blocks[start..=*block_index];
         if section.cols.is_multi() && blocks_contain_anchors(section_blocks) {
             return Err(OfficeError::unsupported(
@@ -570,18 +569,7 @@ fn validate_anchor_section_envelope(
                 "anchored drawing in a multi-column section",
             ));
         }
-        if governing_alignment != Some(PageVAlign::Top)
-            && blocks_contain_page_floats(section_blocks)
-        {
-            return Err(OfficeError::unsupported(
-                UnsupportedCode::AnchoredDrawing,
-                "page-anchored drawing with non-top body alignment",
-            ));
-        }
         start = *block_index + 1;
-    }
-    if boundaries.is_empty() || final_section.sect_type != SectType::Continuous {
-        governing_alignment = Some(final_section.vertical_align);
     }
     if final_section.cols.is_multi() && blocks_contain_anchors(&blocks[start..]) {
         return Err(OfficeError::unsupported(
@@ -589,8 +577,17 @@ fn validate_anchor_section_envelope(
             "anchored drawing in a multi-column section",
         ));
     }
-    if governing_alignment != Some(PageVAlign::Top) && blocks_contain_page_floats(&blocks[start..])
-    {
+    Ok(())
+}
+
+fn validate_page_float_alignment(
+    section_runs: &[SectionRun<'_>],
+    pages: &[WorkPage],
+) -> Result<()> {
+    if pages.iter().any(|page| {
+        !page.float_carriers.is_empty()
+            && section_runs[page.governing_run].sect.vertical_align != PageVAlign::Top
+    }) {
         return Err(OfficeError::unsupported(
             UnsupportedCode::AnchoredDrawing,
             "page-anchored drawing with non-top body alignment",
@@ -663,7 +660,7 @@ fn run_document_pass(
             column_offsets,
         });
     }
-    let pages = paginate(&units, section_runs, &runs, &table_headers);
+    let pages = paginate_with_footnote_reservations(&units, section_runs, &runs, &table_headers)?;
     for page in &pages {
         validate_page_bands(
             std::slice::from_ref(page),
@@ -976,40 +973,6 @@ fn blocks_contain_anchors(blocks: &[BlockContent]) -> bool {
             .iter()
             .flat_map(|row| &row.cells)
             .any(|cell| blocks_contain_anchors(&cell.content)),
-    })
-}
-
-fn blocks_contain_page_floats(blocks: &[BlockContent]) -> bool {
-    fn run_has_page_float(run: &Run) -> bool {
-        run.content.iter().any(|content| {
-            matches!(
-                content,
-                RunContent::Drawing(drawing)
-                    if drawing.anchor.is_some_and(|anchor| {
-                        anchor.relative_from_v != AnchorOrigin::Paragraph
-                    })
-            )
-        })
-    }
-
-    fn inline_has_page_float(inline: &InlineContent) -> bool {
-        match inline {
-            InlineContent::Run(run) => run_has_page_float(run),
-            InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_page_float),
-            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
-                field.content.iter().any(inline_has_page_float)
-            }
-            InlineContent::Math(_) => false,
-        }
-    }
-
-    blocks.iter().any(|block| match block {
-        BlockContent::Paragraph(paragraph) => paragraph.runs.iter().any(inline_has_page_float),
-        BlockContent::Table(table) => table
-            .rows
-            .iter()
-            .flat_map(|row| &row.cells)
-            .any(|cell| blocks_contain_page_floats(&cell.content)),
     })
 }
 
@@ -1340,6 +1303,7 @@ fn paginate(
     section_runs: &[SectionRun<'_>],
     run_layouts: &[RunLayout],
     table_headers: &HashMap<usize, Vec<Unit>>,
+    reserved_footnote_pages: &BTreeSet<usize>,
 ) -> Vec<WorkPage> {
     let first_geo = &run_layouts[0].geo;
     let mut pages: Vec<WorkPage> = Vec::new();
@@ -1366,7 +1330,8 @@ fn paginate(
         let mut column = 0usize;
         let mut band_top = y;
         let mut band_extent = y;
-        let mut full_bottom = body_content_bottom(geo, page_has_footnotes(&page));
+        let mut full_bottom =
+            body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
         let should_balance = run_layout.column_widths.len() > 1
             && (run_index + 1 == section_runs.len()
                 || section_runs[run_index + 1].sect.sect_type == SectType::Continuous);
@@ -1385,27 +1350,6 @@ fn paginate(
 
         for unit_run in coalesce_runs(units, run_layout.unit_start, run_layout.unit_end) {
             let first_unit_index = unit_run[0];
-            let unit_run_has_footnotes = unit_run.iter().any(|index| {
-                units[*index]
-                    .note_refs
-                    .iter()
-                    .any(|(kind, _)| *kind == NoteKind::Footnote)
-            });
-            let candidate_has_footnotes = page_has_footnotes(&page) || unit_run_has_footnotes;
-            let candidate_full_bottom = body_content_bottom(geo, candidate_has_footnotes);
-            if (candidate_full_bottom - full_bottom).abs() > 0.01 {
-                full_bottom = candidate_full_bottom;
-                (content_bottom, band_is_balanced) = column_band_bottom(
-                    units,
-                    run_layout.unit_start,
-                    run_layout.unit_end,
-                    band_top,
-                    full_bottom,
-                    run_layout.column_widths.len(),
-                    should_balance,
-                    table_headers,
-                );
-            }
             let mut probe_y = y;
             for &unit_index in &unit_run {
                 probe_y += effective_gap_before(&units[unit_index], probe_y, band_top);
@@ -1421,7 +1365,8 @@ fn paginate(
                 band_top = y;
                 band_extent = y;
                 column = 0;
-                full_bottom = body_content_bottom(geo, unit_run_has_footnotes);
+                full_bottom =
+                    body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
                 (content_bottom, band_is_balanced) = column_band_bottom(
                     units,
                     first_unit_index,
@@ -1444,7 +1389,8 @@ fn paginate(
                     band_top = y;
                     band_extent = y;
                     column = 0;
-                    full_bottom = body_content_bottom(geo, unit_run_has_footnotes);
+                    full_bottom =
+                        body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
                     (content_bottom, band_is_balanced) = column_band_bottom(
                         units,
                         first_unit_index,
@@ -1513,10 +1459,40 @@ fn paginate(
     pages
 }
 
-fn page_has_footnotes(page: &WorkPage) -> bool {
-    page.note_refs
-        .iter()
-        .any(|(kind, _)| *kind == NoteKind::Footnote)
+fn paginate_with_footnote_reservations(
+    units: &[Unit],
+    section_runs: &[SectionRun<'_>],
+    run_layouts: &[RunLayout],
+    table_headers: &HashMap<usize, Vec<Unit>>,
+) -> Result<Vec<WorkPage>> {
+    let mut reserved_pages = BTreeSet::new();
+    for _ in 0..FOOTNOTE_REFLOW_LIMIT {
+        let pages = paginate(
+            units,
+            section_runs,
+            run_layouts,
+            table_headers,
+            &reserved_pages,
+        );
+        let discovered_pages = pages
+            .iter()
+            .enumerate()
+            .filter_map(|(page_index, page)| {
+                page.note_refs
+                    .iter()
+                    .any(|(kind, _)| *kind == NoteKind::Footnote)
+                    .then_some(page_index)
+            })
+            .collect::<BTreeSet<_>>();
+        if discovered_pages == reserved_pages {
+            return Ok(pages);
+        }
+        reserved_pages = discovered_pages;
+    }
+    Err(OfficeError::unsupported(
+        UnsupportedCode::Footnotes,
+        "footnote page reservation did not converge",
+    ))
 }
 
 fn body_content_bottom(geo: &PageGeometry, reserves_footnotes: bool) -> f64 {
