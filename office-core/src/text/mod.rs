@@ -3,6 +3,7 @@
 
 pub mod linebreak;
 pub mod script;
+pub mod semantic;
 pub mod shape;
 
 pub use script::{ScriptScan, scan_scripts};

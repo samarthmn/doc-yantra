@@ -21,6 +21,10 @@ const MIN_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EXPANSION_RATIO: u64 = 200;
 /// Never reserve a whole part from untrusted ZIP size metadata up front.
 const MAX_INITIAL_PART_CAPACITY: u64 = 64 * 1024;
+/// Relationships fan out asset resolution and are attacker-controlled XML.
+const MAX_RELATIONSHIPS_PER_PART: usize = 50_000;
+/// Prevent pathological `../` or segment chains during target normalization.
+const MAX_RELATIONSHIP_TARGET_DEPTH: usize = 64;
 
 /// OLE2 / CFB compound-file magic (`D0 CF 11 E0 A1 B1 1A E1`). Legacy binary
 /// Office formats and encrypted OOXML both use this container.
@@ -188,6 +192,15 @@ impl Package {
         }
 
         let (ct_defaults, ct_overrides) = parse_content_types(&parts)?;
+        // Validate every XML-bearing part once before format-specific code can
+        // silently skip or deeply walk an auxiliary part.
+        for (name, bytes) in &parts {
+            if name.ends_with(".xml") || name.ends_with(".rels") {
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| OfficeError::Invalid(format!("`{name}` is not UTF-8")))?;
+                oxml::guard_xml_budget(text, name)?;
+            }
+        }
         Ok(Package {
             parts,
             ct_defaults,
@@ -227,8 +240,7 @@ impl Package {
         };
         let text = std::str::from_utf8(bytes)
             .map_err(|_| OfficeError::Invalid(format!("`{rels_name}` is not UTF-8")))?;
-        let doc = roxmltree::Document::parse(text)
-            .map_err(|e| OfficeError::Invalid(format!("`{rels_name}` XML: {e}")))?;
+        let doc = oxml::parse_xml(text, &rels_name)?;
 
         let base_dir = part_dir(&normalize_part(source_part));
         let mut out = Vec::new();
@@ -236,11 +248,27 @@ impl Package {
             if !oxml::is(rel, PKG_REL, "Relationship") {
                 continue;
             }
+            if out.len() >= MAX_RELATIONSHIPS_PER_PART {
+                return Err(OfficeError::unsupported(
+                    UnsupportedCode::DecompressionLimit,
+                    format!(
+                        "`{rels_name}` relationship count exceeds limit {MAX_RELATIONSHIPS_PER_PART}"
+                    ),
+                ));
+            }
             let id = oxml::attr_local(rel, "Id").unwrap_or_default().to_string();
             let rel_type = oxml::attr_local(rel, "Type")
                 .unwrap_or_default()
                 .to_string();
             let raw_target = oxml::attr_local(rel, "Target").unwrap_or_default();
+            if raw_target.split('/').count() > MAX_RELATIONSHIP_TARGET_DEPTH {
+                return Err(OfficeError::unsupported(
+                    UnsupportedCode::DecompressionLimit,
+                    format!(
+                        "`{rels_name}` relationship target depth exceeds limit {MAX_RELATIONSHIP_TARGET_DEPTH}"
+                    ),
+                ));
+            }
             let external = oxml::attr_local(rel, "TargetMode") == Some("External");
             let (mode, target) = if external {
                 (TargetMode::External, raw_target.to_string())
@@ -330,8 +358,7 @@ fn parse_content_types(
     };
     let text = std::str::from_utf8(bytes)
         .map_err(|_| OfficeError::Invalid("[Content_Types].xml is not UTF-8".into()))?;
-    let doc = roxmltree::Document::parse(text)
-        .map_err(|e| OfficeError::Invalid(format!("[Content_Types].xml XML: {e}")))?;
+    let doc = oxml::parse_xml(text, "[Content_Types].xml")?;
 
     let mut defaults = BTreeMap::new();
     let mut overrides = BTreeMap::new();
@@ -366,6 +393,7 @@ fn looks_encrypted(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn bounded_part_reader_uses_actual_bytes_not_declared_size() {
@@ -408,6 +436,31 @@ mod tests {
         )
         .expect_err("declared size over the part budget must be rejected");
         assert!(err.to_string().starts_with("unsupported"));
+    }
+
+    #[test]
+    fn hundred_thousand_zip_entries_fail_with_typed_limit() {
+        let started = std::time::Instant::now();
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for index in 0..100_000 {
+                zip.start_file(format!("p{index}"), options).unwrap();
+                zip.write_all(b"x").unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let error = Package::open(cursor.get_ref()).expect_err("entry limit");
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::DecompressionLimit,
+                ..
+            }
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

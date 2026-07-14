@@ -9,6 +9,7 @@ mod ssim;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use fidelity::evidence::{is_sha256, verify_sha256};
 use office_core::{ConvertOptions, OfficeFormat, convert};
 use pdf_core::raster::{RenderOptions, render_page};
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fidelity-corpus")
 }
 fn report_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fidelity-report")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tmp/fidelity-report")
 }
 
 #[derive(Parser)]
@@ -40,6 +41,9 @@ enum Cmd {
         case: Option<String>,
         #[arg(long)]
         update_report: bool,
+        /// Directory for generated JSON, HTML, and page-render evidence.
+        #[arg(long)]
+        report_dir: Option<PathBuf>,
     },
     /// List corpus cases lacking a `ground-truth.pdf`.
     MissingGroundTruth,
@@ -54,6 +58,8 @@ struct Manifest {
     max_page_count_delta: u32,
     word_version: String,
     ground_truth_exported_at: String,
+    input_sha256: String,
+    golden_sha256: String,
 }
 
 #[derive(Serialize)]
@@ -81,7 +87,16 @@ fn main() -> Result<()> {
             format,
             case,
             update_report,
-        } => run(&format, case.as_deref(), update_report)?,
+            report_dir: selected_report_dir,
+        } => {
+            let selected_report_dir = selected_report_dir.unwrap_or_else(report_dir);
+            run(
+                &format,
+                case.as_deref(),
+                update_report,
+                &selected_report_dir,
+            )?
+        }
     }
     Ok(())
 }
@@ -126,13 +141,18 @@ fn case_dirs(format: &str) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-fn run(format: &str, only: Option<&str>, _update_report: bool) -> Result<()> {
+fn run(
+    format: &str,
+    only: Option<&str>,
+    _update_report: bool,
+    selected_report_dir: &Path,
+) -> Result<()> {
     if format != "docx" {
         anyhow::bail!(
             "no {format} reference corpus is committed; refusing to claim fidelity coverage"
         );
     }
-    let pages_dir = report_dir().join("pages");
+    let pages_dir = selected_report_dir.join("pages");
     std::fs::create_dir_all(&pages_dir).ok();
 
     let mut reports = Vec::new();
@@ -160,11 +180,19 @@ fn run(format: &str, only: Option<&str>, _update_report: bool) -> Result<()> {
         let manifest: Manifest = toml::from_str(&manifest_contents)
             .with_context(|| format!("parse {}", manifest_path.display()))?;
         validate_manifest_contract(&manifest_path, &manifest)?;
-        validate_provenance(&manifest_path, &manifest, &gt)?;
-        reports.push(score_case(&name, &dir, &gt, &manifest, &pages_dir));
+        let source_bytes = read_verified_frozen_file(&source, &manifest.input_sha256)?;
+        let ground_truth_bytes = read_verified_frozen_file(&gt, &manifest.golden_sha256)?;
+        validate_provenance(&manifest_path, &manifest, &gt, &ground_truth_bytes)?;
+        reports.push(score_case(
+            &name,
+            &source_bytes,
+            &ground_truth_bytes,
+            &manifest,
+            &pages_dir,
+        ));
     }
 
-    write_reports(&reports)?;
+    write_reports(&reports, selected_report_dir)?;
     enforce_thresholds(&reports, only.is_none())?;
     let core_failures = reports
         .iter()
@@ -184,7 +212,7 @@ fn run(format: &str, only: Option<&str>, _update_report: bool) -> Result<()> {
         core_failures,
         extended_passes,
         extended_total,
-        report_dir().join("index.html").display()
+        selected_report_dir.join("index.html").display()
     );
     Ok(())
 }
@@ -205,10 +233,27 @@ fn validate_manifest_contract(path: &Path, manifest: &Manifest) -> Result<()> {
     if manifest.max_page_count_delta > 1 {
         anyhow::bail!("{} allows an excessive page-count delta", path.display());
     }
+    if !is_sha256(&manifest.input_sha256) || !is_sha256(&manifest.golden_sha256) {
+        anyhow::bail!(
+            "{} must carry canonical input_sha256 and golden_sha256 values",
+            path.display()
+        );
+    }
     Ok(())
 }
 
-fn validate_provenance(path: &Path, manifest: &Manifest, ground_truth: &Path) -> Result<()> {
+fn read_verified_frozen_file(path: &Path, expected: &str) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    verify_sha256(path, &bytes, expected).map_err(anyhow::Error::msg)?;
+    Ok(bytes)
+}
+
+fn validate_provenance(
+    path: &Path,
+    manifest: &Manifest,
+    ground_truth_path: &Path,
+    ground_truth: &[u8],
+) -> Result<()> {
     let declared_producer = manifest.word_version.trim();
     if !declared_producer
         .to_ascii_lowercase()
@@ -240,14 +285,12 @@ fn validate_provenance(path: &Path, manifest: &Manifest, ground_truth: &Path) ->
         anyhow::bail!("{} has invalid ground-truth export date", path.display());
     }
 
-    let pdf =
-        std::fs::read(ground_truth).with_context(|| format!("read {}", ground_truth.display()))?;
-    let metadata = pdf_core::meta::get_metadata(&pdf)
-        .with_context(|| format!("read PDF metadata from {}", ground_truth.display()))?;
+    let metadata = pdf_core::meta::get_metadata(ground_truth)
+        .with_context(|| format!("read PDF metadata from {}", ground_truth_path.display()))?;
     let actual_producer = metadata.producer.or(metadata.creator).ok_or_else(|| {
         anyhow::anyhow!(
             "{} has no PDF Producer or Creator metadata",
-            ground_truth.display()
+            ground_truth_path.display()
         )
     })?;
     if !word_producer_matches(declared_producer, &actual_producer) {
@@ -256,10 +299,10 @@ fn validate_provenance(path: &Path, manifest: &Manifest, ground_truth: &Path) ->
             path.display()
         );
     }
-    let actual_date = embedded_creation_date(&pdf).ok_or_else(|| {
+    let actual_date = embedded_creation_date(ground_truth).ok_or_else(|| {
         anyhow::anyhow!(
             "{} has no parseable PDF CreationDate",
-            ground_truth.display()
+            ground_truth_path.display()
         )
     })?;
     if actual_date != date {
@@ -386,6 +429,24 @@ mod gate_tests {
     }
 
     #[test]
+    fn fidelity_reports_default_to_repo_tmp_and_allow_an_explicit_directory() {
+        assert!(
+            report_dir().ends_with("tmp/fidelity-report"),
+            "default report output must remain inside the repository tmp directory"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fidelity",
+                "run",
+                "--report-dir",
+                "tmp/custom-fidelity-report",
+            ])
+            .is_ok(),
+            "run must accept an explicit report directory"
+        );
+    }
+
+    #[test]
     fn provenance_helpers_check_word_variant_and_embedded_date() {
         assert!(word_producer_matches(
             "Microsoft Word 2021",
@@ -420,8 +481,8 @@ mod gate_tests {
 
 fn score_case(
     name: &str,
-    dir: &Path,
-    gt: &Path,
+    source: &[u8],
+    truth_pdf: &[u8],
     manifest: &Manifest,
     pages_dir: &Path,
 ) -> CaseReport {
@@ -438,14 +499,7 @@ fn score_case(
         note: String::new(),
     };
 
-    let source = match std::fs::read(dir.join("source.docx")) {
-        Ok(s) => s,
-        Err(e) => {
-            report.note = format!("read source: {e}");
-            return report;
-        }
-    };
-    let our_pdf = match convert(&source, OfficeFormat::Docx, &ConvertOptions::default()) {
+    let our_pdf = match convert(source, OfficeFormat::Docx, &ConvertOptions::default()) {
         Ok(out) => {
             report.our_pages = out.page_count;
             out.pdf
@@ -456,8 +510,7 @@ fn score_case(
             return report;
         }
     };
-    let truth_pdf = std::fs::read(gt).unwrap_or_default();
-    let truth_pages = probe_page_count(&truth_pdf);
+    let truth_pages = probe_page_count(truth_pdf);
     report.truth_pages = truth_pages;
 
     if report.our_pages.abs_diff(truth_pages) > manifest.max_page_count_delta {
@@ -469,7 +522,7 @@ fn score_case(
     let mut min_ssim = f64::INFINITY;
     let mut max_diff = 0.0_f64;
     for i in 0..n {
-        let (Ok(ours), Ok(truth)) = (raster(&our_pdf, i), raster(&truth_pdf, i)) else {
+        let (Ok(ours), Ok(truth)) = (raster(&our_pdf, i), raster(truth_pdf, i)) else {
             report.note = format!("rasterization failed on page {i}");
             return report;
         };
@@ -539,13 +592,16 @@ fn write_page_png(dir: &Path, name: &str, page: u32, kind: &str, img: &image::Dy
     let _ = img.save(dir.join(format!("{name}-{page}-{kind}.png")));
 }
 
-fn write_reports(reports: &[CaseReport]) -> Result<()> {
-    std::fs::create_dir_all(report_dir())?;
+fn write_reports(reports: &[CaseReport], selected_report_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(selected_report_dir)?;
     std::fs::write(
-        report_dir().join("report.json"),
+        selected_report_dir.join("report.json"),
         serde_json::to_string_pretty(reports)?,
     )?;
-    std::fs::write(report_dir().join("index.html"), html(reports))?;
+    std::fs::write(
+        selected_report_dir.join("index.html"),
+        html(reports, selected_report_dir),
+    )?;
     Ok(())
 }
 
@@ -601,7 +657,7 @@ figcaption{text-align:center;color:var(--muted);font-size:11px;margin-top:6px;te
 @media (max-width:760px){.frames{grid-template-columns:1fr}.metrics{gap:12px;width:100%;justify-content:space-between}}
 "#;
 
-fn html(reports: &[CaseReport]) -> String {
+fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
     let total = reports.len();
     let passing = reports.iter().filter(|r| r.pass).count();
     let failing = total - passing;
@@ -630,7 +686,7 @@ fn html(reports: &[CaseReport]) -> String {
     // Amplify the meaningful SSIM range [0.8, 1.0] onto the bar so near-passing
     // and failing cases are visually distinct.
     let scale = |v: f64| (((v - 0.8) / 0.2) * 100.0).clamp(0.0, 100.0);
-    let pages = report_dir().join("pages");
+    let pages = selected_report_dir.join("pages");
 
     let mut cards = String::new();
     for r in &ordered {

@@ -29,10 +29,15 @@ pub fn builtin_code(id: u32) -> Option<&'static str> {
         2 => "0.00",
         3 => "#,##0",
         4 => "#,##0.00",
+        5 => "$#,##0;($#,##0)",
+        6 => "$#,##0;[Red]($#,##0)",
+        7 => "$#,##0.00;($#,##0.00)",
+        8 => "$#,##0.00;[Red]($#,##0.00)",
         9 => "0%",
         10 => "0.00%",
         11 => "0.00E+00",
         12 => "# ?/?",
+        13 => "# ??/??",
         14 => "m/d/yyyy",
         15 => "d-mmm-yy",
         16 => "d-mmm",
@@ -46,6 +51,10 @@ pub fn builtin_code(id: u32) -> Option<&'static str> {
         38 => "#,##0;[Red](#,##0)",
         39 => "#,##0.00;(#,##0.00)",
         40 => "#,##0.00;[Red](#,##0.00)",
+        41 => "#,##0;(#,##0);-",
+        42 => "$#,##0;($#,##0);$-",
+        43 => "#,##0.00;(#,##0.00);-",
+        44 => "$#,##0.00;($#,##0.00);$-",
         45 => "mm:ss",
         46 => "[h]:mm:ss",
         47 => "mm:ss.0",
@@ -64,6 +73,18 @@ pub fn format_number(value: f64, code: &str, date1904: bool) -> Formatted {
     let (section, use_abs) = pick_section(value, &sections);
     let (color, body) = strip_color(section);
 
+    if is_fraction_pattern(body) {
+        return Formatted {
+            text: format_fraction(if use_abs { value.abs() } else { value }, body),
+            color,
+        };
+    }
+    if is_elapsed_time_pattern(body) {
+        return Formatted {
+            text: format_elapsed_time(value, body),
+            color,
+        };
+    }
     if is_date_pattern(body) {
         return Formatted {
             text: format_datetime(value, body, date1904),
@@ -267,7 +288,7 @@ fn format_numeric(value: f64, pattern: &str) -> String {
     let scale_commas = trailing_comma_scale(pattern);
     value /= 1000f64.powi(scale_commas as i32);
 
-    let decimals = decimal_places(pattern);
+    let (minimum_decimals, decimals) = decimal_places(pattern);
     let thousands = pattern.contains(",0") || pattern.contains("#,#") || pattern.contains(",##");
 
     let mut out = String::new();
@@ -278,7 +299,7 @@ fn format_numeric(value: f64, pattern: &str) -> String {
         let exp_digits = 2;
         out.push_str(&format_scientific(value, decimals, exp_digits));
     } else {
-        out.push_str(&format_fixed(value, decimals, thousands));
+        out.push_str(&format_fixed(value, minimum_decimals, decimals, thousands));
     }
     out.push_str(&trailing_literal(pattern, percent));
     out
@@ -293,14 +314,18 @@ fn trailing_comma_scale(pattern: &str) -> usize {
     }
 }
 
-fn decimal_places(pattern: &str) -> usize {
+fn decimal_places(pattern: &str) -> (usize, usize) {
     if let Some(dot) = pattern.find('.') {
-        pattern[dot + 1..]
+        let placeholders: Vec<_> = pattern[dot + 1..]
             .chars()
             .take_while(|&c| c == '0' || c == '#' || c == '?')
-            .count()
+            .collect();
+        (
+            placeholders.iter().filter(|&&value| value == '0').count(),
+            placeholders.len(),
+        )
     } else {
-        0
+        (0, 0)
     }
 }
 
@@ -344,7 +369,7 @@ fn round_half_away(value: f64, decimals: usize) -> f64 {
     rounded / factor
 }
 
-fn format_fixed(value: f64, decimals: usize, thousands: bool) -> String {
+fn format_fixed(value: f64, minimum_decimals: usize, decimals: usize, thousands: bool) -> String {
     let s = format!("{:.*}", decimals, round_half_away(value, decimals));
     let (int_part, frac) = match s.split_once('.') {
         Some((i, f)) => (i.to_string(), Some(f.to_string())),
@@ -356,14 +381,27 @@ fn format_fixed(value: f64, decimals: usize, thousands: bool) -> String {
         int_part
     };
     match frac {
-        Some(f) => format!("{int_grouped}.{f}"),
+        Some(mut f) => {
+            while f.len() > minimum_decimals && f.ends_with('0') {
+                f.pop();
+            }
+            if f.is_empty() {
+                int_grouped
+            } else {
+                format!("{int_grouped}.{f}")
+            }
+        }
         None => int_grouped,
     }
 }
 
 fn group_thousands(int_part: &str) -> String {
-    let digits: Vec<char> = int_part.chars().collect();
+    let (sign, digits) = int_part
+        .strip_prefix('-')
+        .map_or(("", int_part), |digits| ("-", digits));
+    let digits: Vec<char> = digits.chars().collect();
     let mut out = String::new();
+    out.push_str(sign);
     let n = digits.len();
     for (i, c) in digits.iter().enumerate() {
         if i > 0 && (n - i).is_multiple_of(3) {
@@ -372,6 +410,78 @@ fn group_thousands(int_part: &str) -> String {
         out.push(*c);
     }
     out
+}
+
+fn is_fraction_pattern(pattern: &str) -> bool {
+    pattern.contains('/') && pattern.contains('?')
+}
+
+fn format_fraction(value: f64, pattern: &str) -> String {
+    let denominator_digits = pattern
+        .split_once('/')
+        .map(|(_, denominator)| denominator.chars().filter(|ch| *ch == '?').count())
+        .unwrap_or(1)
+        .clamp(1, 3);
+    let max_denominator = 10u32.pow(denominator_digits as u32) - 1;
+    let sign = if value < 0.0 { "-" } else { "" };
+    let value = value.abs();
+    let whole = value.floor() as u64;
+    let fraction = value.fract();
+    let mut best_numerator = 0u32;
+    let mut best_denominator = 1u32;
+    let mut best_error = f64::INFINITY;
+    for denominator in 1..=max_denominator {
+        let numerator = (fraction * f64::from(denominator)).round() as u32;
+        let error = (fraction - f64::from(numerator) / f64::from(denominator)).abs();
+        if error < best_error {
+            best_error = error;
+            best_numerator = numerator;
+            best_denominator = denominator;
+        }
+    }
+    if best_numerator == 0 {
+        return format!("{sign}{whole}");
+    }
+    let divisor = gcd(best_numerator, best_denominator);
+    best_numerator /= divisor;
+    best_denominator /= divisor;
+    if whole == 0 {
+        format!("{sign}{best_numerator}/{best_denominator}")
+    } else {
+        format!("{sign}{whole} {best_numerator}/{best_denominator}")
+    }
+}
+
+fn gcd(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left.max(1)
+}
+
+fn is_elapsed_time_pattern(pattern: &str) -> bool {
+    ["[h]", "[m]", "[s]"]
+        .iter()
+        .any(|token| pattern.to_ascii_lowercase().contains(token))
+}
+
+fn format_elapsed_time(value: f64, pattern: &str) -> String {
+    let total_seconds = (value.abs() * 86_400.0).round() as u64;
+    let lower = pattern.to_ascii_lowercase();
+    let sign = if value < 0.0 { "-" } else { "" };
+    if lower.contains("[h]") {
+        let hours = total_seconds / 3_600;
+        let minutes = (total_seconds / 60) % 60;
+        let seconds = total_seconds % 60;
+        return format!("{sign}{hours}:{minutes:02}:{seconds:02}");
+    }
+    if lower.contains("[m]") {
+        let minutes = total_seconds / 60;
+        return format!("{sign}{minutes}:{:02}", total_seconds % 60);
+    }
+    format!("{sign}{total_seconds}")
 }
 
 fn format_scientific(value: f64, decimals: usize, exp_digits: usize) -> String {

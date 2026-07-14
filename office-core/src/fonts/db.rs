@@ -6,6 +6,9 @@ use crate::{OfficeError, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Bounds matching scans and per-face parser state, including system faces.
+const MAX_FONT_FACES: usize = 1_024;
+
 /// A stable handle to a face within a [`FontDb`] (index into its face list).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FaceId(pub usize);
@@ -92,6 +95,13 @@ impl FontDb {
     /// system fonts, a parse failure here is an error.
     pub fn register(&mut self, bytes: Vec<u8>) -> Result<()> {
         let data = Arc::new(bytes);
+        let declared = ttf_parser::fonts_in_collection(&data).unwrap_or(1).max(1) as usize;
+        if self.faces.len().saturating_add(declared) > MAX_FONT_FACES {
+            return Err(OfficeError::unsupported(
+                crate::UnsupportedCode::DecompressionLimit,
+                format!("font face count exceeds limit {MAX_FONT_FACES}"),
+            ));
+        }
         let added = self.add_sfnt(data, false, None);
         if added == 0 {
             return Err(OfficeError::Font("unparseable font bytes".into()));
@@ -111,7 +121,11 @@ impl FontDb {
     ) {
         let data = Arc::new(bytes);
         // Try the real name table but override identity with the embed slot.
-        let count = ttf_parser::fonts_in_collection(&data).unwrap_or(1).max(1);
+        let remaining = MAX_FONT_FACES.saturating_sub(self.faces.len()) as u32;
+        let count = ttf_parser::fonts_in_collection(&data)
+            .unwrap_or(1)
+            .max(1)
+            .min(remaining);
         let mut any = false;
         for index in 0..count {
             if ttf_parser::Face::parse(&data, index).is_ok() {

@@ -1,0 +1,13 @@
+[package]
+name = "text-core"
+version = "0.0.10"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+harfrust = "0.12"
+ttf-parser = "0.25"
+unicode-bidi = "0.3"
+unicode-script = "0.5"
+

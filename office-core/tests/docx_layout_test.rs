@@ -12,17 +12,27 @@ fn opts() -> ConvertOptions {
 fn layout_body(body: &str) -> LaidOutDocument {
     let bytes = minimal_docx(body);
     let doc = WordDoc::open(&bytes, &opts()).expect("open");
-    layout_docx(&doc).0
+    layout_docx(&doc).expect("layout").0
 }
 
 /// All glyph text on a page, in item (paint) order.
 fn page_text(page: &Page) -> String {
     let mut s = String::new();
     for pos in &page.items {
-        if let Item::Glyphs(run) = &pos.item {
-            for g in &run.glyphs {
-                s.push(g.ch);
+        match &pos.item {
+            Item::Glyphs(run) => {
+                for g in &run.glyphs {
+                    if g.ch != '\0' {
+                        s.push(g.ch);
+                    }
+                }
             }
+            Item::SemanticText(run) => {
+                for cluster in &run.clusters {
+                    s.push_str(&cluster.source);
+                }
+            }
+            _ => {}
         }
     }
     s
@@ -64,6 +74,113 @@ fn simple_text_lays_out_and_is_selectable() {
     assert_eq!(laid.pages.len(), 1);
     let text = page_text(&laid.pages[0]);
     assert!(text.contains("Hello world"), "got {text:?}");
+}
+
+#[test]
+fn calibri_arabic_uses_registered_cluster_fallback() {
+    let bytes = minimal_docx(
+        r#"<w:p><w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr><w:t>مرحبا بالعالم</w:t></w:r></w:p>"#,
+    );
+    let options = ConvertOptions {
+        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        ..ConvertOptions::default()
+    };
+    let result = convert(&bytes, OfficeFormat::Docx, &options);
+    assert!(result.is_ok(), "Arabic fallback failed: {result:?}");
+}
+
+#[test]
+fn latin_family_falls_back_for_packaged_unicode_scripts() {
+    let options = ConvertOptions {
+        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        ..ConvertOptions::default()
+    };
+    for source in [
+        "中文 日本語 한국어 漢字",
+        "कर्म ภาษาไทย",
+        "Ελληνικά Кириллица",
+        "⌚️",
+    ] {
+        let bytes = minimal_docx(&format!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>{source}</w:t></w:r></w:p>"#,
+        ));
+        let result = convert(&bytes, OfficeFormat::Docx, &options);
+        assert!(result.is_ok(), "fallback failed for {source:?}: {result:?}");
+    }
+}
+
+#[test]
+fn docx_shaped_clusters_extract_complete_logical_source_once() {
+    let source = "e\u{301} é لا שָׁ क्षि ก้ ⌚️ 👍🏽 👩‍💻 LTR שלום 123";
+    let bytes = minimal_docx(&format!(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>{source}</w:t></w:r></w:p>"#
+    ));
+    let options = ConvertOptions {
+        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        ..opts()
+    };
+    let doc = WordDoc::open(&bytes, &options).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let extracted: String = page_text(&laid.pages[0])
+        .chars()
+        .filter(|character| *character != '\0')
+        .collect();
+    assert_eq!(extracted, source);
+}
+
+#[test]
+fn docx_complex_run_before_direct_run_keeps_source_order() {
+    let source = "e\u{301} Latin";
+    let bytes = minimal_docx(
+        r#"<w:p><w:r><w:t>é</w:t></w:r><w:r><w:t xml:space="preserve"> Latin</w:t></w:r></w:p>"#,
+    );
+    let options = ConvertOptions {
+        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        ..opts()
+    };
+    let doc = WordDoc::open(&bytes, &options).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+
+    assert_eq!(page_text(&laid.pages[0]), source);
+    assert!(laid.pages[0].items.iter().any(|positioned| {
+        matches!(
+            &positioned.item,
+            Item::Glyphs(run) if run.base_direction == Some(text_core::Direction::Ltr)
+        )
+    }));
+}
+
+#[test]
+fn rtl_paragraph_places_hebrew_run_right_of_latin_run() {
+    let bytes = minimal_docx(
+        r#"<w:p><w:pPr><w:bidi/></w:pPr><w:r><w:t>שלום</w:t></w:r><w:r><w:t> Latin</w:t></w:r></w:p>"#,
+    );
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let semantic: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::SemanticText(run) => Some((
+                positioned.x_pt,
+                run.clusters
+                    .iter()
+                    .map(|cluster| cluster.source.as_str())
+                    .collect::<String>(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let hebrew_x = semantic
+        .iter()
+        .find_map(|(x, text)| text.contains("שלום").then_some(*x));
+    let latin_x = semantic
+        .iter()
+        .find_map(|(x, text)| text.contains("Latin").then_some(*x));
+    assert!(
+        hebrew_x.is_some() && latin_x.is_some() && hebrew_x > latin_x,
+        "Hebrew must be positioned to the right of Latin: {semantic:?}"
+    );
 }
 
 #[test]
@@ -123,6 +240,59 @@ fn bordered_table_draws_borders_and_text() {
     for cell in ["A1", "B1", "A2", "B2"] {
         assert!(text.contains(cell), "cell {cell} missing from {text:?}");
     }
+}
+
+#[test]
+fn table_flow_includes_outer_border_halves() {
+    let document = |borders: &str| {
+        format!(
+            r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p>
+            <w:tbl>
+              <w:tblPr>{borders}</w:tblPr>
+              <w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>
+              <w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr>
+            </w:tbl>
+            <w:p><w:r><w:t>After</w:t></w:r></w:p>"#
+        )
+    };
+    let plain = layout_body(&document(""));
+    let bordered = layout_body(&document(
+        r#"<w:tblBorders>
+          <w:top w:val="single" w:sz="8" w:color="000000"/>
+          <w:bottom w:val="single" w:sz="8" w:color="000000"/>
+          <w:left w:val="single" w:sz="8" w:color="000000"/>
+          <w:right w:val="single" w:sz="8" w:color="000000"/>
+        </w:tblBorders>"#,
+    ));
+    let baseline = |page: &Page, needle: &str| {
+        page.items
+            .iter()
+            .find_map(|positioned| match &positioned.item {
+                Item::Glyphs(run)
+                    if run
+                        .glyphs
+                        .iter()
+                        .map(|glyph| glyph.ch)
+                        .collect::<String>()
+                        .contains(needle) =>
+                {
+                    Some(positioned.y_pt)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {needle:?} glyph run"))
+    };
+
+    let cell_shift = baseline(&bordered.pages[0], "Cell") - baseline(&plain.pages[0], "Cell");
+    assert!(
+        (cell_shift - 1.0).abs() <= 0.01,
+        "the top 1pt border contributes both an inner and outer half; shift={cell_shift}"
+    );
+    let after_shift = baseline(&bordered.pages[0], "After") - baseline(&plain.pages[0], "After");
+    assert!(
+        (after_shift - 2.0).abs() <= 0.01,
+        "top and bottom 1pt borders must occupy their full outer extents; shift={after_shift}"
+    );
 }
 
 #[test]
@@ -188,11 +358,43 @@ fn header_footer_page_field_shows_page_of_total() {
     ]);
 
     let doc = WordDoc::open(&bytes, &opts()).expect("open");
-    let laid = layout_docx(&doc).0;
+    let laid = layout_docx(&doc).expect("layout").0;
     let total = laid.pages.len();
     assert!(total >= 2, "expected multiple pages, got {total}");
     let first = page_text(&laid.pages[0]);
     assert!(first.contains("Page 1 of"), "footer on p1: {first:?}");
+    let text_runs: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) => Some((
+                run,
+                run.glyphs
+                    .iter()
+                    .filter(|glyph| glyph.ch != '\0')
+                    .map(|glyph| glyph.ch)
+                    .collect::<String>(),
+            )),
+            _ => None,
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .collect();
+    let separator_run = text_runs
+        .iter()
+        .find(|(_, text)| text == " of ")
+        .map(|(run, _)| *run)
+        .expect("literal separator run between PAGE and NUMPAGES");
+    assert!(
+        separator_run.glyphs.iter().all(|glyph| {
+            glyph.ch != '\0' && glyph.y_offset_pt > office_core::text::semantic::SEMANTIC_START_Y
+        }),
+        "simple footer text should be mapped directly onto painted glyphs"
+    );
+    assert_eq!(
+        text_runs.first().map(|(_, text)| text.as_str()),
+        Some("Page "),
+        "footer fields must precede body objects in PDF copy/search order"
+    );
     assert!(
         first.contains(&total.to_string()),
         "total {total} in footer: {first:?}"
@@ -211,13 +413,17 @@ fn profile_predicts_convert_verdict() {
     let cases: &[(&str, bool)] = &[
         (r#"<w:p><w:r><w:t>plain supported</w:t></w:r></w:p>"#, true),
         (
+            "<w:p><w:r><w:t>unassigned \u{0378} is uncovered</w:t></w:r></w:p>",
+            false,
+        ),
+        (
             r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#,
             false,
         ),
         (r#"<w:p><w:r><m:oMath/></w:r></w:p>"#, false),
         (
             r#"<w:p><w:pPr><w:framePr w:w="1000"/></w:pPr><w:r><w:t>tb</w:t></w:r></w:p>"#,
-            false,
+            true,
         ),
     ];
     for (body, expect_supported) in cases {
@@ -243,19 +449,208 @@ fn profile_predicts_convert_verdict() {
     }
 }
 
+fn assert_missing_header_footer_target_is_typed(bytes: &[u8], expected_detail: &str) {
+    let predicted = profile(bytes, OfficeFormat::Docx).expect("profile");
+    assert!(
+        predicted.reasons.iter().any(|reason| {
+            reason.code == UnsupportedCode::MissingRelationshipTarget
+                && reason.detail.contains(expected_detail)
+        }),
+        "profile did not classify missing header/footer target: {predicted:?}"
+    );
+    assert!(matches!(
+        convert(bytes, OfficeFormat::Docx, &opts()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::MissingRelationshipTarget,
+            detail,
+        }) if detail.contains(expected_detail)
+    ));
+}
+
 #[test]
-fn multicolumn_section_fails_closed() {
+fn profile_and_convert_classify_missing_header_relationship_identically() {
+    let bytes = minimal_docx(
+        r#"<w:p><w:r><w:t>body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdMissing"/></w:sectPr>"#,
+    );
+    assert_missing_header_footer_target_is_typed(&bytes, "rIdMissing");
+}
+
+#[test]
+fn profile_and_convert_classify_missing_header_part_identically() {
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{ns}><w:body><w:p><w:r><w:t>body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:body></w:document>"#,
+        ns = office_core::testkit::DOC_NAMESPACES,
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let document_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", document_rels.as_bytes()),
+    ]);
+    assert_missing_header_footer_target_is_typed(&bytes, "word/header1.xml");
+}
+
+#[test]
+fn docx_profile_supported_implies_convert_succeeds_for_corpus_and_wave4_fixtures() {
+    let mut cases = Vec::new();
+    for entry in std::fs::read_dir("../mock-files/docx").expect("mock DOCX corpus") {
+        let path = entry.expect("mock DOCX entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("docx") {
+            cases.push((path.display().to_string(), std::fs::read(&path).unwrap()));
+        }
+    }
+    for (name, body) in [
+        (
+            "frame-exact-overflow",
+            r#"<w:p><w:pPr><w:framePr w:w="720" w:h="264" w:hRule="exact"/></w:pPr><w:r><w:t>one two three four five</w:t></w:r></w:p>"#,
+        ),
+        (
+            "row-grid-and-fixed-layout",
+            r#"<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:trPr><w:gridBefore w:val="1"/><w:wBefore w:w="1000" w:type="dxa"/></w:trPr><w:tc><w:tcPr><w:tcMar><w:left w:w="200" w:type="dxa"/></w:tcMar><w:vAlign w:val="bottom"/></w:tcPr><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        ),
+        (
+            "typed-visible-property",
+            r#"<w:p><w:r><w:rPr><w:emboss/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        ),
+        (
+            "missing-header-relationship",
+            r#"<w:p><w:r><w:t>body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdMissing"/></w:sectPr>"#,
+        ),
+    ] {
+        cases.push((name.to_string(), minimal_docx(body)));
+    }
+
+    assert!(!cases.is_empty(), "DOCX invariant corpus is empty");
+    for (name, bytes) in cases {
+        let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile DOCX invariant case");
+        if predicted.supported {
+            let converted = convert(&bytes, OfficeFormat::Docx, &opts());
+            assert!(
+                converted.is_ok(),
+                "profile supported {name}, convert failed: {converted:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_glyph_profile_and_convert_agree_on_codepoint() {
+    let bytes = minimal_docx("<w:p><w:r><w:t>unassigned \u{0378}</w:t></w:r></w:p>");
+    let prof = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(
+        prof.reasons.iter().any(|reason| {
+            reason.code == UnsupportedCode::MissingGlyph && reason.detail.contains("U+0378")
+        }),
+        "profile={prof:?}"
+    );
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &opts()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::MissingGlyph,
+            detail,
+        }) if detail.contains("U+0378")
+    ));
+}
+
+#[test]
+fn two_sections_use_distinct_page_geometry() {
+    let body = r#"
+        <w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>Letter</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Landscape A4</w:t></w:r></w:p>
+        <w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr>"#;
+    let bytes = minimal_docx(body);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    assert_eq!(laid.pages.len(), 2);
+    assert_eq!(
+        (laid.pages[0].width_pt, laid.pages[0].height_pt),
+        (612.0, 792.0)
+    );
+    assert_ne!(
+        (laid.pages[0].width_pt, laid.pages[0].height_pt),
+        (laid.pages[1].width_pt, laid.pages[1].height_pt)
+    );
+}
+
+#[test]
+fn continuous_section_with_changed_geometry_fails_closed() {
+    let body = r#"
+        <w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>Letter</w:t></w:r></w:p>
+        <w:p><w:r><w:t>A4</w:t></w:r></w:p>
+        <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>"#;
+    let bytes = minimal_docx(body);
+    let prof = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(prof.reasons.iter().any(|reason| {
+        reason.code == UnsupportedCode::UnknownElement
+            && reason.detail.contains("continuous section break")
+    }));
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &opts()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::UnknownElement,
+            detail,
+        }) if detail.contains("continuous section break")
+    ));
+}
+
+#[test]
+fn continuous_section_with_same_geometry_stays_on_page() {
+    let body = r#"
+        <w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First section</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Second section</w:t></w:r></w:p>
+        <w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>"#;
+    let bytes = minimal_docx(body);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    assert_eq!(laid.pages.len(), 1);
+    let text = page_text(&laid.pages[0]);
+    assert!(text.contains("First section") && text.contains("Second section"));
+}
+
+#[test]
+fn header_table_text_is_laid_out() {
+    let ns = office_core::testkit::DOC_NAMESPACES;
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{ns}><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr></w:body></w:document>"#
+    );
+    let header = format!(
+        r#"<?xml version="1.0"?><w:hdr{ns}><w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>HDRCELL</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>"#
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let document_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
+    let header_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#;
+    let image = std::fs::read("../mock-files/png/file1.png").expect("fixture image");
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", document_rels.as_bytes()),
+        ("word/header1.xml", header.as_bytes()),
+        ("word/_rels/header1.xml.rels", header_rels.as_bytes()),
+        ("word/media/image1.png", &image),
+    ]);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    assert!(page_text(&laid.pages[0]).contains("HDRCELL"));
+    assert!(
+        laid.pages[0]
+            .items
+            .iter()
+            .any(|positioned| matches!(positioned.item, Item::Image { .. }))
+    );
+}
+
+#[test]
+fn multicolumn_section_renders() {
     let body = r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>
         <w:sectPr><w:cols w:num="2"/></w:sectPr>"#;
     let bytes = minimal_docx(body);
-    let err = convert(&bytes, OfficeFormat::Docx, &opts()).unwrap_err();
-    assert!(matches!(
-        err,
-        office_core::OfficeError::Unsupported {
-            code: UnsupportedCode::MultiColumn,
-            ..
-        }
-    ));
+    let output = convert(&bytes, OfficeFormat::Docx, &opts()).expect("multi-column conversion");
+    assert!(output.pdf.starts_with(b"%PDF-"));
     // Keep the wrap_document helper exercised.
     assert!(wrap_document("<w:p/>").contains("w:body"));
 }
@@ -303,7 +698,7 @@ fn list_counters_reset_on_shallower_level() {
     ]);
 
     let doc = WordDoc::open(&bytes, &ConvertOptions::default()).expect("open");
-    let laid = layout_docx(&doc).0;
+    let laid = layout_docx(&doc).expect("layout").0;
     let text: String = laid.pages.iter().map(page_text).collect();
     // Labels: 1. a) b) 2. a)  — the final item resets to "a", proving the reset.
     let a_count = text.matches("a)").count();
@@ -366,13 +761,27 @@ fn mid_section_header_content_is_profiled() {
     ]);
     let prof = profile(&bytes, OfficeFormat::Docx).expect("profile");
     assert!(
-        !prof.supported,
-        "complex script in section 1's header must be caught"
-    );
-    assert!(
-        prof.reasons.iter().any(|r| r.code == UnsupportedCode::ComplexScript
-            || r.code == UnsupportedCode::RtlText),
-        "expected ComplexScript/RtlText, got {:?}",
+        prof.supported,
+        "registered fallback should cover header Arabic: {:?}",
         prof.reasons
     );
+    convert(&bytes, OfficeFormat::Docx, &opts()).expect("header Arabic converts");
+}
+
+#[test]
+fn uncached_field_uses_field_unsupported_code() {
+    let bytes = minimal_docx(r#"<w:p><w:fldSimple w:instr=" PAGE "/></w:p>"#);
+    let prof = profile(&bytes, OfficeFormat::Docx).unwrap();
+    assert!(
+        prof.reasons
+            .iter()
+            .any(|reason| reason.code == UnsupportedCode::FieldUnsupported)
+    );
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &opts()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::FieldUnsupported,
+            ..
+        })
+    ));
 }

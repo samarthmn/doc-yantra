@@ -1,0 +1,428 @@
+{
+  "title": "DocYantra legacy-golden reference corpus (one-time oracle run)",
+  "generated_at": "2026-07-12T03:51:21+00:00",
+  "immutability_rule": "Never regenerate automatically; goldens are frozen. Regeneration is a manual maintenance action only, requiring a manifest change, new golden_sha256 values, and a recorded reason. No CI job, script, or test may invoke the old runtime (02-fixture-manifest.md section 1, golden freeze rule).",
+  "host": {
+    "platform": "macOS arm64 (Darwin 25.5.0)",
+    "docker": "29.6.1 (Docker Desktop, linux/arm64 server; oracle ran under linux/amd64 emulation)"
+  },
+  "oracle": {
+    "source_commit": "doc-kosha e0ff8fb (feat/pkg-only-conversion history; embedded doc-yantra NestJS service)",
+    "image_tag": "docyantra-golden-oracle:e0ff8fb",
+    "image_id": "sha256:fae294cae494c92b11c3fa4a7cd65b96adc01072580aba04a073e0adcb55b701",
+    "image_platform": "linux/amd64 (emulated on arm64 host)",
+    "base_image": "gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923",
+    "base_image_note": "Digest resolved at build time 2026-07-12. The versions that served historical production traffic are UNKNOWN-YET and permanently unrecoverable (unpinned :8 tag); these goldens represent gotenberg:8 as of 2026-07-12.",
+    "pipeline_note": "process.arch inside the emulated container is x64, so office conversions took the production Gotenberg HTTP route (/forms/libreoffice/convert). The arm64 direct-LibreOffice-CLI bypass (gotenberg.service.ts officeToPdfViaLibreOffice) was NOT exercised.",
+    "versions": {
+      "gotenberg": "8.34.0",
+      "libreoffice": "26.2.4.2 620(Build:2)",
+      "chromium": "149.0.7827.102 (built on Debian GNU/Linux 13 trixie); PDF producer Skia/PDF m149",
+      "pymupdf": "1.24.14",
+      "python": "3.13.5 (/opt/venv/bin/python3)",
+      "node_in_container": "v22.11.0",
+      "micromark": "4.0.2",
+      "micromark_extension_gfm": "3.0.0",
+      "os_in_container": "Debian 13 (trixie), reported 13.5"
+    },
+    "redaction_script_sha256": "4def342b54de40e015933e0d2f0fce7f9d1ec5c1a31c3c07682145919a89c97c",
+    "service_env": {
+      "DOCYANTRA_API_KEY": "golden-oracle-key (throwaway, local only)",
+      "DOCYANTRA_API_KEY_HEADER": "X-Api-Key (default)",
+      "PORT": "4000 (host-mapped 4100)"
+    }
+  },
+  "empirical_findings": {
+    "chromium_default_geometry_D1": "Markdown route (no fields): Letter 612.0x792.0 pt portrait. First text at (51.8, 58.2) pt; subtracting the wrapper's 32px=24pt body margin gives ~27.8pt = ~0.39in page margins. Confirms r1 section 10.5 'Letter, 0.39in margins' (previously uncited).",
+    "print_background_B5": "With NO printBackground field sent, background fills ARE painted at Gotenberg 8.34.0: code-fence fill (0.953,0.957,0.965)=#f3f4f6 and th fill (0.976,0.980,0.984)=#f9fafb are present in gfm-constructs.chromium.pdf drawings. Effective default = backgrounds printed.",
+    "csv_geometry": "CSV route (landscape=true, margins 0.25): 792.0x612.0 pt landscape; first text at (35.2, 33.5) pt = 18pt page margin + 12pt (16px) body margin + cell padding/border.",
+    "link_annotations": "gfm-constructs golden carries 9 link annotations incl. autolinks (http://www.example.com/, https://example.org/path?q=1, mailto:user@example.com).",
+    "unicode_extraction": "All probes extractable from unicode-mixed.chromium.pdf: cafe-accent, Zurich-umlaut, Japanese, Arabic, Hebrew, Devanagari, Thai, Cyrillic, Greek, riyal mixed-direction. latin1.chromium.pdf extracts cafe/Zurich/Rene/Munchen/AEro/facade correctly."
+  },
+  "gaps": [
+    "No rotated-page PDF exists in doc-yantra/mock-files (all three redaction targets report rotation=0 on every page); the rotated-page redaction oracle output is therefore absent and must be produced when a rotated fixture is authored (FX-RED-003 needs a created-here rotated input).",
+    "Historical production LibreOffice/Chromium versions are unrecoverable (floating gotenberg:8 tag, no digest recorded at e0ff8fb); goldens pin gotenberg:8@sha256:670973... as of 2026-07-12 instead.",
+    "Office goldens are LibreOffice-oracle ('what did users lose'); envelope-in fidelity goldens remain the Microsoft Office exports per fidelity-corpus convention (02-fixture-manifest.md section 4.1 caveat)."
+  ],
+  "cleanup": {
+    "container": "docyantra-golden (stopped and removed after generation)",
+    "kept_image": "docyantra-golden-oracle:e0ff8fb (kept locally; remove with: docker rmi docyantra-golden-oracle:e0ff8fb)",
+    "scratch_worktree": "removed after generation (git worktree at e0ff8fb)"
+  },
+  "goldens": [
+    {
+      "input_path": "mock-files/docx/file1.docx",
+      "input_sha256": "6878e769dbc377dd11d5271542d681ea09af1308b0391c90f8e41f9b6a058fc3",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/docx/file1.docx.libreoffice.pdf",
+      "golden_sha256": "ba08712c74ba181e66e5dcccf8ae2b4ed04e939160ec65610f85e72e12452267",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 612.0x792.0pt"
+    },
+    {
+      "input_path": "mock-files/docx/file2.docx",
+      "input_sha256": "94666cd90119984d103f3618f7b4e7fde5a67d7aa85f559a16c25ecc1b56e3a1",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/docx/file2.docx.libreoffice.pdf",
+      "golden_sha256": "770fd3b51da5d2c4a35de5b30f5ef07e80253cae37c2cdb0f44a98466f16e8c4",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 612.0x792.0pt"
+    },
+    {
+      "input_path": "mock-files/pptx/file1.pptx",
+      "input_sha256": "2799b0cf013e85aa417651cf91c001bf6bed92b2d1350fdb457599e3299959f8",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/pptx/file1.pptx.libreoffice.pdf",
+      "golden_sha256": "ed2d9feca14cc59791a7818c83270314435248630d5f921f507c595beaa64f4e",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 720.0x405.0pt"
+    },
+    {
+      "input_path": "mock-files/pptx/file2.pptx",
+      "input_sha256": "6abe473e2afc4d87bbbb81026512f2f1bcac6e06005e054595e4b76adb00f8c7",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/pptx/file2.pptx.libreoffice.pdf",
+      "golden_sha256": "818fd5c866c67f547a8f13d1a89210c11bb5e346b6787f3c5ebd61e194f0a834",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 720.0x405.0pt"
+    },
+    {
+      "input_path": "mock-files/xlsx/file1.xlsx",
+      "input_sha256": "39a2ab7a540949975bf0af79f6d9720403bd4b3ea7fba37360ddf00fed25c969",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/xlsx/file1.xlsx.libreoffice.pdf",
+      "golden_sha256": "7d510d63f03362b55f1cf8afc85696d1ac37e3b63eda0a0da081a7f7ef30ee86",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "mock-files/xlsx/file2.xlsx",
+      "input_sha256": "dba0b89c5b871a928a9f75e38ae9cfc3536eae63fe2d64a124b3114317abdc78",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/xlsx/file2.xlsx.libreoffice.pdf",
+      "golden_sha256": "b4eeec668acff360e7825e80c749061b9f5af2ed7348e08463d06f81fc0a0a15",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "mock-files/xlsm/file1.xlsm",
+      "input_sha256": "a7acbe21efb75e3775421371758bed77601d6cc61e83455d616ecd89a665f864",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/xlsm/file1.xlsm.libreoffice.pdf",
+      "golden_sha256": "dda36013f82c87a97d36b0dc14e4e710c4f4603d988d554dcf72992dc5c168f4",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "mock-files/xlsm/file2.xlsm",
+      "input_sha256": "8edcb73c5f2d35f3b0e79ce169e268fc7afb3f19ee8a3412bb442915c68e51ab",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/xlsm/file2.xlsm.libreoffice.pdf",
+      "golden_sha256": "66ae8c7c0de49f8133694a88dd389298b9a74c2d20979307884bc8a8c81fd7a9",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (doc-yantra mock-files, pre-existing)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/fonts-substitution/source.docx",
+      "input_sha256": "7261efcbde169a77f8a95014e5be8d5c8acebc3f609d58d03fc913c4d8bc8526",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/fonts-substitution.libreoffice.pdf",
+      "golden_sha256": "a59f0036d15abfd9c46bf3e39b9a57f851b2acaa96227f9f3f661d3e7def662d",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/headers-footers/source.docx",
+      "input_sha256": "7a819e9ecbce1d94e61dfcf7bdb63d77aa88d2a74c131d3280664e4a9f17af41",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/headers-footers.libreoffice.pdf",
+      "golden_sha256": "41c1064ec34d76660efecb37c08c3a2bf399dc29baa2db73145af5a48eb0b879",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/hyperlinks/source.docx",
+      "input_sha256": "1d271758eee6f685e93a36c6025576b1bc576bf42072f2a5980b67781ac5f488",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/hyperlinks.libreoffice.pdf",
+      "golden_sha256": "efdc60bb4210d77e1f6c33f864895163766f06e59323fbf9a1ca03fe247ae783",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/justify-long-text/source.docx",
+      "input_sha256": "b4a8cbc5e9554ddfb0113d88f6f058d3ffd68d31d913b2f94dfd84e9ea1e166f",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/justify-long-text.libreoffice.pdf",
+      "golden_sha256": "396b4a414e09c69e4a753baba7d21945f86a06e51a5cd4b1188d0fb6c1510348",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/lists-multilevel/source.docx",
+      "input_sha256": "096551b82d9bc6d4c8507b6bce24d32f47575d23d95bb52453a1c8faa1e81327",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/lists-multilevel.libreoffice.pdf",
+      "golden_sha256": "ae926b74dafa5d127fa6f7b44dceb4a029fca1051669bac47e5e55b5e90b5725",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/long-doc-pagination/source.docx",
+      "input_sha256": "57d9d005ec3faeaffa1279646142617ee66b9f519469c4f924b126424cc81104",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/long-doc-pagination.libreoffice.pdf",
+      "golden_sha256": "d7b5e9c3be45ae3a19a0cbceff4f4ba19c8af4a11332b1fe3c7efa8fbba6906f",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "8p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/page-fields/source.docx",
+      "input_sha256": "5be369ec4faebf95bcd3d7ebde0c76fa2e58b18b6ab389e97d677892a49d6576",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/page-fields.libreoffice.pdf",
+      "golden_sha256": "b2652a2ac03d7c40f7205651edb95a66d668c8464fb6d070c520a647196c992c",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "11p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/plain-paragraphs/source.docx",
+      "input_sha256": "9b92871fea18327d2541e597c02316878f9c748c4313c2b415482d2bcc69bcb5",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/plain-paragraphs.libreoffice.pdf",
+      "golden_sha256": "b5a02c909b9a398feb77ee69dcb29323deb9d426465a8fb6f781ec6ae798d6bc",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/run-formatting-matrix/source.docx",
+      "input_sha256": "277b7de459e002d2bca994d715f4b74f106cd56524f3381cd159db8431fbadfa",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/run-formatting-matrix.libreoffice.pdf",
+      "golden_sha256": "23c5fefb0142bf7151934e2109c046ddf3c6b72cabd5ee142f0c2b36e1bd0495",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/spacing-exact-atleast/source.docx",
+      "input_sha256": "cec500615d07da7a37378d8639b0356c51b5cce886e9e8d7bc9f932847d5f8a2",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/spacing-exact-atleast.libreoffice.pdf",
+      "golden_sha256": "60b6bfb88d5eec5298bbe160844830018ef4eedf24488e42b7e0b080f2932396",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/table-fixed/source.docx",
+      "input_sha256": "ab292446aad859de175e52447d3e761a66660df34b9f5c3ab452e0ea0d35cbdf",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/table-fixed.libreoffice.pdf",
+      "golden_sha256": "a8ce60f6284245e45f9371bc74c106335024e35af78f490700c9d4c69152653c",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/table-merges/source.docx",
+      "input_sha256": "cd4aff185a025e73b36f0b939a840d66a2fcc5c0135f76c189d6060b269c9f1f",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/table-merges.libreoffice.pdf",
+      "golden_sha256": "e0c9d79bb4914bf98b6d4e7942fbb7103e2c15f51fcdb2a1f9c8f6d1baa68a65",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/table-nested/source.docx",
+      "input_sha256": "34d2527dcbb0bf3cd91a43fcfccfb6c2afe9d573b380f3ebcacc6a868fb0377a",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/table-nested.libreoffice.pdf",
+      "golden_sha256": "e2c657f320cd18783f4a5e006004e3d80535a681b207e427d118248e723f63f9",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "fidelity-corpus/docx/tabs-leaders/source.docx",
+      "input_sha256": "8e2f7c216d6b35b938c3a048f4cab79c0f7345df71e16ed59da778da7e1e6c8c",
+      "golden_path": "fidelity-corpus/legacy-goldens/office/fidelity-docx/tabs-leaders.libreoffice.pdf",
+      "golden_sha256": "d196c2e72b47ce88c8d39530306f950af998eab03c699bdacc1807c75e29f712",
+      "endpoint": "POST /docyantra/office-to-pdf",
+      "fields": "multipart field files=@<input> (single file)",
+      "golden_renderer": "LibreOffice 26.2.4.2 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated, HTTP route /forms/libreoffice/convert",
+      "source": "historical (fidelity-corpus source.docx; Word ground-truth exists separately)",
+      "notes": "1p 595.3x841.9pt"
+    },
+    {
+      "input_path": "mock-files/md/file1.md",
+      "input_sha256": "cef267b35494ae7e072f8b7588b1de285403ba34187ecfef148e20506b87cc37",
+      "golden_path": "fidelity-corpus/legacy-goldens/markdown/file1.chromium.pdf",
+      "golden_sha256": "87b2150aedf548af343d6561e01a9e51478451ed030eaffb1af2377502b03c1c",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart field html=<wrapped HTML> only (no landscape/margin fields; Chromium/Gotenberg defaults)",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "historical (doc-yantra mock-files)",
+      "notes": "1p 612.0x792.0pt; input wrapped with buildMarkdownHtml (e0ff8fb, micromark 4.0.2 + micromark-extension-gfm 3.0.0) before POST"
+    },
+    {
+      "input_path": "mock-files/md/file2.md",
+      "input_sha256": "e32de56980c2565c49a3fb30734e0a5957ceb339ca0ad3386fb371c2172726c8",
+      "golden_path": "fidelity-corpus/legacy-goldens/markdown/file2.chromium.pdf",
+      "golden_sha256": "5337e24a3ccf0df6a1e9a7b78caea0d30709d78281d6ddf9cb2d81961f5128de",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart field html=<wrapped HTML> only (no landscape/margin fields; Chromium/Gotenberg defaults)",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "historical (doc-yantra mock-files)",
+      "notes": "1p 612.0x792.0pt; input wrapped with buildMarkdownHtml (e0ff8fb, micromark 4.0.2 + micromark-extension-gfm 3.0.0) before POST"
+    },
+    {
+      "input_path": "fidelity-corpus/legacy-goldens/inputs/unicode-mixed.md",
+      "input_sha256": "2e5e659184e18635535c865d1b683ecd41663f6822cf69af1d6722be98f47cd9",
+      "golden_path": "fidelity-corpus/legacy-goldens/markdown/unicode-mixed.chromium.pdf",
+      "golden_sha256": "81562d2887bf254248d2ad93d447a144a03599dccb3af1521c83049b4165c5c2",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart field html=<wrapped HTML> only (no landscape/margin fields; Chromium/Gotenberg defaults)",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "created-here (2026-07-12, this generation run)",
+      "notes": "2p 612.0x792.0pt; input wrapped with buildMarkdownHtml (e0ff8fb, micromark 4.0.2 + micromark-extension-gfm 3.0.0) before POST"
+    },
+    {
+      "input_path": "fidelity-corpus/legacy-goldens/inputs/gfm-constructs.md",
+      "input_sha256": "f6a51c0e67bb85737e0113353062d22145e54c0565f28e44b6bd5d45a2cf5621",
+      "golden_path": "fidelity-corpus/legacy-goldens/markdown/gfm-constructs.chromium.pdf",
+      "golden_sha256": "a300da2726c70451008af6d8454c5dc1a5934d52a23f93116bed3d427d50c1ef",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart field html=<wrapped HTML> only (no landscape/margin fields; Chromium/Gotenberg defaults)",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "created-here (2026-07-12, this generation run)",
+      "notes": "2p 612.0x792.0pt; input wrapped with buildMarkdownHtml (e0ff8fb, micromark 4.0.2 + micromark-extension-gfm 3.0.0) before POST"
+    },
+    {
+      "input_path": "fidelity-corpus/legacy-goldens/inputs/long-pagination.md",
+      "input_sha256": "0271a2fc061cda59c42d77d253ffc8e558bad5d38403ba9c8475f87e198f2780",
+      "golden_path": "fidelity-corpus/legacy-goldens/markdown/long-pagination.chromium.pdf",
+      "golden_sha256": "b84f1f94b9caa252d87e63a8d5270e2b3a23ae858fe0ddc5f74e909ce213f145",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart field html=<wrapped HTML> only (no landscape/margin fields; Chromium/Gotenberg defaults)",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "created-here (2026-07-12, this generation run)",
+      "notes": "17p 612.0x792.0pt; input wrapped with buildMarkdownHtml (e0ff8fb, micromark 4.0.2 + micromark-extension-gfm 3.0.0) before POST"
+    },
+    {
+      "input_path": "mock-files/csv/file1.csv",
+      "input_sha256": "1ccbdadf2a164340ca47dc39e269395eb2e3802a56e29e638434b93fc07fd1b5",
+      "golden_path": "fidelity-corpus/legacy-goldens/csv/file1.chromium.pdf",
+      "golden_sha256": "873f1dfccd904bde18acae8d0844e45be3105b6f334f908237cb7b98b2ec3948",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart fields html=<wrapped HTML>, landscape=true, marginTop=0.25, marginBottom=0.25, marginLeft=0.25, marginRight=0.25",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "historical (doc-yantra mock-files)",
+      "notes": "1p 792.0x612.0pt; input wrapped with buildCsvHtml (e0ff8fb) before POST"
+    },
+    {
+      "input_path": "mock-files/csv/file2.csv",
+      "input_sha256": "fb02fc25343b6e4f9ac7733a63154112178226579a90827b942e9b71cee07b57",
+      "golden_path": "fidelity-corpus/legacy-goldens/csv/file2.chromium.pdf",
+      "golden_sha256": "8c8caeb1a1e93c20d9a3c777b656a326719b981fbe2d8409fd12db4abf0765a7",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart fields html=<wrapped HTML>, landscape=true, marginTop=0.25, marginBottom=0.25, marginLeft=0.25, marginRight=0.25",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "historical (doc-yantra mock-files)",
+      "notes": "1p 792.0x612.0pt; input wrapped with buildCsvHtml (e0ff8fb) before POST"
+    },
+    {
+      "input_path": "fidelity-corpus/legacy-goldens/inputs/latin1.csv",
+      "input_sha256": "b7968ee60e0e1bb8e99696733fcf370cb3fb55f701be0d1ec39c9db1f8959095",
+      "golden_path": "fidelity-corpus/legacy-goldens/csv/latin1.chromium.pdf",
+      "golden_sha256": "75c9c2850e5a22854ce8d3c3b1787e891c88a6835c298d73674211905948b7a0",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart fields html=<wrapped HTML>, landscape=true, marginTop=0.25, marginBottom=0.25, marginLeft=0.25, marginRight=0.25",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "created-here (2026-07-12, this generation run)",
+      "notes": "1p 792.0x612.0pt; input wrapped with buildCsvHtml (e0ff8fb) before POST"
+    },
+    {
+      "input_path": "fidelity-corpus/legacy-goldens/inputs/unicode.csv",
+      "input_sha256": "645eac8e95268cac6e54989241410c38f73bc9935e87dc833fe967626901780f",
+      "golden_path": "fidelity-corpus/legacy-goldens/csv/unicode.chromium.pdf",
+      "golden_sha256": "b3bd1fcb9938df4c5bef420321a23ddf6952a4a5d4e15abc81a62d9e322836a4",
+      "endpoint": "POST /docyantra/html-to-pdf",
+      "fields": "multipart fields html=<wrapped HTML>, landscape=true, marginTop=0.25, marginBottom=0.25, marginLeft=0.25, marginRight=0.25",
+      "golden_renderer": "Chromium 149.0.7827.102 via Gotenberg 8.34.0 (gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923), linux/amd64 emulated",
+      "source": "created-here (2026-07-12, this generation run)",
+      "notes": "1p 792.0x612.0pt; input wrapped with buildCsvHtml (e0ff8fb) before POST"
+    },
+    {
+      "input_path": "mock-files/pdf/file1.pdf",
+      "input_sha256": "bbc89bf3e84a927dda35c19809592095b85618486a51c4ec869d9e97e26756d8",
+      "golden_path": "fidelity-corpus/legacy-goldens/redaction/file1.pymupdf-redacted.pdf",
+      "golden_sha256": "7614d1b41e4d826cdf621f871a5358b9ae61df51f0d4bc782dbc3920076b6a78",
+      "endpoint": "docker exec: python3 -c REDACTION_SCRIPT (verbatim e0ff8fb pdf.service.ts:34-79), JSON payload on stdin",
+      "fields": "redactions (percent coords) = {\"0\": [{\"left\": 10, \"top\": 12, \"width\": 35, \"height\": 6}, {\"left\": 55, \"top\": 40, \"width\": 25, \"height\": 8}]}; rect JSON stored at fidelity-corpus/legacy-goldens/redaction/file1.redactions.json (sha256 661fa3601fa211138ae710b02d3bc19fd19bf3c37aad28cc1a8b42eed8d1304d)",
+      "golden_renderer": "PyMuPDF 1.24.14 (Python 3.13.5, /opt/venv, Debian trixie, linux/amd64 emulated)",
+      "source": "historical (doc-yantra mock-files)",
+      "notes": "1p 612.0x792.0pt; apply_redactions(images=PDF_REDACT_IMAGE_NONE); save(garbage=4, clean=True, deflate=True); script stdout pageCount=1"
+    },
+    {
+      "input_path": "mock-files/pdf/file2.pdf",
+      "input_sha256": "b31c2c4a0a9a190ed65bb5793c0543b58a82df6a156c3d6175eba2832fea4c26",
+      "golden_path": "fidelity-corpus/legacy-goldens/redaction/file2.pymupdf-redacted.pdf",
+      "golden_sha256": "cc0a6f02bf158cf9600b566e033e71128df50e70201cc51884c4dc1a90206fe9",
+      "endpoint": "docker exec: python3 -c REDACTION_SCRIPT (verbatim e0ff8fb pdf.service.ts:34-79), JSON payload on stdin",
+      "fields": "redactions (percent coords) = {\"0\": [{\"left\": 20, \"top\": 20, \"width\": 40, \"height\": 10}, {\"left\": 5, \"top\": 80, \"width\": 90, \"height\": 10}]}; rect JSON stored at fidelity-corpus/legacy-goldens/redaction/file2.redactions.json (sha256 84c0c8a9b637ae950ac2a8a925f103ac26ddd175929999de90cc81c17f9717bc)",
+      "golden_renderer": "PyMuPDF 1.24.14 (Python 3.13.5, /opt/venv, Debian trixie, linux/amd64 emulated)",
+      "source": "historical (doc-yantra mock-files)",
+      "notes": "1p 612.0x792.0pt; apply_redactions(images=PDF_REDACT_IMAGE_NONE); save(garbage=4, clean=True, deflate=True); script stdout pageCount=1"
+    },
+    {
+      "input_path": "mock-files/pdf_ppt/file1.pdf",
+      "input_sha256": "6691e9afb3a284a39bff5da4cf4f8111eff03de6ef29e87ae5ee96ddfe964ef5",
+      "golden_path": "fidelity-corpus/legacy-goldens/redaction/pdf_ppt-file1.pymupdf-redacted.pdf",
+      "golden_sha256": "ce0a8bedf00c492dcc4d5eecf68222d8279567b037d922264c4660d675de749f",
+      "endpoint": "docker exec: python3 -c REDACTION_SCRIPT (verbatim e0ff8fb pdf.service.ts:34-79), JSON payload on stdin",
+      "fields": "redactions (percent coords) = {\"0\": [{\"left\": 25, \"top\": 30, \"width\": 50, \"height\": 20}]}; rect JSON stored at fidelity-corpus/legacy-goldens/redaction/pdf_ppt-file1.redactions.json (sha256 067cbf0b1978206197c7b4904661dbfaba995e65f8262944bfe9fa8035389895)",
+      "golden_renderer": "PyMuPDF 1.24.14 (Python 3.13.5, /opt/venv, Debian trixie, linux/amd64 emulated)",
+      "source": "historical (doc-yantra mock-files)",
+      "notes": "1p 720.0x405.0pt; apply_redactions(images=PDF_REDACT_IMAGE_NONE); save(garbage=4, clean=True, deflate=True); script stdout pageCount=1"
+    }
+  ]
+}

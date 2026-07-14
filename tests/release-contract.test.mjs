@@ -48,3 +48,14 @@ test("all release surfaces carry one immutable version", () => {
     assert.equal(version, expected, `${surface} has release version ${version}, expected ${expected}`);
   }
 });
+
+test("office source fingerprint covers build-time font embedding", () => {
+  const fingerprintSource = readFileSync(join(root, "scripts/source-fingerprint.mjs"), "utf8");
+  const officeInputs = fingerprintSource.match(/office:\s*\[([\s\S]*?)\n\s*\],/u)?.[1];
+  assert.ok(officeInputs, "scripts/source-fingerprint.mjs must declare office inputs");
+  assert.match(
+    officeInputs,
+    /"office-core\/build\.rs"/u,
+    "changing office-core/build.rs must invalidate the Office package fingerprint",
+  );
+});

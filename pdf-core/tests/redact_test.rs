@@ -832,7 +832,11 @@ fn partially_covered_annotation_is_deleted_covered_and_warned() {
         "partially covered annotation must still be fully removed"
     );
     assert!(
-        out.warnings.iter().any(|w| w.contains("page 0")),
+        out.warnings.iter().any(|warning| {
+            warning.code.as_str() == "over_redaction"
+                && warning.page == 0
+                && warning.kind.as_str() == "annotation"
+        }),
         "excess coverage must be reported, got: {:?}",
         out.warnings
     );
@@ -878,7 +882,11 @@ fn whole_object_removal_covers_full_bounds_and_warns() {
     );
     // ...which MUST be reported to the caller...
     assert!(
-        out.warnings.iter().any(|w| w.contains("page 0")),
+        out.warnings.iter().any(|warning| {
+            warning.code.as_str() == "over_redaction"
+                && warning.page == 0
+                && warning.kind.as_str() == "text"
+        }),
         "removal beyond the rect must warn with the page index, got: {:?}",
         out.warnings
     );

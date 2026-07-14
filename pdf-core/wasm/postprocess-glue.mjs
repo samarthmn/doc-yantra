@@ -7,6 +7,17 @@ const MARKER = "DOC_YANTRA_FONT_PRECOPY_GUARD_V1";
 const GUARD_CALL = "guardRegisteredFontInput(bytes);";
 const PDF_MARKER = "DOC_YANTRA_PDF_PRECOPY_GUARD_V1";
 const PDF_GUARD_CALL = "guardRedactPdfInput(pdf, areas_json);";
+const INPUT_GUARDS = new Map([
+  ["apply_watermark", "guardWatermarkInput(pdf, watermark_json, watermark_image);"],
+  ["csv_to_pdf", "guardByteInput(csv, \"CSV\");"],
+  ["markdown_to_pdf", "guardStringInput(markdown, \"Markdown\");"],
+  ["merge_pdfs", "guardMergeInput(pdfs, watermark_json, watermark_image);"],
+  ["page_count", "guardByteInput(pdf, \"PDF\");"],
+  ["redact_pdf", PDF_GUARD_CALL],
+  ["redact_pdf_with_report", PDF_GUARD_CALL],
+  ["text_to_pdf", "guardStringInput(text, \"text\");"],
+  ["validate_pdf", "guardByteInput(pdf, \"PDF\");"],
+]);
 
 export function utf8ByteLengthExceedsLimit(value, limit) {
   if (value.length > limit) return true;
@@ -36,20 +47,54 @@ export function utf8ByteLengthExceedsLimit(value, limit) {
 const HELPERS = `
 const ${MARKER} = 32 * 1024 * 1024;
 const ${PDF_MARKER} = 100 * 1024 * 1024;
+const DOC_YANTRA_MERGE_PRECOPY_LIMIT_V1 = 200 * 1024 * 1024;
 
 ${utf8ByteLengthExceedsLimit.toString()}
 
+function dyResourceLimitError(message) {
+    return new Error(JSON.stringify({ dy: 1, code: "resource_limit", message }));
+}
+
 function guardRegisteredFontInput(bytes) {
     if (bytes.byteLength <= ${MARKER}) return;
-    throw new Error(\`font is \${bytes.byteLength} bytes, over the 32 MiB in-process limit\`);
+    throw dyResourceLimitError(\`font is \${bytes.byteLength} bytes, over the 32 MiB in-process limit\`);
+}
+
+function guardByteInput(bytes, label) {
+    if (bytes.byteLength <= ${PDF_MARKER}) return;
+    throw dyResourceLimitError(\`${"${label}"} is \${bytes.byteLength} bytes, over the 100 MiB in-process limit\`);
+}
+
+function guardStringInput(value, label) {
+    if (!utf8ByteLengthExceedsLimit(value, ${PDF_MARKER})) return;
+    throw dyResourceLimitError(\`${"${label}"} is over the 100 MiB in-process limit\`);
+}
+
+function guardWatermarkInput(pdf, watermark_json, watermark_image) {
+    guardByteInput(pdf, "PDF");
+    guardStringInput(watermark_json, "watermark JSON");
+    if (watermark_image != null) guardByteInput(watermark_image, "watermark image");
+}
+
+function guardMergeInput(pdfs, watermark_json, watermark_image) {
+    let total = 0;
+    for (const pdf of pdfs) {
+        guardByteInput(pdf, "PDF");
+        total += pdf.byteLength;
+        if (total > DOC_YANTRA_MERGE_PRECOPY_LIMIT_V1) {
+            throw dyResourceLimitError("merge input set is over the 200 MiB in-process limit");
+        }
+    }
+    if (watermark_json != null) guardStringInput(watermark_json, "watermark JSON");
+    if (watermark_image != null) guardByteInput(watermark_image, "watermark image");
 }
 
 function guardRedactPdfInput(pdf, areas_json) {
     if (pdf.byteLength > ${PDF_MARKER}) {
-        throw new Error(\`PDF is \${pdf.byteLength} bytes, over the 100 MiB in-process limit\`);
+        throw dyResourceLimitError(\`PDF is \${pdf.byteLength} bytes, over the 100 MiB in-process limit\`);
     }
     if (utf8ByteLengthExceedsLimit(areas_json, ${PDF_MARKER})) {
-        throw new Error("redaction JSON is over the 100 MiB in-process limit");
+        throw dyResourceLimitError("redaction JSON is over the 100 MiB in-process limit");
     }
 }
 `;
@@ -63,7 +108,6 @@ function assertPatched(source, label) {
     countOccurrences(source, `const ${MARKER} =`) !== 1 ||
     countOccurrences(source, GUARD_CALL) !== 1 ||
     countOccurrences(source, `const ${PDF_MARKER} =`) !== 1 ||
-    countOccurrences(source, PDF_GUARD_CALL) !== 1 ||
     countOccurrences(source, "function utf8ByteLengthExceedsLimit(value, limit)") !== 1
   ) {
     throw new Error(`${label}: expected exactly one font and PDF pre-copy guard`);
@@ -82,16 +126,16 @@ function assertPatched(source, label) {
   }
 
 
-  const redactSignature = /^(?:export )?function redact_pdf\(pdf, areas_json\) \{$/m;
-  const redactMatch = source.match(redactSignature);
-  if (redactMatch === null) {
-    throw new Error(`${label}: missing generated redact_pdf export`);
-  }
-  const redactStart = redactMatch.index;
-  const redactGuardAt = source.indexOf(PDF_GUARD_CALL, redactStart);
-  const redactCopyAt = source.indexOf("passArray8ToWasm0(pdf", redactStart);
-  if (redactGuardAt < redactStart || redactCopyAt < redactGuardAt) {
-    throw new Error(`${label}: redact_pdf guard must run before the wasm input copy`);
+  for (const [exportName, guard] of INPUT_GUARDS) {
+    const signature = new RegExp(`^(?:export )?function ${exportName}\\([^\\n]*\\) \\{$`, "m");
+    const match = source.match(signature);
+    if (match === null) throw new Error(`${label}: missing generated ${exportName} export`);
+    const start = match.index;
+    const guardAt = source.indexOf(guard, start);
+    const wasmCallAt = source.indexOf(`wasm.${exportName}(`, start);
+    if (guardAt < start || wasmCallAt < guardAt) {
+      throw new Error(`${label}: ${exportName} guard must run before wasm input copies`);
+    }
   }
 }
 
@@ -115,13 +159,15 @@ export function transformPdfGlue(source, label = "pdf wasm glue") {
   const declaration = matches[0][0];
   output = output.replace(declaration, `${declaration}\n    ${GUARD_CALL}`);
 
-  const redactSignature = /^(?:export )?function redact_pdf\(pdf, areas_json\) \{$/gm;
-  const redactMatches = [...output.matchAll(redactSignature)];
-  if (redactMatches.length !== 1) {
-    throw new Error(`${label}: expected exactly one generated redact_pdf export`);
+  for (const [exportName, guard] of INPUT_GUARDS) {
+    const exportSignature = new RegExp(`^(?:export )?function ${exportName}\\([^\\n]*\\) \\{$`, "gm");
+    const exportMatches = [...output.matchAll(exportSignature)];
+    if (exportMatches.length !== 1) {
+      throw new Error(`${label}: expected exactly one generated ${exportName} export`);
+    }
+    const exportDeclaration = exportMatches[0][0];
+    output = output.replace(exportDeclaration, `${exportDeclaration}\n    ${guard}`);
   }
-  const redactDeclaration = redactMatches[0][0];
-  output = output.replace(redactDeclaration, `${redactDeclaration}\n    ${PDF_GUARD_CALL}`);
 
   assertPatched(output, label);
   return output;

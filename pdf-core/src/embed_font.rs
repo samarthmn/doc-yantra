@@ -1,8 +1,8 @@
 //! Runtime-registered Unicode fonts and per-document CID font embedding.
 //!
 //! Fonts are never compiled into the engine. Callers register sfnt bytes, then
-//! each output document snapshots the registry, selects one covering face per
-//! non-WinAnsi run, and builds one subset per used face.
+//! each output document snapshots the registry, selects the first covering
+//! face at cluster boundaries, and builds one subset per used face.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -53,25 +53,6 @@ impl FaceRef {
             PdfCoreError::InvalidInput("registered font can no longer be parsed".to_string())
         })
     }
-
-    fn gid(&self, ch: char) -> Result<GlyphId> {
-        let gid = self.parsed()?.glyph_index(ch).filter(|gid| gid.0 != 0);
-        gid.ok_or_else(|| unsupported_glyph(ch))
-    }
-
-    fn advance_1000(&self, gid: GlyphId) -> Result<f32> {
-        let advance =
-            self.parsed()?
-                .glyph_hor_advance(gid)
-                .ok_or_else(|| PdfCoreError::TextUnsupported {
-                    code: "glyph-coverage",
-                    message: format!(
-                        "registered font has no horizontal advance for GID {}",
-                        gid.0
-                    ),
-                })?;
-        Ok((f64::from(advance) * 1000.0 / self.0.units_per_em) as f32)
-    }
 }
 
 impl PartialEq for FaceRef {
@@ -86,7 +67,15 @@ impl Eq for FaceRef {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FontChoice {
     Standard,
-    Embedded(FaceRef),
+    Embedded(EmbeddedChoice),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EmbeddedChoice {
+    /// Ordered registry snapshot used for cluster-boundary fallback. Keeping
+    /// the snapshot on the choice makes measurement and later encoding use
+    /// exactly the same face order.
+    faces: Vec<FaceRef>,
 }
 
 impl FontChoice {
@@ -99,12 +88,14 @@ impl FontChoice {
     ) -> Result<f64> {
         match self {
             FontChoice::Standard => Ok(standard.text_width_pt(text, size_pt)),
-            FontChoice::Embedded(face) => {
-                let mut width_1000 = 0.0_f64;
-                for ch in text.chars() {
-                    width_1000 += f64::from(face.advance_1000(face.gid(ch)?)?);
-                }
-                Ok(width_1000 * size_pt / 1000.0)
+            FontChoice::Embedded(choice) => {
+                let shaped = shape_with_faces(&choice.faces, text)?;
+                Ok(shaped
+                    .iter()
+                    .map(|run| {
+                        f64::from(run.advance) * size_pt / f64::from(run.units_per_em.max(1))
+                    })
+                    .sum())
             }
         }
     }
@@ -120,8 +111,14 @@ impl FontChoice {
             FontChoice::Standard => {
                 Ok(f64::from(standard.glyph_width_milli(ch)) * size_pt / 1000.0)
             }
-            FontChoice::Embedded(face) => {
-                Ok(f64::from(face.advance_1000(face.gid(ch)?)?) * size_pt / 1000.0)
+            FontChoice::Embedded(choice) => {
+                let shaped = shape_with_faces(&choice.faces, &ch.to_string())?;
+                Ok(shaped
+                    .iter()
+                    .map(|run| {
+                        f64::from(run.advance) * size_pt / f64::from(run.units_per_em.max(1))
+                    })
+                    .sum())
             }
         }
     }
@@ -240,8 +237,7 @@ pub(crate) fn is_winansi(text: &str) -> bool {
 /// Encodes a standard-font literal string body without surrounding `()`.
 pub(crate) fn encode_winansi_literal(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() + 4);
-    for ch in text.chars() {
-        let byte = winansi_byte(ch).unwrap_or(b'?');
+    for byte in encode_winansi_bytes(text) {
         match byte {
             b'\\' | b'(' | b')' => {
                 out.push(b'\\');
@@ -254,7 +250,14 @@ pub(crate) fn encode_winansi_literal(text: &str) -> Vec<u8> {
     out
 }
 
-fn winansi_byte(ch: char) -> Option<u8> {
+/// Encodes text as WinAnsi/CP1252 bytes without PDF string escaping.
+pub(crate) fn encode_winansi_bytes(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|ch| winansi_byte(ch).unwrap_or(b'?'))
+        .collect()
+}
+
+pub(crate) fn winansi_byte(ch: char) -> Option<u8> {
     let cp = ch as u32;
     match cp {
         0x00..=0x7F => Some(cp as u8),
@@ -293,45 +296,38 @@ fn winansi_byte(ch: char) -> Option<u8> {
 }
 
 /// Rejects scripts that need shaping or bidi reordering.
-pub fn validate_text(text: &str) -> Result<()> {
-    if text.chars().any(|ch| {
-        let cp = ch as u32;
-        is_complex_script(cp) || is_rtl(cp) || is_rtl_control(cp)
-    }) {
-        return Err(PdfCoreError::TextUnsupported {
-            code: "script",
-            message: "text contains complex-script or RTL characters".to_string(),
-        });
-    }
+pub fn validate_text(_text: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_complex_script(cp: u32) -> bool {
-    matches!(cp,
-        0x0590..=0x05FF
-        | 0x0600..=0x06FF | 0x0750..=0x077F
-        | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF
-        | 0x0900..=0x0DFF
-        | 0x0E00..=0x0EFF
-        | 0x1780..=0x17FF
-        | 0x1000..=0x109F
-    )
+/// UAX #9 display-order replacement for PDFium `/ActualText`.
+pub(crate) fn pdfium_actual_text(text: &str) -> String {
+    let visual = text_core::bidi_visual_order(text);
+    reverse_rtl_combining_sequences(&visual)
 }
 
-fn is_rtl(cp: u32) -> bool {
-    matches!(cp,
-        0x0590..=0x05FF
-        | 0x0600..=0x08FF
-        | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF
-        | 0x10800..=0x10FFF
-        | 0x1E800..=0x1E8DF
-        | 0x1E900..=0x1E95F
-        | 0x1EE00..=0x1EEFF
-    )
+fn reverse_rtl_combining_sequences(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut marks = Vec::new();
+    for ch in text.chars() {
+        if is_rtl_combining_mark(ch) {
+            marks.push(ch);
+        } else {
+            output.extend(marks.drain(..).rev());
+            output.push(ch);
+        }
+    }
+    output.extend(marks.into_iter().rev());
+    output
 }
 
-fn is_rtl_control(cp: u32) -> bool {
-    matches!(cp, 0x200E..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069)
+fn is_rtl_combining_mark(ch: char) -> bool {
+    matches!(ch as u32,
+        0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
+        | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670
+        | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7..=0x06E8 | 0x06EA..=0x06ED
+        | 0x08D3..=0x08FF
+    )
 }
 
 fn unsupported_glyph(ch: char) -> PdfCoreError {
@@ -341,14 +337,55 @@ fn unsupported_glyph(ch: char) -> PdfCoreError {
     }
 }
 
+fn shape_with_faces(faces: &[FaceRef], text: &str) -> Result<Vec<text_core::ShapedRun>> {
+    let shared = faces
+        .iter()
+        .map(|face| {
+            text_core::Face::new(&face.0.bytes, face.0.index).map_err(|error| {
+                PdfCoreError::TextUnsupported {
+                    code: "font-format",
+                    message: error.to_string(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    text_core::shape_text(text, &shared).map_err(|error| match error {
+        text_core::ShapeError::MissingGlyphs(missing) => {
+            let missing = missing.first().copied().or_else(|| {
+                // A cmap can claim coverage while GSUB still produces
+                // `.notdef`. Name a real scalar from the failed input; never
+                // manufacture U+FFFD, which hides the actionable codepoint.
+                text.chars()
+                    .find(|ch| !is_shaping_format_control(*ch))
+                    .or_else(|| text.chars().next())
+            });
+            missing
+                .map(unsupported_glyph)
+                .unwrap_or_else(|| PdfCoreError::TextUnsupported {
+                    code: "glyph-coverage",
+                    message: "font shaping produced a missing glyph for an empty run".into(),
+                })
+        }
+        other => PdfCoreError::TextUnsupported {
+            code: "font-shaping",
+            message: other.to_string(),
+        },
+    })
+}
+
+fn is_shaping_format_control(ch: char) -> bool {
+    matches!(ch as u32, 0x200E..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069)
+}
+
 #[derive(Debug)]
 struct UsedFace {
     face: FaceRef,
     mapper: GlyphRemapper,
     first_use_gids: Vec<u16>,
+    cid_by_pair: HashMap<(u16, String), u16>,
+    cid_to_gid: BTreeMap<u16, u16>,
     widths: BTreeMap<u16, f32>,
-    to_unicode: BTreeMap<u16, char>,
-    unicode_by_gid: HashMap<u16, char>,
+    to_unicode: BTreeMap<u16, String>,
 }
 
 /// Per-output font state. Registry selection is frozen at construction.
@@ -377,118 +414,127 @@ impl FontSession {
 
     /// Resolves one logical run without mutating its eventual glyph subset.
     pub(crate) fn resolve(&self, text: &str) -> Result<FontChoice> {
-        validate_text(text)?;
         if is_winansi(text) {
             return Ok(FontChoice::Standard);
         }
-        for face in &self.registry {
-            let parsed = face.parsed()?;
-            if text
-                .chars()
-                .all(|ch| parsed.glyph_index(ch).is_some_and(|gid| gid.0 != 0))
-            {
-                return Ok(FontChoice::Embedded(face.clone()));
-            }
-        }
-
-        let missing = text
-            .chars()
-            .filter(|ch| winansi_byte(*ch).is_none())
-            .find(|&ch| {
-                !self.registry.iter().any(|face| {
-                    face.parsed()
-                        .ok()
-                        .and_then(|parsed| parsed.glyph_index(ch))
-                        .is_some_and(|gid| gid.0 != 0)
-                })
-            })
-            .or_else(|| {
-                text.chars().find(|&ch| {
-                    !self.registry.iter().any(|face| {
-                        face.parsed()
-                            .ok()
-                            .and_then(|parsed| parsed.glyph_index(ch))
-                            .is_some_and(|gid| gid.0 != 0)
-                    })
-                })
-            })
-            .unwrap_or('\u{FFFD}');
-        Err(unsupported_glyph(missing))
+        // `text-core` selects the first covering face independently at each
+        // cluster boundary. Pre-shaping here both validates the choice and
+        // guarantees measurement/encoding will use this same ordered snapshot.
+        shape_with_faces(&self.registry, text)?;
+        Ok(FontChoice::Embedded(EmbeddedChoice {
+            faces: self.registry.clone(),
+        }))
     }
 
     /// Encodes one embedded run as two-byte big-endian CIDs.
-    pub(crate) fn encode(&mut self, face: &FaceRef, text: &str) -> Result<EncodedText> {
-        let used_index = match self.used_index.get(&face.id()).copied() {
-            Some(index) => index,
-            None => {
-                let index = self.used.len();
-                self.used.push(UsedFace {
-                    face: face.clone(),
-                    mapper: GlyphRemapper::new(),
-                    first_use_gids: vec![0],
-                    widths: BTreeMap::new(),
-                    to_unicode: BTreeMap::new(),
-                    unicode_by_gid: HashMap::new(),
-                });
-                self.used_index.insert(face.id(), index);
-                index
-            }
-        };
-
-        let used = &mut self.used[used_index];
-        let parsed = used.face.parsed()?;
-        let mut bytes = Vec::with_capacity(text.chars().count() * 2);
-        for ch in text.chars() {
-            let gid = parsed
-                .glyph_index(ch)
-                .filter(|gid| gid.0 != 0)
-                .ok_or_else(|| unsupported_glyph(ch))?;
-            if let Some(previous) = used.unicode_by_gid.get(&gid.0)
-                && *previous != ch
-            {
-                return Err(PdfCoreError::TextUnsupported {
-                    code: "glyph-coverage",
-                    message: format!(
-                        "font maps U+{:04X} and U+{:04X} to one glyph",
-                        *previous as u32, ch as u32
-                    ),
-                });
-            }
-
-            let cid = if used.face.0.no_subsetting {
-                if !used.unicode_by_gid.contains_key(&gid.0) {
-                    used.first_use_gids.push(gid.0);
-                }
-                gid.0
-            } else {
-                let existed = used.mapper.get(gid.0).is_some();
-                let cid = used.mapper.remap(gid.0);
-                if !existed {
-                    used.first_use_gids.push(gid.0);
-                }
-                cid
-            };
-            used.unicode_by_gid.entry(gid.0).or_insert(ch);
-            used.to_unicode.entry(cid).or_insert(ch);
-            let advance =
-                parsed
-                    .glyph_hor_advance(gid)
+    pub(crate) fn encode(&mut self, choice: &EmbeddedChoice, text: &str) -> Result<EncodedText> {
+        let shaped = shape_with_faces(&choice.faces, text)?;
+        let mut bytes = Vec::new();
+        let mut glyphs = Vec::new();
+        let mut spans = Vec::new();
+        for run in &shaped {
+            let face =
+                choice
+                    .faces
+                    .get(run.face_index)
                     .ok_or_else(|| PdfCoreError::TextUnsupported {
-                        code: "glyph-coverage",
-                        message: format!(
-                            "registered font has no horizontal advance for GID {}",
-                            gid.0
-                        ),
+                        code: "font-shaping",
+                        message: "shaper returned an invalid face index".to_string(),
                     })?;
-            used.widths
-                .entry(cid)
-                .or_insert((f64::from(advance) * 1000.0 / used.face.0.units_per_em) as f32);
-            bytes.extend_from_slice(&cid.to_be_bytes());
+            let used_index = match self.used_index.get(&face.id()).copied() {
+                Some(index) => index,
+                None => {
+                    let index = self.used.len();
+                    self.used.push(UsedFace {
+                        face: face.clone(),
+                        mapper: GlyphRemapper::new(),
+                        first_use_gids: vec![0],
+                        cid_by_pair: HashMap::new(),
+                        cid_to_gid: BTreeMap::new(),
+                        widths: BTreeMap::new(),
+                        to_unicode: BTreeMap::new(),
+                    });
+                    self.used_index.insert(face.id(), index);
+                    index
+                }
+            };
+            let used = &mut self.used[used_index];
+            let parsed = used.face.parsed()?;
+            for glyph in &run.glyphs {
+                let gid = GlyphId(glyph.glyph_id);
+                let cluster = if let Some((start, end)) = glyph.unicode_range {
+                    run.source[start..end].to_string()
+                } else {
+                    String::new()
+                };
+                let subset_gid = if used.face.0.no_subsetting {
+                    if !used.first_use_gids.contains(&gid.0) {
+                        used.first_use_gids.push(gid.0);
+                    }
+                    gid.0
+                } else {
+                    let existed = used.mapper.get(gid.0).is_some();
+                    let subset_gid = used.mapper.remap(gid.0);
+                    if !existed {
+                        used.first_use_gids.push(gid.0);
+                    }
+                    subset_gid
+                };
+                let pair = (gid.0, cluster.clone());
+                let cid = match used.cid_by_pair.get(&pair).copied() {
+                    Some(cid) => cid,
+                    None => {
+                        let cid = u16::try_from(used.cid_by_pair.len() + 1).map_err(|_| {
+                            PdfCoreError::TextUnsupported {
+                                code: "glyph-coverage",
+                                message:
+                                    "embedded font needs more than 65535 distinct text clusters"
+                                        .to_string(),
+                            }
+                        })?;
+                        used.cid_by_pair.insert(pair, cid);
+                        used.cid_to_gid.insert(cid, subset_gid);
+                        used.to_unicode.insert(cid, cluster);
+                        cid
+                    }
+                };
+                let advance =
+                    parsed
+                        .glyph_hor_advance(gid)
+                        .ok_or_else(|| PdfCoreError::TextUnsupported {
+                            code: "glyph-coverage",
+                            message: format!(
+                                "registered font has no horizontal advance for GID {}",
+                                gid.0
+                            ),
+                        })?;
+                used.widths
+                    .entry(cid)
+                    .or_insert((f64::from(advance) * 1000.0 / used.face.0.units_per_em) as f32);
+                bytes.extend_from_slice(&cid.to_be_bytes());
+                glyphs.push(EncodedGlyph {
+                    resource_index: used_index,
+                    units_per_em: used.face.0.units_per_em,
+                    cid,
+                    x_advance: glyph.x_advance,
+                    x_offset: glyph.x_offset,
+                    y_offset: glyph.y_offset,
+                });
+            }
+            if !run.glyphs.is_empty() {
+                spans.push(EncodedSpan {
+                    source_text: run.source.clone(),
+                    direction: run.direction,
+                    has_astral: run.source.chars().any(|ch| u32::from(ch) > 0xFFFF),
+                });
+            }
         }
 
         Ok(EncodedText {
-            resource_index: used_index,
             bytes,
+            glyphs,
+            spans,
+            base_direction: text_core::bidi_base_direction(text),
         })
     }
 
@@ -500,8 +546,85 @@ impl FontSession {
 /// Encoded text and document-local embedded-font resource index.
 #[derive(Debug)]
 pub(crate) struct EncodedText {
-    pub(crate) resource_index: usize,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) glyphs: Vec<EncodedGlyph>,
+    pub(crate) spans: Vec<EncodedSpan>,
+    base_direction: text_core::Direction,
+}
+
+impl EncodedText {
+    pub(crate) fn directional_actual_text(&self) -> Option<String> {
+        let has_ltr = self
+            .spans
+            .iter()
+            .any(|span| span.direction == text_core::Direction::Ltr);
+        let has_rtl = self
+            .spans
+            .iter()
+            .any(|span| span.direction == text_core::Direction::Rtl);
+        if !has_ltr
+            || !has_rtl
+            || self.spans.iter().any(|span| span.has_astral)
+            || self.spans.last()?.direction == self.base_direction
+        {
+            return None;
+        }
+
+        let base = self.spans.last()?.direction;
+        let mut actual = String::new();
+        if base == text_core::Direction::Rtl {
+            for span in self.spans.iter().rev() {
+                if span.direction == text_core::Direction::Rtl {
+                    actual.push_str(&text_core::bidi_visual_order(&span.source_text));
+                } else {
+                    actual.push_str(&reverse_ltr_tokens(&span.source_text));
+                }
+            }
+        } else {
+            for span in &self.spans {
+                actual.push_str(&text_core::bidi_visual_order_with_base(
+                    &span.source_text,
+                    Some(base),
+                ));
+            }
+        }
+        Some(actual)
+    }
+}
+
+/// PDFium anchors mixed `/ActualText` to the final RTL run and then reverses
+/// the surrounding LTR word/number/punctuation tokens. Pre-applying that
+/// token transform makes its extraction pass yield the original LTR span.
+fn reverse_ltr_tokens(text: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric()
+            && let Some(last) = tokens.last_mut()
+            && last.chars().all(char::is_alphanumeric)
+        {
+            last.push(ch);
+        } else {
+            tokens.push(ch.to_string());
+        }
+    }
+    tokens.into_iter().rev().collect()
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EncodedSpan {
+    pub(crate) source_text: String,
+    pub(crate) direction: text_core::Direction,
+    pub(crate) has_astral: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EncodedGlyph {
+    pub(crate) resource_index: usize,
+    pub(crate) units_per_em: f64,
+    pub(crate) cid: u16,
+    pub(crate) x_advance: i32,
+    pub(crate) x_offset: i32,
+    pub(crate) y_offset: i32,
 }
 
 /// Returns `/UF0`, `/UF1`, ... without the slash.
@@ -516,6 +639,7 @@ pub(crate) struct EmbeddedFont {
     font_program: Vec<u8>,
     is_cff: bool,
     widths: Vec<(u16, f32)>,
+    mapping_stream: Vec<u8>,
     to_unicode: Vec<u8>,
     ascent: f32,
     descent: f32,
@@ -581,13 +705,31 @@ impl EmbeddedFont {
             ));
         }
 
-        let widths = used.widths.into_iter().collect();
+        let code_to_gid: Vec<(u16, u16)> = used.cid_to_gid.into_iter().collect();
+        let widths = if used.face.0.is_cff {
+            let pair_widths = used.widths;
+            let mut by_descendant_cid = BTreeMap::new();
+            for &(code, descendant_cid) in &code_to_gid {
+                if let Some(width) = pair_widths.get(&code) {
+                    by_descendant_cid.entry(descendant_cid).or_insert(*width);
+                }
+            }
+            by_descendant_cid.into_iter().collect()
+        } else {
+            used.widths.into_iter().collect()
+        };
+        let mapping_stream = if used.face.0.is_cff {
+            build_cff_encoding(&code_to_gid)
+        } else {
+            build_cid_to_gid(&code_to_gid)
+        };
         let to_unicode = build_to_unicode(&used.to_unicode);
         Ok(Self {
             base_font,
             font_program,
             is_cff: used.face.0.is_cff,
             widths,
+            mapping_stream,
             to_unicode,
             ascent: used.face.0.ascent_1000,
             descent: used.face.0.descent_1000,
@@ -626,6 +768,8 @@ impl EmbeddedFont {
             Object::Reference(file_id),
         );
         let descriptor_id = doc.add_object(descriptor);
+        let mapping_id =
+            doc.add_object(Stream::new(Dictionary::new(), self.mapping_stream.clone()));
 
         let widths = widths_object(&self.widths);
         let mut descendant = dictionary! {
@@ -642,27 +786,42 @@ impl EmbeddedFont {
             "W" => widths,
         };
         if !self.is_cff {
-            descendant.set("CIDToGIDMap", Object::Name(b"Identity".to_vec()));
+            descendant.set("CIDToGIDMap", Object::Reference(mapping_id));
         }
         let descendant_id = doc.add_object(descendant);
         let to_unicode_id = doc.add_object(Stream::new(Dictionary::new(), self.to_unicode.clone()));
-        Ok(doc.add_object(dictionary! {
+        let mut type0 = dictionary! {
             "Type" => "Font",
             "Subtype" => "Type0",
             "BaseFont" => Object::Name(self.base_font.as_bytes().to_vec()),
-            "Encoding" => "Identity-H",
             "DescendantFonts" => Object::Array(vec![Object::Reference(descendant_id)]),
             "ToUnicode" => Object::Reference(to_unicode_id),
-        }))
+        };
+        type0.set(
+            "Encoding",
+            if self.is_cff {
+                Object::Reference(mapping_id)
+            } else {
+                Object::Name(b"Identity-H".to_vec())
+            },
+        );
+        Ok(doc.add_object(type0))
     }
 
     /// Writes this font graph through pdf-writer.
     pub(crate) fn write_pdf_writer(&self, pdf: &mut Pdf, refs: PdfFontRefs) {
-        pdf.type0_font(refs.type0)
-            .base_font(Name(self.base_font.as_bytes()))
-            .encoding_predefined(Name(b"Identity-H"))
-            .descendant_font(refs.descendant)
-            .to_unicode(refs.to_unicode);
+        {
+            let mut type0 = pdf.type0_font(refs.type0);
+            type0
+                .base_font(Name(self.base_font.as_bytes()))
+                .descendant_font(refs.descendant)
+                .to_unicode(refs.to_unicode);
+            if self.is_cff {
+                type0.encoding_cmap(refs.mapping);
+            } else {
+                type0.encoding_predefined(Name(b"Identity-H"));
+            }
+        }
 
         {
             let mut cid = pdf.cid_font(refs.descendant);
@@ -680,7 +839,7 @@ impl EmbeddedFont {
             .font_descriptor(refs.descriptor)
             .default_width(0.0);
             if !self.is_cff {
-                cid.cid_to_gid_map_predefined(Name(b"Identity"));
+                cid.cid_to_gid_map_stream(refs.mapping);
             }
             let mut widths = cid.widths();
             for &(start, width) in &self.widths {
@@ -722,10 +881,11 @@ impl EmbeddedFont {
             }
         }
         pdf.stream(refs.to_unicode, &self.to_unicode);
+        pdf.stream(refs.mapping, &self.mapping_stream);
     }
 }
 
-/// Five indirect objects used by one embedded font graph.
+/// Six indirect objects used by one embedded font graph.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PdfFontRefs {
     pub(crate) type0: Ref,
@@ -733,6 +893,35 @@ pub(crate) struct PdfFontRefs {
     pub(crate) descriptor: Ref,
     pub(crate) file: Ref,
     pub(crate) to_unicode: Ref,
+    pub(crate) mapping: Ref,
+}
+
+fn build_cid_to_gid(mapping: &[(u16, u16)]) -> Vec<u8> {
+    let max_cid = mapping.iter().map(|(cid, _)| *cid).max().unwrap_or(0);
+    let mut bytes = vec![0; (usize::from(max_cid) + 1) * 2];
+    for &(cid, gid) in mapping {
+        let offset = usize::from(cid) * 2;
+        bytes[offset..offset + 2].copy_from_slice(&gid.to_be_bytes());
+    }
+    bytes
+}
+
+fn build_cff_encoding(mapping: &[(u16, u16)]) -> Vec<u8> {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n\
+         /CMapName /DocYantra-CFF-Encoding def\n/CMapType 1 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    for chunk in mapping.chunks(100) {
+        cmap.push_str(&format!("{} begincidchar\n", chunk.len()));
+        for &(code, cid) in chunk {
+            cmap.push_str(&format!("<{code:04X}> {cid}\n"));
+        }
+        cmap.push_str("endcidchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    cmap.into_bytes()
 }
 
 fn widths_object(widths: &[(u16, f32)]) -> Object {
@@ -744,23 +933,27 @@ fn widths_object(widths: &[(u16, f32)]) -> Object {
     Object::Array(array)
 }
 
-fn build_to_unicode(mapping: &BTreeMap<u16, char>) -> Vec<u8> {
+fn build_to_unicode(mapping: &BTreeMap<u16, String>) -> Vec<u8> {
     let mut cmap = String::from(
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
          /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
          /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
          1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
     );
-    let entries: Vec<(u16, char)> = mapping.iter().map(|(&cid, &ch)| (cid, ch)).collect();
+    let entries: Vec<(u16, &str)> = mapping
+        .iter()
+        .map(|(&cid, text)| (cid, text.as_str()))
+        .collect();
     for chunk in entries.chunks(100) {
         cmap.push_str(&format!("{} beginbfchar\n", chunk.len()));
-        for &(cid, ch) in chunk {
-            let mut units = [0; 2];
-            let utf16: String = ch
-                .encode_utf16(&mut units)
-                .iter()
-                .map(|unit| format!("{unit:04X}"))
-                .collect();
+        for &(cid, text) in chunk {
+            let utf16: String = if text.is_empty() {
+                "0000".to_string()
+            } else {
+                text.encode_utf16()
+                    .map(|unit| format!("{unit:04X}"))
+                    .collect()
+            };
             cmap.push_str(&format!("<{cid:04X}> <{utf16}>\n"));
         }
         cmap.push_str("endbfchar\n");
@@ -792,6 +985,7 @@ fn subset_tag(face: &FaceData, gids: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn winansi_detection_covers_cp1252_but_not_cyrillic() {
@@ -800,23 +994,113 @@ mod tests {
     }
 
     #[test]
-    fn script_gate_rejects_arabic_and_rtl_controls() {
-        assert!(
-            validate_text("مرحبا")
-                .unwrap_err()
-                .to_string()
-                .starts_with("unsupported:script:")
-        );
-        assert!(
-            validate_text("left\u{202E}right")
-                .unwrap_err()
-                .to_string()
-                .starts_with("unsupported:script:")
+    fn script_gate_is_removed_for_shaping_and_bidi() {
+        assert!(validate_text("مرحبا").is_ok());
+        assert!(validate_text("left\u{202E}right").is_ok());
+    }
+
+    #[test]
+    fn coverage_selection_allows_cjk() {
+        assert!(validate_text("你好 日本語").is_ok());
+    }
+
+    #[test]
+    fn missing_coverage_reports_input_scalar_instead_of_replacement_character() {
+        let error = shape_with_faces(&[], "\u{1FAE9}").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("U+1FAE9"), "{message}");
+        assert!(!message.contains("U+FFFD"), "{message}");
+    }
+
+    #[test]
+    fn mixed_text_can_use_multiple_registered_faces() {
+        register_font(include_bytes!(
+            "../wasm/pkg/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        register_font(include_bytes!("../wasm/pkg/fonts/NotoEmoji-Variable.ttf")).unwrap();
+
+        let mut session = FontSession::new().unwrap();
+        let FontChoice::Embedded(choice) = session.resolve("Words \u{1F44D}").unwrap() else {
+            panic!("mixed Unicode text unexpectedly selected the standard font")
+        };
+        let encoded = session.encode(&choice, "Words \u{1F44D}").unwrap();
+        let resources: BTreeSet<_> = encoded
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.resource_index)
+            .collect();
+        assert_eq!(resources.len(), 2);
+    }
+
+    #[test]
+    fn truetype_cid_to_gid_map_allows_multiple_cids_for_one_glyph() {
+        let bytes = build_cid_to_gid(&[(1, 9), (3, 9), (4, 27)]);
+        assert_eq!(
+            bytes,
+            vec![
+                0x00, 0x00, // CID 0 -> .notdef
+                0x00, 0x09, // CID 1 -> subset GID 9
+                0x00, 0x00, // sparse CID 2 -> .notdef
+                0x00, 0x09, // CID 3 -> the same subset GID 9
+                0x00, 0x1B, // CID 4 -> subset GID 27
+            ]
         );
     }
 
     #[test]
-    fn script_gate_allows_cjk_for_coverage_selection() {
-        assert!(validate_text("你好 日本語").is_ok());
+    fn cff_encoding_allows_distinct_codes_to_share_descendant_cid() {
+        let cmap = String::from_utf8(build_cff_encoding(&[(1, 7), (2, 7), (3, 11)]))
+            .expect("CFF encoding CMap is ASCII");
+        assert!(cmap.contains("<0001> 7\n"));
+        assert!(cmap.contains("<0002> 7\n"));
+        assert!(cmap.contains("<0003> 11\n"));
+    }
+
+    #[test]
+    fn to_unicode_keeps_each_pair_code_unambiguous() {
+        let mapping = BTreeMap::from([
+            (1, "का".to_string()),
+            (2, "कि".to_string()),
+            (3, String::new()),
+        ]);
+        let cmap = String::from_utf8(build_to_unicode(&mapping)).expect("ToUnicode CMap is ASCII");
+        assert!(cmap.contains("<0001> <0915093E>"));
+        assert!(cmap.contains("<0002> <0915093F>"));
+        assert!(cmap.contains("<0003> <0000>"));
+    }
+
+    #[test]
+    fn mixed_actual_text_precompensates_pdfium_rtl_anchor_order() {
+        let encoded = EncodedText {
+            bytes: Vec::new(),
+            glyphs: Vec::new(),
+            spans: vec![
+                EncodedSpan {
+                    source_text: "Total: 123 ".to_string(),
+                    direction: text_core::Direction::Ltr,
+                    has_astral: false,
+                },
+                EncodedSpan {
+                    source_text: "ريال".to_string(),
+                    direction: text_core::Direction::Rtl,
+                    has_astral: false,
+                },
+            ],
+            base_direction: text_core::Direction::Ltr,
+        };
+        assert_eq!(
+            encoded.directional_actual_text().as_deref(),
+            Some("لاير 123 :Total")
+        );
+    }
+
+    #[test]
+    fn rtl_actual_text_precompensates_combining_mark_order() {
+        assert_eq!(
+            pdfium_actual_text("שָׁלוֹם"),
+            "םֹולָׁש",
+            "PDFium reverses RTL ActualText codepoints during extraction"
+        );
     }
 }

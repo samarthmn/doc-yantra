@@ -30,6 +30,9 @@ ttf-parser = "0.25"
 subsetter = "0.2"
 unicode-linebreak = "0.1"
 unicode-bidi = "0.3"
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+text-core = { path = "../text-core" }
 pdf-writer = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 miniz_oxide = "0.8"

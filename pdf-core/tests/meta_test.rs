@@ -344,9 +344,12 @@ fn encrypt_output_fails_without_password() {
     // Wrong password is rejected outright.
     assert!(Document::load_mem_with_options(&enc, LoadOptions::with_password("wrong-pw")).is_err());
 
-    // validate() maps the unreadable encrypted doc to a clean InvalidInput.
+    // validate() maps the unreadable encrypted doc to a typed PasswordProtected.
     let err = meta::validate(&enc).unwrap_err();
-    assert!(matches!(err, PdfCoreError::InvalidInput(_)), "got {err:?}");
+    assert!(
+        matches!(err, PdfCoreError::PasswordProtected(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -425,20 +428,24 @@ fn read_ops_on_encrypted_pdf_error_cleanly() {
     )
     .unwrap();
 
-    for enc in [
-        meta::encrypt(&with_meta, "user-pw", "owner-pw").unwrap(),
-        meta::encrypt(&with_meta, "", "owner-only").unwrap(),
-    ] {
-        let err = meta::page_count(&enc).unwrap_err();
-        assert!(matches!(err, PdfCoreError::InvalidInput(_)), "got {err:?}");
-        assert!(err.to_string().contains("encrypted"), "got {err}");
+    let password_protected = meta::encrypt(&with_meta, "user-pw", "owner-pw").unwrap();
+    let err = meta::page_count(&password_protected).unwrap_err();
+    assert!(matches!(err, PdfCoreError::InvalidInput(_)), "got {err:?}");
+    assert!(err.to_string().contains("encrypted"), "got {err}");
 
-        let err = meta::page_sizes(&enc).unwrap_err();
-        assert!(matches!(err, PdfCoreError::InvalidInput(_)), "got {err:?}");
+    let err = meta::page_sizes(&password_protected).unwrap_err();
+    assert!(matches!(err, PdfCoreError::InvalidInput(_)), "got {err:?}");
 
-        let err = meta::get_metadata(&enc).unwrap_err();
-        assert!(matches!(err, PdfCoreError::InvalidInput(_)), "got {err:?}");
-    }
+    let err = meta::get_metadata(&password_protected).unwrap_err();
+    assert!(matches!(err, PdfCoreError::InvalidInput(_)), "got {err:?}");
+
+    let owner_locked = meta::encrypt(&with_meta, "", "owner-only").unwrap();
+    assert_eq!(meta::page_count(&owner_locked).unwrap(), 2);
+    assert_eq!(meta::page_sizes(&owner_locked).unwrap().len(), 2);
+    assert_eq!(
+        meta::get_metadata(&owner_locked).unwrap().title.as_deref(),
+        Some("Hidden Title")
+    );
 }
 
 // ---------------------------------------------------------------------------

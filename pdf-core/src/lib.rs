@@ -17,6 +17,7 @@ pub mod fonts;
 pub mod forms;
 pub mod generate;
 pub mod meta;
+pub mod output_limit;
 #[cfg(feature = "pdfium")]
 pub mod pdfium;
 #[cfg(feature = "pdfium")]

@@ -25,6 +25,8 @@ pub struct Drawing {
     pub extent_pt: Option<(f64, f64)>,
     /// The image part relationship id (`a:blip @r:embed`), if any.
     pub blip_rel_id: Option<String>,
+    /// Relationship id carried by a chart/diagram graphic reference.
+    pub graphic_rel_id: Option<String>,
     /// True when a source crop (`a:srcRect`) is present → `ImageCrop`.
     pub cropped: bool,
     /// The `a:graphicData @uri` — distinguishes picture / chart / diagram / ole.
@@ -53,6 +55,7 @@ impl Drawing {
 
         let mut extent_pt = None;
         let mut blip_rel_id = None;
+        let mut graphic_rel_id = None;
         let mut cropped = false;
         let mut graphic_uri = None;
 
@@ -71,6 +74,13 @@ impl Drawing {
                 if super::is(d, A, "blip") {
                     blip_rel_id = attr(d, R, "embed").map(str::to_string);
                 }
+                if d.tag_name().namespace() == Some(URI_CHART) && d.tag_name().name() == "chart" {
+                    graphic_rel_id = attr(d, R, "id").map(str::to_string);
+                }
+                if d.tag_name().namespace() == Some(URI_DIAGRAM) && d.tag_name().name() == "relIds"
+                {
+                    graphic_rel_id = attr(d, R, "dm").map(str::to_string);
+                }
                 if super::is(d, A, "srcRect") {
                     cropped = true;
                 }
@@ -81,6 +91,7 @@ impl Drawing {
             kind,
             extent_pt,
             blip_rel_id,
+            graphic_rel_id,
             cropped,
             graphic_uri,
         }

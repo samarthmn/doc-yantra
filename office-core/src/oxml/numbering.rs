@@ -25,12 +25,20 @@ pub enum NumFmt {
     LowerRoman,
     /// `I, II, III, …`
     UpperRoman,
+    /// `1st, 2nd, 3rd, …`
+    Ordinal,
+    /// `one, two, three, …`
+    CardinalText,
+    /// `first, second, third, …`
+    OrdinalText,
+    /// Suppress the label.
+    None,
     /// An unsupported format; carries the raw `w:val`.
     Other(String),
 }
 
 impl NumFmt {
-    fn parse(v: &str) -> NumFmt {
+    pub(crate) fn parse(v: &str) -> NumFmt {
         match v {
             "decimal" => NumFmt::Decimal,
             "decimalZero" => NumFmt::DecimalZero,
@@ -39,6 +47,10 @@ impl NumFmt {
             "upperLetter" => NumFmt::UpperLetter,
             "lowerRoman" => NumFmt::LowerRoman,
             "upperRoman" => NumFmt::UpperRoman,
+            "ordinal" => NumFmt::Ordinal,
+            "cardinalText" => NumFmt::CardinalText,
+            "ordinalText" => NumFmt::OrdinalText,
+            "none" => NumFmt::None,
             other => NumFmt::Other(other.to_string()),
         }
     }
@@ -81,6 +93,22 @@ pub struct LevelDef {
     pub indent: Indent,
     /// The label's run properties (`lvl` `rPr`).
     pub rpr: RunProps,
+    /// Label justification within the hanging-indent area.
+    pub justification: LabelJustification,
+    /// Legal numbering forces referenced levels to decimal.
+    pub legal: bool,
+}
+
+/// Number-label justification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LabelJustification {
+    /// Left/start aligned.
+    #[default]
+    Start,
+    /// Centered.
+    Center,
+    /// Right/end aligned.
+    End,
 }
 
 impl Default for LevelDef {
@@ -92,6 +120,8 @@ impl Default for LevelDef {
             suffix: LevelSuffix::Tab,
             indent: Indent::default(),
             rpr: RunProps::default(),
+            justification: LabelJustification::Start,
+            legal: false,
         }
     }
 }
@@ -118,8 +148,7 @@ pub struct Numbering {
 impl Numbering {
     /// Parses `word/numbering.xml`. An absent part yields an empty set.
     pub fn parse(xml: &str) -> Result<Numbering> {
-        let doc = roxmltree::Document::parse(xml)
-            .map_err(|e| OfficeError::Invalid(format!("numbering.xml XML: {e}")))?;
+        let doc = super::parse_xml(xml, "numbering.xml")?;
         let root = doc.root_element();
         let mut numbering = Numbering::default();
 
@@ -184,6 +213,14 @@ fn parse_level(lvl: Node) -> LevelDef {
             "suff" => def.suffix = LevelSuffix::parse(attr(c, W, "val")),
             "pPr" => def.indent = parse_level_indent(c),
             "rPr" => def.rpr = parse_run_props(c),
+            "lvlJc" => {
+                def.justification = match attr(c, W, "val") {
+                    Some("center") => LabelJustification::Center,
+                    Some("right" | "end") => LabelJustification::End,
+                    _ => LabelJustification::Start,
+                }
+            }
+            "isLgl" => def.legal = super::toggle(c),
             _ => {}
         }
     }
@@ -242,6 +279,10 @@ pub fn format_number(fmt: &NumFmt, n: i64) -> Result<String> {
         NumFmt::UpperLetter => Ok(bijective_base26(n, true)),
         NumFmt::LowerRoman => Ok(to_roman(n, false)),
         NumFmt::UpperRoman => Ok(to_roman(n, true)),
+        NumFmt::Ordinal => Ok(ordinal_decimal(n)),
+        NumFmt::CardinalText => Ok(cardinal_text(n)),
+        NumFmt::OrdinalText => Ok(ordinal_text(n)),
+        NumFmt::None => Ok(String::new()),
         NumFmt::Bullet => Err(OfficeError::unsupported(
             UnsupportedCode::UnknownElement,
             "format_number called on bullet",
@@ -250,6 +291,145 @@ pub fn format_number(fmt: &NumFmt, n: i64) -> Result<String> {
             UnsupportedCode::UnknownElement,
             format!("numFmt:{v}"),
         )),
+    }
+}
+
+fn ordinal_decimal(n: i64) -> String {
+    let suffix = if (11..=13).contains(&(n.abs() % 100)) {
+        "th"
+    } else {
+        match n.abs() % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        }
+    };
+    format!("{n}{suffix}")
+}
+
+fn cardinal_text(n: i64) -> String {
+    if n < 0 {
+        return format!("minus {}", cardinal_text(-n));
+    }
+    if n > 999_999 {
+        return n.to_string();
+    }
+    cardinal_under_million(n)
+}
+
+fn cardinal_under_million(n: i64) -> String {
+    if n >= 1_000 {
+        let rest = n % 1_000;
+        let head = format!("{} thousand", cardinal_under_thousand(n / 1_000));
+        return if rest == 0 {
+            head
+        } else {
+            format!("{head} {}", cardinal_under_thousand(rest))
+        };
+    }
+    cardinal_under_thousand(n)
+}
+
+fn cardinal_under_thousand(n: i64) -> String {
+    const SMALL: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    if n < 20 {
+        return SMALL[n as usize].to_string();
+    }
+    if n < 100 {
+        let rest = n % 10;
+        return if rest == 0 {
+            TENS[(n / 10) as usize].to_string()
+        } else {
+            format!("{}-{}", TENS[(n / 10) as usize], SMALL[rest as usize])
+        };
+    }
+    let rest = n % 100;
+    let head = format!("{} hundred", SMALL[(n / 100) as usize]);
+    if rest == 0 {
+        head
+    } else {
+        format!("{head} {}", cardinal_under_thousand(rest))
+    }
+}
+
+fn ordinal_text(n: i64) -> String {
+    const DIRECT: [&str; 20] = [
+        "zeroth",
+        "first",
+        "second",
+        "third",
+        "fourth",
+        "fifth",
+        "sixth",
+        "seventh",
+        "eighth",
+        "ninth",
+        "tenth",
+        "eleventh",
+        "twelfth",
+        "thirteenth",
+        "fourteenth",
+        "fifteenth",
+        "sixteenth",
+        "seventeenth",
+        "eighteenth",
+        "nineteenth",
+    ];
+    if !(0..=999_999).contains(&n) {
+        return ordinal_decimal(n);
+    }
+    if n < 20 {
+        return DIRECT[n as usize].to_string();
+    }
+    let cardinal = cardinal_text(n);
+    let (stem, suffix) = cardinal
+        .rsplit_once([' ', '-'])
+        .unwrap_or(("", cardinal.as_str()));
+    let last = match suffix {
+        "one" => "first".to_string(),
+        "two" => "second".to_string(),
+        "three" => "third".to_string(),
+        "five" => "fifth".to_string(),
+        "eight" => "eighth".to_string(),
+        "nine" => "ninth".to_string(),
+        "twelve" => "twelfth".to_string(),
+        word if word.ends_with('y') => format!("{}ieth", &word[..word.len() - 1]),
+        word => format!("{word}th"),
+    };
+    if stem.is_empty() {
+        last
+    } else {
+        let sep = if cardinal.as_bytes().get(stem.len()) == Some(&b'-') {
+            '-'
+        } else {
+            ' '
+        };
+        format!("{stem}{sep}{last}")
     }
 }
 
@@ -318,5 +498,23 @@ mod tests {
         assert_eq!(format_number(&NumFmt::UpperRoman, 2024).unwrap(), "MMXXIV");
         assert!(format_number(&NumFmt::Bullet, 1).is_err());
         assert!(format_number(&NumFmt::Other("aiueoFullWidth".into()), 1).is_err());
+    }
+
+    #[test]
+    fn wave3_number_formats_render_instead_of_failing_closed() {
+        assert_eq!(format_number(&NumFmt::parse("ordinal"), 1).unwrap(), "1st");
+        assert_eq!(
+            format_number(&NumFmt::parse("ordinal"), 12).unwrap(),
+            "12th"
+        );
+        assert_eq!(
+            format_number(&NumFmt::parse("cardinalText"), 42).unwrap(),
+            "forty-two"
+        );
+        assert_eq!(
+            format_number(&NumFmt::parse("ordinalText"), 21).unwrap(),
+            "twenty-first"
+        );
+        assert_eq!(format_number(&NumFmt::parse("none"), 9).unwrap(), "");
     }
 }

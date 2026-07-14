@@ -30,8 +30,8 @@ use pdfium_render::prelude::*;
 
 use crate::error::{PdfCoreError, Result};
 pub use crate::redact_types::{
-    BoxPts, PageRotation, RedactArea, RedactOutput, RedactionRect, derotate_box, exceeds_requested,
-    resolve_rect,
+    BoxPts, PageRotation, RedactArea, RedactOutput, RedactionObjectKind, RedactionRect,
+    RedactionWarning, RedactionWarningCode, derotate_box, exceeds_requested, resolve_rect,
 };
 
 /// Returns `true` if any text object at any nesting depth inside `form`
@@ -95,13 +95,13 @@ fn redact_page(
     page_index: u32,
     page_w: f32,
     page_h: f32,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<RedactionWarning>,
 ) -> Result<usize> {
     // Stage all edits, then regenerate the content stream exactly once.
     page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
 
     // Bounds of everything removed, for union coverage + excess warnings.
-    let mut removed: Vec<(BoxPts, &'static str)> = Vec::new();
+    let mut removed: Vec<(BoxPts, RedactionObjectKind)> = Vec::new();
 
     // Pass 1: delete annotations intersecting any redaction box. Annotations
     // (sticky notes, FreeText callouts, review comments) hold text in
@@ -137,7 +137,7 @@ fn redact_page(
                      area that could not be deleted; redaction cannot guarantee removal"
                 ))
             })?;
-        removed.push((b, "annotation"));
+        removed.push((b, RedactionObjectKind::Annotation));
     }
 
     // Pass 2: collect indexes of page objects intersecting any redaction box —
@@ -146,7 +146,7 @@ fn redact_page(
     // text in Form XObjects). pdfium-render 0.9.2 cannot remove a single
     // child from inside a form, so the whole form object is removed; union
     // coverage + warnings below account for the excess.
-    let mut doomed: Vec<(PdfPageObjectIndex, BoxPts, &'static str)> = Vec::new();
+    let mut doomed: Vec<(PdfPageObjectIndex, BoxPts, RedactionObjectKind)> = Vec::new();
     let mut text_count = 0usize;
     let object_count = page.objects().len();
     for index in 0..object_count {
@@ -173,7 +173,7 @@ fn redact_page(
                             bottom,
                             top,
                         },
-                        "text object",
+                        RedactionObjectKind::Text,
                     ));
                 }
             }
@@ -202,7 +202,7 @@ fn redact_page(
                             bottom: bounds.bottom().value,
                             top: bounds.top().value,
                         },
-                        "Form XObject",
+                        RedactionObjectKind::FormXObject,
                     ));
                 }
             }
@@ -218,8 +218,9 @@ fn redact_page(
             .remove_object_at_index(index)
             .map_err(|_| {
                 PdfCoreError::Unsupported(format!(
-                    "page {page_index} contains a {kind} intersecting a redaction area \
-                     that could not be removed; redaction cannot guarantee removal"
+                    "page {page_index} contains a {} intersecting a redaction area \
+                     that could not be removed; redaction cannot guarantee removal",
+                    kind.message_label()
                 ))
             })?;
         // pdfium-render destroys the returned (now caller-owned) object on
@@ -247,12 +248,21 @@ fn redact_page(
             draw_black_box(page, bounds)?;
         }
         if exceeds_requested(bounds, boxes, page_w, page_h) {
-            warnings.push(format!(
-                "page {page_index}: redaction removed a whole {kind} spanning \
-                 ({:.1}, {:.1})-({:.1}, {:.1}) pt, beyond the requested area; \
-                 the full bounds were covered with a black box",
-                bounds.left, bounds.bottom, bounds.right, bounds.top,
-            ));
+            warnings.push(RedactionWarning {
+                code: RedactionWarningCode::OverRedaction,
+                page: page_index,
+                kind: *kind,
+                message: format!(
+                    "page {page_index}: redaction removed a whole {} spanning \
+                     ({:.1}, {:.1})-({:.1}, {:.1}) pt, beyond the requested area; \
+                     the full bounds were covered with a black box",
+                    kind.message_label(),
+                    bounds.left,
+                    bounds.bottom,
+                    bounds.right,
+                    bounds.top,
+                ),
+            });
         }
     }
 
@@ -262,7 +272,7 @@ fn redact_page(
 
     let removed_text = doomed
         .iter()
-        .filter(|(_, _, kind)| *kind == "text object")
+        .filter(|(_, _, kind)| *kind == RedactionObjectKind::Text)
         .count();
     Ok(text_count - removed_text)
 }
@@ -293,7 +303,7 @@ pub fn redact(pdf: &[u8], redactions: &BTreeMap<u32, Vec<RedactionRect>>) -> Res
     let pdfium = crate::pdfium::lock()?;
     let document = pdfium.load_pdf_from_byte_slice(pdf, None)?;
     let page_count = document.pages().len().max(0) as u32;
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<RedactionWarning> = Vec::new();
     // (page index, top-level text objects that must survive in the output).
     let mut expected_text: Vec<(u32, usize)> = Vec::new();
 
@@ -359,6 +369,14 @@ pub fn redact(pdf: &[u8], redactions: &BTreeMap<u32, Vec<RedactionRect>>) -> Res
         }
     }
 
+    warnings.sort_by(|left, right| {
+        (left.page, left.code, left.kind, left.message.as_str()).cmp(&(
+            right.page,
+            right.code,
+            right.kind,
+            right.message.as_str(),
+        ))
+    });
     Ok(RedactOutput {
         pdf: bytes,
         page_count,

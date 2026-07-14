@@ -2,13 +2,15 @@
 //! image-per-page PDFs. Uses standard-14 fonts for WinAnsi and embedded CID
 //! fonts for supported Unicode runs; replaces the Chromium html-to-pdf route.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
+use pdf_writer::types::{ActionType, AnnotationType};
+use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::embed_font::{
-    EmbeddedFont, FontChoice, FontSession, PdfFontRefs, is_winansi, resource_name,
+    EmbeddedFont, EncodedGlyph, FontChoice, FontSession, PdfFontRefs, encode_winansi_bytes,
+    is_winansi, pdfium_actual_text, resource_name, winansi_byte,
 };
 use crate::error::{PdfCoreError, Result};
 use crate::fonts::StandardFont;
@@ -50,7 +52,7 @@ impl Default for DocOptions {
         DocOptions {
             page_size: PageSize::Letter,
             margin_pt: 54.0,
-            base_font_size_pt: 10.0,
+            base_font_size_pt: 10.5,
             title: None,
         }
     }
@@ -59,6 +61,20 @@ impl Default for DocOptions {
 /// Sane clamp range for the base font size (points).
 const MIN_BASE_FONT_PT: f64 = 4.0;
 const MAX_BASE_FONT_PT: f64 = 72.0;
+const LINK_RGB: [f32; 3] = [29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0];
+/// Wide rows otherwise allocate and measure an attacker-controlled vector.
+const MAX_CSV_COLUMNS: usize = 10_000;
+/// Two million cells permits large exports while bounding total table work.
+const MAX_CSV_CELLS: usize = 2_000_000;
+/// pulldown-cmark is iterative, but layout indentation and state remain bounded.
+const MAX_MARKDOWN_NESTING: usize = 64;
+const DEFAULT_MARGIN_PT: f64 = 54.0;
+const MARKDOWN_CONTENT_INSET_PT: f64 = 51.75;
+const MARKDOWN_PAGE_MARGIN_PT: f64 = 27.75;
+const CSV_CONTENT_INSET_PT: f64 = 30.0;
+const CSV_PAGE_MARGIN_PT: f64 = 18.0;
+const CSV_DEFAULT_FONT_PT: f64 = 7.5;
+const MARKDOWN_LINE_HEIGHT_FACTOR: f64 = 11.0 / 7.0;
 
 /// Validates and clamps [`DocOptions`] into ranges every generator can
 /// handle: font size [`MIN_BASE_FONT_PT`]..=[`MAX_BASE_FONT_PT`] and margin
@@ -90,10 +106,7 @@ fn effective_opts(opts: &DocOptions) -> Result<DocOptions> {
 // WinAnsi-safe text sanitization
 // ---------------------------------------------------------------------------
 
-/// Maps text to a printable-ASCII string safe for the standard-14 fonts.
-/// Common typography (curly quotes, dashes, ellipsis) is folded to ASCII
-/// equivalents; anything else non-ASCII becomes '?'. Newlines/tabs become
-/// spaces (single-line prose context).
+/// Normalizes whitespace and controls while preserving every WinAnsi scalar.
 fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -130,6 +143,15 @@ fn sanitize_run(text: &str) -> String {
     out
 }
 
+/// Table cells retain explicit line breaks (CSV quoted fields and Markdown
+/// hard breaks) while normalizing every other control character.
+fn sanitize_table_cell(text: &str) -> String {
+    text.split('\n')
+        .map(sanitize_run)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn sanitize_code_run(line: &str) -> String {
     if is_winansi(line) {
         return sanitize_code_line(line);
@@ -156,17 +178,11 @@ fn sanitize_unicode_char_into(c: char, out: &mut String, ws: char) {
 
 fn sanitize_char_into(c: char, out: &mut String, ws: char) {
     match c {
-        ' '..='~' => out.push(c),
         '\n' | '\r' | '\t' => out.push(ws),
-        '\u{2018}' | '\u{2019}' | '\u{02BC}' => out.push('\''),
-        '\u{201C}' | '\u{201D}' | '\u{201E}' => out.push('"'),
-        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2212}' => out.push('-'),
-        '\u{2014}' | '\u{2015}' => out.push_str("--"),
-        '\u{2026}' => out.push_str("..."),
         '\u{00A0}' | '\u{2009}' | '\u{200A}' | '\u{2002}' | '\u{2003}' => out.push(' '),
-        '\u{2022}' | '\u{00B7}' | '\u{2027}' => out.push('-'),
         '\u{200B}' | '\u{FEFF}' => {}
         c if c.is_control() => {}
+        c if winansi_byte(c).is_some() => out.push(c),
         _ => out.push('?'),
     }
 }
@@ -221,6 +237,35 @@ struct PageData {
     fonts_used: [bool; FONT_COUNT],
     embedded_fonts_used: BTreeSet<usize>,
     image: Option<RgbSamples>,
+    links: Vec<LinkAnnotation>,
+}
+
+#[derive(Debug, Clone)]
+struct LinkAnnotation {
+    rect: [f32; 4],
+    uri: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TextColor {
+    #[default]
+    Black,
+    Link,
+    Muted,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextDrawContext {
+    color: TextColor,
+    external_ltr_context: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct RunStyle {
+    link: Option<String>,
+    strikethrough: bool,
+    superscript: bool,
+    color: TextColor,
 }
 
 /// A styled inline run: text set in one font (size comes from the block).
@@ -228,6 +273,7 @@ struct PageData {
 struct Run {
     font: StandardFont,
     text: String,
+    style: RunStyle,
 }
 
 /// A logical run after its standard-vs-embedded choice has been frozen.
@@ -236,6 +282,13 @@ struct ResolvedRun {
     font: StandardFont,
     choice: FontChoice,
     text: String,
+    style: RunStyle,
+}
+
+#[derive(Debug, Clone)]
+enum ListMarker {
+    Text(String),
+    Task(bool),
 }
 
 /// Minimal top-down layout engine shared by the csv/markdown/text generators.
@@ -246,10 +299,18 @@ struct LayoutEngine {
     content: Content,
     fonts_used: [bool; FONT_COUNT],
     embedded_fonts_used: BTreeSet<usize>,
+    links: Vec<LinkAnnotation>,
     font_session: FontSession,
     page_w: f64,
     page_h: f64,
+    /// Horizontal content inset. Route-compatible defaults may include the
+    /// legacy HTML wrapper's body margin as well as the physical page margin.
     margin: f64,
+    /// Physical bottom page margin used by pagination.
+    bottom_margin: f64,
+    /// Physical top margin on pages after the first. Chromium fragments the
+    /// body box across pages, so its body margin applies only to page one.
+    continuation_top_margin: f64,
     /// Baseline cursor. Starts at `page_h - margin`, decreases downward.
     y: f64,
 }
@@ -263,12 +324,37 @@ impl LayoutEngine {
             content: Content::new(),
             fonts_used: [false; FONT_COUNT],
             embedded_fonts_used: BTreeSet::new(),
+            links: Vec::new(),
             font_session: FontSession::new()?,
             page_w,
             page_h,
             margin: opts.margin_pt,
+            bottom_margin: opts.margin_pt,
+            continuation_top_margin: opts.margin_pt,
             y: page_h - opts.margin_pt,
         })
+    }
+
+    fn new_markdown(opts: &DocOptions) -> Result<Self> {
+        let mut engine = Self::new(opts)?;
+        if (opts.margin_pt - DEFAULT_MARGIN_PT).abs() < f64::EPSILON {
+            engine.margin = MARKDOWN_CONTENT_INSET_PT;
+            engine.bottom_margin = MARKDOWN_PAGE_MARGIN_PT;
+            engine.continuation_top_margin = MARKDOWN_PAGE_MARGIN_PT;
+            engine.y = engine.page_h - MARKDOWN_CONTENT_INSET_PT;
+        }
+        Ok(engine)
+    }
+
+    fn new_csv(opts: &DocOptions) -> Result<Self> {
+        let mut engine = Self::new(opts)?;
+        if (opts.margin_pt - DEFAULT_MARGIN_PT).abs() < f64::EPSILON {
+            engine.margin = CSV_CONTENT_INSET_PT;
+            engine.bottom_margin = CSV_PAGE_MARGIN_PT;
+            engine.continuation_top_margin = CSV_PAGE_MARGIN_PT;
+            engine.y = engine.page_h - CSV_CONTENT_INSET_PT;
+        }
+        Ok(engine)
     }
 
     fn usable_width(&self) -> f64 {
@@ -284,18 +370,20 @@ impl LayoutEngine {
         let content = std::mem::replace(&mut self.content, Content::new());
         let fonts_used = std::mem::replace(&mut self.fonts_used, [false; FONT_COUNT]);
         let embedded_fonts_used = std::mem::take(&mut self.embedded_fonts_used);
+        let links = std::mem::take(&mut self.links);
         self.pages.push(PageData {
             content: content.finish().into_vec(),
             fonts_used,
             embedded_fonts_used,
             image: None,
+            links,
         });
-        self.y = self.page_h - self.margin;
+        self.y = self.page_h - self.continuation_top_margin;
     }
 
     /// Starts a new page if `needed` points of vertical room are not left.
     fn ensure_room(&mut self, needed: f64) {
-        if self.y - needed < self.margin - 0.01 {
+        if self.y - needed < self.bottom_margin - 0.01 {
             self.break_page();
         }
     }
@@ -310,13 +398,44 @@ impl LayoutEngine {
         font: StandardFont,
         choice: &FontChoice,
         size: f64,
-        x: f64,
-        y: f64,
+        position: (f64, f64),
         text: &str,
+        color: TextColor,
+    ) -> Result<()> {
+        self.draw_text_line_with_context(
+            font,
+            choice,
+            size,
+            position,
+            text,
+            TextDrawContext {
+                color,
+                external_ltr_context: false,
+            },
+        )
+    }
+
+    fn draw_text_line_with_context(
+        &mut self,
+        font: StandardFont,
+        choice: &FontChoice,
+        size: f64,
+        position: (f64, f64),
+        text: &str,
+        context: TextDrawContext,
     ) -> Result<()> {
         if text.is_empty() {
             return Ok(());
         }
+        let (x, y) = position;
+        self.content.save_state();
+        match context.color {
+            TextColor::Black => self.content.set_fill_gray(0.0),
+            TextColor::Link => self
+                .content
+                .set_fill_rgb(LINK_RGB[0], LINK_RGB[1], LINK_RGB[2]),
+            TextColor::Muted => self.content.set_fill_gray(0.45),
+        };
         match choice {
             FontChoice::Standard => {
                 self.fonts_used[font_index(font)] = true;
@@ -324,21 +443,74 @@ impl LayoutEngine {
                 self.content
                     .set_font(Name(FONT_RES_NAMES[font_index(font)]), size as f32);
                 self.content.next_line(x as f32, y as f32);
-                self.content.show(Str(text.as_bytes()));
+                let encoded = encode_winansi_bytes(text);
+                self.content.show(Str(&encoded));
                 self.content.end_text();
             }
-            FontChoice::Embedded(face) => {
-                let encoded = self.font_session.encode(face, text)?;
-                self.embedded_fonts_used.insert(encoded.resource_index);
-                let name = resource_name(encoded.resource_index);
+            FontChoice::Embedded(choice) => {
+                let encoded = self.font_session.encode(choice, text)?;
+                let mut cursor = x;
+                // PDFium currently drops UTF-16 surrogate pairs from
+                // `/ActualText`. BMP complex-script runs still need a logical
+                // replacement because every glyph has its own positioning
+                // matrix; astral runs instead extract through ToUnicode.
+                let actual_text = (!context.external_ltr_context)
+                    .then(|| encoded.directional_actual_text())
+                    .flatten()
+                    .or_else(|| {
+                        text.chars()
+                            .all(|ch| u32::from(ch) <= 0xFFFF)
+                            .then(|| pdfium_actual_text(text))
+                    });
+                if let Some(actual_text) = &actual_text {
+                    let mut marked = self
+                        .content
+                        .begin_marked_content_with_properties(Name(b"Span"));
+                    {
+                        let mut properties = marked.properties();
+                        properties.actual_text(TextStr(actual_text));
+                    }
+                    marked.finish();
+                }
+                // Keep every positioned glyph in one PDF text object. Individual
+                // matrices preserve HarfBuzz offsets, while a single BT/ET span
+                // lets extractors reconstruct one line from the per-CID ToUnicode
+                // mappings (including non-BMP surrogate pairs).
                 self.content.begin_text();
-                self.content.set_font(Name(name.as_bytes()), size as f32);
-                self.content.next_line(x as f32, y as f32);
-                self.content.show(Str(&encoded.bytes));
+                self.draw_positioned_glyphs(&encoded.glyphs, size, y, &mut cursor);
                 self.content.end_text();
+                if actual_text.is_some() {
+                    self.content.end_marked_content();
+                }
             }
         }
+        self.content.restore_state();
         Ok(())
+    }
+
+    fn draw_positioned_glyphs(
+        &mut self,
+        glyphs: &[EncodedGlyph],
+        size: f64,
+        y: f64,
+        cursor: &mut f64,
+    ) {
+        for glyph in glyphs {
+            self.embedded_fonts_used.insert(glyph.resource_index);
+            let name = resource_name(glyph.resource_index);
+            let scale = size / glyph.units_per_em;
+            self.content.set_font(Name(name.as_bytes()), size as f32);
+            self.content.set_text_matrix([
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                (*cursor + f64::from(glyph.x_offset) * scale) as f32,
+                (y + f64::from(glyph.y_offset) * scale) as f32,
+            ]);
+            self.content.show(Str(&glyph.cid.to_be_bytes()));
+            *cursor += f64::from(glyph.x_advance) * scale;
+        }
     }
 
     /// Draws a horizontal rule from `x1` to `x2` at height `y`.
@@ -360,14 +532,79 @@ impl LayoutEngine {
         self.content.restore_state();
     }
 
+    fn draw_rect_stroke(&mut self, x: f64, y: f64, w: f64, h: f64, line_width: f64) {
+        self.content.save_state();
+        self.content.set_line_width(line_width as f32);
+        self.content.rect(x as f32, y as f32, w as f32, h as f32);
+        self.content.stroke();
+        self.content.restore_state();
+    }
+
     /// Draws a sequence of styled runs on one baseline, advancing x per run.
     fn draw_runs_line(&mut self, runs: &[ResolvedRun], size: f64, x: f64, y: f64) -> Result<()> {
         let mut cx = x;
         for run in runs {
-            self.draw_text_line(run.font, &run.choice, size, cx, y, &run.text)?;
-            cx += run.choice.text_width_pt(&run.text, run.font, size)?;
+            let run_size = if run.style.superscript {
+                size * 0.7
+            } else {
+                size
+            };
+            let run_y = if run.style.superscript {
+                y + size * 0.38
+            } else {
+                y
+            };
+            let width = run.choice.text_width_pt(&run.text, run.font, run_size)?;
+            self.draw_text_line(
+                run.font,
+                &run.choice,
+                run_size,
+                (cx, run_y),
+                &run.text,
+                run.style.color,
+            )?;
+            if run.style.strikethrough {
+                self.draw_rule(cx, cx + width, run_y + run_size * 0.3, 0.5);
+            }
+            if let Some(uri) = &run.style.link
+                && width > 0.0
+            {
+                self.links.push(LinkAnnotation {
+                    rect: [
+                        cx as f32,
+                        (run_y - run_size * 0.22).max(0.0) as f32,
+                        (cx + width).min(self.page_w) as f32,
+                        (run_y + run_size * 0.88).min(self.page_h) as f32,
+                    ],
+                    uri: uri.clone(),
+                });
+            }
+            cx += width;
         }
         Ok(())
+    }
+
+    fn draw_task_marker(&mut self, checked: bool, indent: f64, baseline: f64, size: f64) {
+        let side = (size * 0.7).max(4.0);
+        let x = (self.left() + indent - side - 4.0).max(self.left());
+        let y = baseline + (size - side) * 0.2;
+        self.content.save_state();
+        self.content.set_line_width(0.7);
+        self.content
+            .rect(x as f32, y as f32, side as f32, side as f32);
+        self.content.stroke();
+        if checked {
+            let inset = side * 0.2;
+            self.content.move_to((x + inset) as f32, (y + inset) as f32);
+            self.content
+                .line_to((x + side - inset) as f32, (y + side - inset) as f32);
+            self.content
+                .move_to((x + inset) as f32, (y + side - inset) as f32);
+            self.content
+                .line_to((x + side - inset) as f32, (y + inset) as f32);
+            self.content.stroke();
+        }
+        self.content.restore_state();
     }
 
     /// Word-wraps styled runs into the usable width (minus `indent`) and emits
@@ -379,7 +616,7 @@ impl LayoutEngine {
         size: f64,
         indent: f64,
         leading_factor: f64,
-        marker: Option<(String, StandardFont)>,
+        marker: Option<ListMarker>,
     ) -> Result<()> {
         let max_w = (self.usable_width() - indent).max(size);
         let mut lines = wrap_runs(&self.font_session, runs, size, max_w)?;
@@ -390,18 +627,38 @@ impl LayoutEngine {
             lines.push(Vec::new());
         }
         let lead = size * leading_factor;
+        let block_height = lead * lines.len() as f64;
+        let fresh_page_height = self.page_h - self.continuation_top_margin - self.bottom_margin;
+        if block_height <= fresh_page_height + 0.01
+            && self.y - block_height < self.bottom_margin - 0.01
+        {
+            self.break_page();
+        }
         for (i, line) in lines.iter().enumerate() {
             self.ensure_room(lead);
             self.advance(lead);
             let baseline = self.y;
             if i == 0
-                && let Some((mtext, mfont)) = &marker
+                && let Some(marker) = &marker
             {
-                let mw = mfont.text_width_pt(mtext, size);
-                let mx = (self.left() + indent - mw - 4.0).max(self.left());
-                let mtext = mtext.clone();
-                let mfont = *mfont;
-                self.draw_text_line(mfont, &FontChoice::Standard, size, mx, baseline, &mtext)?;
+                match marker {
+                    ListMarker::Text(mtext) => {
+                        let font = StandardFont::Helvetica;
+                        let mw = font.text_width_pt(mtext, size);
+                        let mx = (self.left() + indent - mw - 4.0).max(self.left());
+                        self.draw_text_line(
+                            font,
+                            &FontChoice::Standard,
+                            size,
+                            (mx, baseline),
+                            mtext,
+                            TextColor::Black,
+                        )?;
+                    }
+                    ListMarker::Task(checked) => {
+                        self.draw_task_marker(*checked, indent, baseline, size);
+                    }
+                }
             }
             self.draw_runs_line(line, size, self.left() + indent, baseline)?;
         }
@@ -417,6 +674,7 @@ impl LayoutEngine {
                 let runs = [Run {
                     font: StandardFont::HelveticaBold,
                     text,
+                    style: RunStyle::default(),
                 }];
                 self.emit_paragraph(&runs, size, 0.0, 1.25, None)?;
                 self.advance(opts.base_font_size_pt * 0.9);
@@ -448,6 +706,7 @@ fn wrap_runs(
                 font: run.font,
                 choice: session.resolve(&run.text)?,
                 text: run.text.clone(),
+                style: run.style.clone(),
             })
         })
         .collect::<Result<_>>()?;
@@ -460,21 +719,45 @@ fn wrap_resolved_runs(
     max_w: f64,
 ) -> Result<Vec<Vec<ResolvedRun>>> {
     // Tokenize into (font, token) where a token is a maximal run of spaces or
-    // of non-space characters within a single styled run.
-    let mut tokens: Vec<(StandardFont, FontChoice, String)> = Vec::new();
+    // of non-space characters within a single styled run. Newlines are forced
+    // line boundaries used by Markdown hard breaks and multi-line table cells.
+    let mut tokens: Vec<(StandardFont, FontChoice, RunStyle, String)> = Vec::new();
     for run in runs {
         let mut cur = String::new();
         let mut cur_is_space: Option<bool> = None;
         for c in run.text.chars() {
+            if c == '\n' {
+                if !cur.is_empty() {
+                    tokens.push((
+                        run.font,
+                        run.choice.clone(),
+                        run.style.clone(),
+                        std::mem::take(&mut cur),
+                    ));
+                }
+                cur_is_space = None;
+                tokens.push((
+                    run.font,
+                    run.choice.clone(),
+                    run.style.clone(),
+                    "\n".to_string(),
+                ));
+                continue;
+            }
             let is_space = c == ' ';
             if cur_is_space != Some(is_space) && !cur.is_empty() {
-                tokens.push((run.font, run.choice.clone(), std::mem::take(&mut cur)));
+                tokens.push((
+                    run.font,
+                    run.choice.clone(),
+                    run.style.clone(),
+                    std::mem::take(&mut cur),
+                ));
             }
             cur_is_space = Some(is_space);
             cur.push(c);
         }
         if !cur.is_empty() {
-            tokens.push((run.font, run.choice.clone(), cur));
+            tokens.push((run.font, run.choice.clone(), run.style.clone(), cur));
         }
     }
 
@@ -500,14 +783,23 @@ fn wrap_resolved_runs(
         *cur_w = 0.0;
     };
 
-    for (font, choice, tok) in tokens {
+    for (font, choice, style, tok) in tokens {
+        if tok == "\n" {
+            let was_empty = cur.is_empty();
+            flush(&mut cur, &mut cur_w, &mut lines);
+            if was_empty {
+                lines.push(Vec::new());
+            }
+            continue;
+        }
         let is_space = tok.starts_with(' ');
-        let w = choice.text_width_pt(&tok, font, size)?;
+        let run_size = if style.superscript { size * 0.7 } else { size };
+        let w = choice.text_width_pt(&tok, font, run_size)?;
         if is_space {
             // Never start a line with spaces; allow trailing spaces to
             // overflow (they get trimmed on flush).
             if !cur.is_empty() {
-                push_resolved_run(&mut cur, font, choice, &tok);
+                push_resolved_run(&mut cur, font, choice, style, &tok);
                 cur_w += w;
             }
             continue;
@@ -520,12 +812,13 @@ fn wrap_resolved_runs(
             let mut piece = String::new();
             let mut piece_w = 0.0;
             for c in tok.chars() {
-                let cw = choice.char_width_pt(c, font, size)?;
+                let cw = choice.char_width_pt(c, font, run_size)?;
                 if piece_w + cw > max_w + 0.01 && !piece.is_empty() {
                     lines.push(vec![ResolvedRun {
                         font,
                         choice: choice.clone(),
                         text: std::mem::take(&mut piece),
+                        style: style.clone(),
                     }]);
                     piece_w = 0.0;
                 }
@@ -533,12 +826,12 @@ fn wrap_resolved_runs(
                 piece_w += cw;
             }
             if !piece.is_empty() {
-                push_resolved_run(&mut cur, font, choice, &piece);
+                push_resolved_run(&mut cur, font, choice, style, &piece);
                 cur_w += piece_w;
             }
             continue;
         }
-        push_resolved_run(&mut cur, font, choice, &tok);
+        push_resolved_run(&mut cur, font, choice, style, &tok);
         cur_w += w;
     }
     flush(&mut cur, &mut cur_w, &mut lines);
@@ -549,11 +842,13 @@ fn push_resolved_run(
     line: &mut Vec<ResolvedRun>,
     font: StandardFont,
     choice: FontChoice,
+    style: RunStyle,
     text: &str,
 ) {
     if let Some(last) = line.last_mut()
         && last.font == font
         && last.choice == choice
+        && last.style == style
     {
         last.text.push_str(text);
         return;
@@ -562,13 +857,15 @@ fn push_resolved_run(
         font,
         choice,
         text: text.to_string(),
+        style,
     });
 }
 
 /// Appends text to the last run when the font matches, else pushes a new run.
-fn push_run(line: &mut Vec<Run>, font: StandardFont, text: &str) {
+fn push_run(line: &mut Vec<Run>, font: StandardFont, style: &RunStyle, text: &str) {
     if let Some(last) = line.last_mut()
         && last.font == font
+        && last.style == *style
     {
         last.text.push_str(text);
         return;
@@ -576,6 +873,7 @@ fn push_run(line: &mut Vec<Run>, font: StandardFont, text: &str) {
     line.push(Run {
         font,
         text: text.to_string(),
+        style: style.clone(),
     });
 }
 
@@ -628,6 +926,7 @@ fn assemble(
             descriptor: alloc(),
             file: alloc(),
             to_unicode: alloc(),
+            mapping: alloc(),
         })
         .collect();
 
@@ -636,6 +935,10 @@ fn assemble(
     let image_ids: Vec<Option<Ref>> = pages
         .iter()
         .map(|p| p.image.as_ref().map(|_| alloc()))
+        .collect();
+    let annotation_ids: Vec<Vec<Ref>> = pages
+        .iter()
+        .map(|page| page.links.iter().map(|_| alloc()).collect())
         .collect();
 
     pdf.catalog(catalog_id).pages(tree_id);
@@ -646,7 +949,8 @@ fn assemble(
     for i in 0..FONT_COUNT {
         if let Some(fid) = font_ids[i] {
             pdf.type1_font(fid)
-                .base_font(Name(ALL_FONTS[i].base_name().as_bytes()));
+                .base_font(Name(ALL_FONTS[i].base_name().as_bytes()))
+                .encoding_predefined(Name(b"WinAnsiEncoding"));
         }
     }
     for (font, refs) in embedded_fonts.iter().zip(&embedded_font_refs) {
@@ -659,6 +963,9 @@ fn assemble(
         p.media_box(media_box);
         p.parent(tree_id);
         p.contents(content_ids[i]);
+        if !annotation_ids[i].is_empty() {
+            p.annotations(annotation_ids[i].iter().copied());
+        }
         {
             let mut resources = p.resources();
             if page.fonts_used.iter().any(|&u| u) || !page.embedded_fonts_used.is_empty() {
@@ -681,6 +988,23 @@ fn assemble(
             }
         }
         p.finish();
+
+        for (link, annotation_id) in page.links.iter().zip(&annotation_ids[i]) {
+            let mut annotation = pdf.annotation(*annotation_id);
+            annotation.subtype(AnnotationType::Link);
+            annotation.rect(Rect::new(
+                link.rect[0],
+                link.rect[1],
+                link.rect[2],
+                link.rect[3],
+            ));
+            annotation.color_rgb(LINK_RGB[0], LINK_RGB[1], LINK_RGB[2]);
+            annotation
+                .action()
+                .action_type(ActionType::Uri)
+                .uri(Str(link.uri.as_bytes()));
+            annotation.finish();
+        }
 
         pdf.stream(content_ids[i], &page.content);
 
@@ -719,6 +1043,7 @@ pub fn text_to_pdf(text: &str, opts: &DocOptions) -> Result<Vec<u8>> {
         let runs = [Run {
             font: StandardFont::Helvetica,
             text: cleaned,
+            style: RunStyle::default(),
         }];
         eng.emit_paragraph(&runs, size, 0.0, 1.3, None)?;
         eng.advance(size * 0.65);
@@ -751,9 +1076,24 @@ pub fn csv_to_pdf(csv_bytes: &[u8], opts: &DocOptions) -> Result<Vec<u8>> {
         .has_headers(false)
         .from_reader(csv_bytes);
     let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut cells = 0usize;
     for record in reader.records() {
         let record = record?;
-        rows.push(record.iter().map(sanitize_run).collect());
+        if record.len() > MAX_CSV_COLUMNS {
+            return Err(PdfCoreError::ResourceLimit(format!(
+                "CSV column count {} exceeds limit {MAX_CSV_COLUMNS}",
+                record.len()
+            )));
+        }
+        cells = cells.checked_add(record.len()).ok_or_else(|| {
+            PdfCoreError::ResourceLimit("CSV cell count exceeds limit".to_string())
+        })?;
+        if cells > MAX_CSV_CELLS {
+            return Err(PdfCoreError::ResourceLimit(format!(
+                "CSV cell count {cells} exceeds limit {MAX_CSV_CELLS}"
+            )));
+        }
+        rows.push(record.iter().map(sanitize_table_cell).collect());
     }
     if rows.is_empty() {
         return Err(PdfCoreError::InvalidInput(
@@ -761,9 +1101,16 @@ pub fn csv_to_pdf(csv_bytes: &[u8], opts: &DocOptions) -> Result<Vec<u8>> {
         ));
     }
 
-    let mut eng = LayoutEngine::new(&opts)?;
+    let mut eng = LayoutEngine::new_csv(&opts)?;
     eng.emit_title(&opts)?;
-    render_table(&mut eng, &rows, opts.base_font_size_pt)?;
+    let font_size = if (opts.base_font_size_pt - DocOptions::default().base_font_size_pt).abs()
+        < f64::EPSILON
+    {
+        CSV_DEFAULT_FONT_PT
+    } else {
+        opts.base_font_size_pt
+    };
+    render_table(&mut eng, &rows, font_size, TableStyle::Csv)?;
 
     eng.finish()
 }
@@ -772,22 +1119,52 @@ pub fn csv_to_pdf(csv_bytes: &[u8], opts: &DocOptions) -> Result<Vec<u8>> {
 // Shared table layout (CSV + GFM tables)
 // ---------------------------------------------------------------------------
 
-/// A cell wraps to at most this many lines; overflow ellipsizes the last one.
-const MAX_CELL_LINES: usize = 8;
-
 /// Tables never auto-shrink below this font size.
 const TABLE_MIN_FONT_PT: f64 = 4.0;
 
+#[derive(Clone, Copy)]
+enum TableStyle {
+    Csv,
+    Markdown,
+}
+
+impl TableStyle {
+    fn pad_factor(self) -> f64 {
+        match self {
+            Self::Csv => 0.7,
+            Self::Markdown => 0.5,
+        }
+    }
+
+    fn line_height_factor(self) -> f64 {
+        match self {
+            Self::Csv => 1.4,
+            Self::Markdown => 1.2,
+        }
+    }
+
+    fn row_extra_factor(self) -> f64 {
+        match self {
+            Self::Csv => 0.6,
+            Self::Markdown => 0.5,
+        }
+    }
+}
+
 /// Per-column minimum width at `size`: cell padding plus roughly "xx..." in
 /// the widest (bold) face — the smallest column that still shows content.
-fn table_col_floor(size: f64) -> f64 {
-    size + StandardFont::HelveticaBold.text_width_pt("xx...", size)
+fn table_col_floor(size: f64, pad: f64, font: StandardFont) -> f64 {
+    2.0 * pad + font.text_width_pt("xx...", size)
 }
 
 /// Natural (content-driven) column widths at `size`: the widest cell per
 /// column (header row measured bold) plus padding on both sides.
-fn table_natural_widths(rows: &[Vec<ResolvedRun>], ncols: usize, size: f64) -> Result<Vec<f64>> {
-    let pad = size * 0.5;
+fn table_natural_widths(
+    rows: &[Vec<ResolvedRun>],
+    ncols: usize,
+    size: f64,
+    pad: f64,
+) -> Result<Vec<f64>> {
     let mut widths = vec![2.0 * pad; ncols];
     for row in rows {
         for (ci, cell) in row.iter().enumerate() {
@@ -856,58 +1233,51 @@ fn table_layout(
     ncols: usize,
     base_size: f64,
     usable: f64,
+    style: TableStyle,
 ) -> Result<(f64, Vec<f64>)> {
     let mut size = base_size;
-    let mut natural = table_natural_widths(rows, ncols, size)?;
-    let floors_total: f64 = natural.iter().map(|&w| w.min(table_col_floor(size))).sum();
+    let mut pad = size * style.pad_factor();
+    let floor_font = match style {
+        TableStyle::Csv => StandardFont::Courier,
+        TableStyle::Markdown => StandardFont::HelveticaBold,
+    };
+    let mut natural = table_natural_widths(rows, ncols, size, pad)?;
+    let floors_total: f64 = natural
+        .iter()
+        .map(|&w| w.min(table_col_floor(size, pad, floor_font)))
+        .sum();
     if floors_total > usable {
         // All metrics are linear in font size, so this factor is exact.
         size = (size * usable / floors_total).max(TABLE_MIN_FONT_PT);
-        natural = table_natural_widths(rows, ncols, size)?;
+        pad = size * style.pad_factor();
+        natural = table_natural_widths(rows, ncols, size, pad)?;
     }
-    let widths = squeeze_widths(&natural, table_col_floor(size), usable);
+    let widths = squeeze_widths(&natural, table_col_floor(size, pad, floor_font), usable);
     Ok((size, widths))
 }
 
-/// Wraps one cell into lines that fit `avail_w`, capping at
-/// [`MAX_CELL_LINES`] with a trailing ellipsis when content is cut.
+/// Wraps one cell into lines that fit `avail_w`, preserving every line.
 fn wrap_cell(cell: &ResolvedRun, size: f64, avail_w: f64) -> Result<Vec<String>> {
     if cell.text.is_empty() {
         return Ok(Vec::new());
     }
-    let mut lines: Vec<String> = wrap_resolved_runs(std::slice::from_ref(cell), size, avail_w)?
-        .into_iter()
-        .map(|line| line.into_iter().map(|r| r.text).collect())
-        .collect();
-    if lines.len() > MAX_CELL_LINES {
-        lines.truncate(MAX_CELL_LINES);
-        let last = lines.last_mut().expect("MAX_CELL_LINES > 0");
-        *last = ellipsize(last, cell, size, avail_w)?;
-    }
-    Ok(lines)
-}
-
-/// Trims `text` so that it plus a trailing "..." fits in `avail_w` points.
-fn ellipsize(text: &str, run: &ResolvedRun, size: f64, avail_w: f64) -> Result<String> {
-    let ell_w = run.choice.text_width_pt("...", run.font, size)?;
-    let mut out = String::new();
-    let mut w = 0.0;
-    for c in text.chars() {
-        let cw = run.choice.char_width_pt(c, run.font, size)?;
-        if w + cw + ell_w > avail_w + 0.01 {
-            break;
-        }
-        out.push(c);
-        w += cw;
-    }
-    out.push_str("...");
-    Ok(out)
+    Ok(
+        wrap_resolved_runs(std::slice::from_ref(cell), size, avail_w)?
+            .into_iter()
+            .map(|line| line.into_iter().map(|r| r.text).collect::<String>())
+            .collect(),
+    )
 }
 
 /// Draws `rows` as a zebra-striped table with a bold header repeated on
-/// every page. Cells word-wrap within their column; the row grows to its
-/// tallest cell.
-fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) -> Result<()> {
+/// every page. Cells word-wrap within their column; over-tall rows are split
+/// into bordered fragments without changing their column positions.
+fn render_table(
+    eng: &mut LayoutEngine,
+    rows: &[Vec<String>],
+    base_size: f64,
+    style: TableStyle,
+) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -915,10 +1285,10 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) ->
         .iter()
         .enumerate()
         .map(|(ri, row)| {
-            let font = if ri == 0 {
-                StandardFont::HelveticaBold
-            } else {
-                StandardFont::Helvetica
+            let font = match (style, ri) {
+                (TableStyle::Csv, _) => StandardFont::Courier,
+                (TableStyle::Markdown, 0) => StandardFont::HelveticaBold,
+                (TableStyle::Markdown, _) => StandardFont::Helvetica,
             };
             row.iter()
                 .map(|text| {
@@ -926,6 +1296,7 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) ->
                         font,
                         choice: eng.font_session.resolve(text)?,
                         text: text.clone(),
+                        style: RunStyle::default(),
                     })
                 })
                 .collect::<Result<Vec<_>>>()
@@ -933,9 +1304,9 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) ->
         .collect::<Result<_>>()?;
     let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
     let usable = eng.usable_width();
-    let (size, widths) = table_layout(&resolved_rows, ncols, base_size, usable)?;
-    let pad = size * 0.5;
-    let lead = size * 1.2;
+    let (size, widths) = table_layout(&resolved_rows, ncols, base_size, usable, style)?;
+    let pad = size * style.pad_factor();
+    let lead = size * style.line_height_factor();
     let table_w: f64 = widths.iter().sum();
     let left = eng.left();
 
@@ -949,34 +1320,42 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) ->
             })
             .collect()
     };
-    let row_height = |cell_lines: &[Vec<String>]| -> f64 {
-        let n = cell_lines.iter().map(|l| l.len()).max().unwrap_or(0).max(1);
-        lead * n as f64 + size * 0.5
-    };
+    let row_height =
+        |line_count: usize| lead * line_count.max(1) as f64 + size * style.row_extra_factor();
 
     let draw_row = |eng: &mut LayoutEngine,
                     cell_lines: &[Vec<String>],
                     cells: &[ResolvedRun],
+                    start_line: usize,
+                    line_count: usize,
                     bg: Option<f64>|
      -> Result<()> {
-        let row_h = row_height(cell_lines);
+        let row_h = row_height(line_count);
         let top = eng.y;
         if let Some(gray) = bg {
             eng.draw_rect_fill(left, top - row_h, table_w, row_h, gray);
         }
         let mut cx = left;
         for (ci, width) in widths.iter().enumerate() {
+            let border_width = match style {
+                TableStyle::Csv => 0.75,
+                TableStyle::Markdown => 0.35,
+            };
+            eng.draw_rect_stroke(cx, top - row_h, *width, row_h, border_width);
             if let Some(lines) = cell_lines.get(ci) {
-                for (li, line) in lines.iter().enumerate() {
+                for (li, line) in lines.iter().skip(start_line).take(line_count).enumerate() {
                     let baseline = top - lead * (li as f64 + 1.0);
                     if let Some(cell) = cells.get(ci) {
-                        eng.draw_text_line(
+                        eng.draw_text_line_with_context(
                             cell.font,
                             &cell.choice,
                             size,
-                            cx + pad,
-                            baseline,
+                            (cx + pad, baseline),
                             line,
+                            TextDrawContext {
+                                color: TextColor::Black,
+                                external_ltr_context: true,
+                            },
                         )?;
                     }
                 }
@@ -988,10 +1367,23 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) ->
     };
 
     let header_lines = wrap_row(&resolved_rows[0])?;
-    let header_h = row_height(&header_lines);
+    let header_line_count = header_lines.iter().map(Vec::len).max().unwrap_or(0).max(1);
+    let header_h = row_height(header_line_count);
     let draw_header = |eng: &mut LayoutEngine| -> Result<()> {
-        draw_row(eng, &header_lines, &resolved_rows[0], Some(0.88))?;
-        eng.draw_rule(left, left + table_w, eng.y, 0.7);
+        draw_row(
+            eng,
+            &header_lines,
+            &resolved_rows[0],
+            0,
+            header_line_count,
+            match style {
+                TableStyle::Csv => None,
+                TableStyle::Markdown => Some(0.88),
+            },
+        )?;
+        if matches!(style, TableStyle::Markdown) {
+            eng.draw_rule(left, left + table_w, eng.y, 0.7);
+        }
         Ok(())
     };
 
@@ -1000,14 +1392,32 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) ->
 
     for (ri, row) in resolved_rows.iter().enumerate().skip(1) {
         let cell_lines = wrap_row(row)?;
-        let row_h = row_height(&cell_lines);
-        if eng.y - row_h < eng.margin - 0.01 {
-            eng.break_page();
-            draw_header(eng)?;
-        }
+        let total_lines = cell_lines.iter().map(Vec::len).max().unwrap_or(0).max(1);
         // Zebra stripes on even data rows.
-        let bg = if ri % 2 == 0 { Some(0.955) } else { None };
-        draw_row(eng, &cell_lines, row, bg)?;
+        let bg = if matches!(style, TableStyle::Markdown) && ri % 2 == 0 {
+            Some(0.955)
+        } else {
+            None
+        };
+        let mut start_line = 0;
+        while start_line < total_lines {
+            // Leave top/bottom padding within each fragment, and move to a
+            // header-bearing page when fewer than one data baseline remains.
+            let available = eng.y - eng.margin - size * 0.5;
+            let available_lines = (available / lead).floor().max(0.0) as usize;
+            if available_lines == 0 {
+                eng.break_page();
+                draw_header(eng)?;
+                continue;
+            }
+            let line_count = (total_lines - start_line).min(available_lines);
+            draw_row(eng, &cell_lines, row, start_line, line_count, bg)?;
+            start_line += line_count;
+            if start_line < total_lines {
+                eng.break_page();
+                draw_header(eng)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1019,12 +1429,121 @@ fn render_table(eng: &mut LayoutEngine, rows: &[Vec<String>], base_size: f64) ->
 fn heading_scale(level: HeadingLevel) -> f64 {
     match level {
         HeadingLevel::H1 => 2.0,
-        HeadingLevel::H2 => 1.6,
-        HeadingLevel::H3 => 1.35,
-        HeadingLevel::H4 => 1.2,
-        HeadingLevel::H5 => 1.1,
-        HeadingLevel::H6 => 1.0,
+        HeadingLevel::H2 => 1.5,
+        HeadingLevel::H3 => 1.17,
+        HeadingLevel::H4 => 1.0,
+        HeadingLevel::H5 => 0.83,
+        HeadingLevel::H6 => 0.67,
     }
+}
+
+/// Baseline-model gap before an adjacent heading. These factors reproduce
+/// Chromium's collapsed user-agent heading margins after accounting for the
+/// following heading's measured 1.6 line box.
+fn adjacent_heading_gap_factor(next: HeadingLevel) -> f64 {
+    match next {
+        HeadingLevel::H1 => 1.34,
+        HeadingLevel::H2 => 1.64,
+        HeadingLevel::H3 => 1.03,
+        HeadingLevel::H4 => 1.25,
+        HeadingLevel::H5 => 0.75,
+        HeadingLevel::H6 => 0.64,
+    }
+}
+
+fn markdown_options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_GFM
+}
+
+fn safe_link_uri(uri: &str) -> Option<String> {
+    let uri = uri.trim();
+    if uri.is_empty() || uri.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return None;
+    }
+    let lower = uri.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+    {
+        Some(uri.to_string())
+    } else {
+        None
+    }
+}
+
+fn push_markdown_text(
+    runs: &mut Vec<Run>,
+    font: StandardFont,
+    text: &str,
+    style: &RunStyle,
+    detect_autolinks: bool,
+) {
+    let text = sanitize_run(text);
+    if !detect_autolinks {
+        push_run(runs, font, style, &text);
+        return;
+    }
+
+    for segment in text.split_inclusive(' ') {
+        let token = segment.trim_end_matches(' ');
+        let spaces = &segment[token.len()..];
+        let lower = token.to_ascii_lowercase();
+        let is_url = lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("www.");
+        if is_url {
+            let linked = token.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+            let suffix = &token[linked.len()..];
+            let candidate = if lower.starts_with("www.") {
+                format!("https://{linked}")
+            } else {
+                linked.to_string()
+            };
+            if let Some(uri) = safe_link_uri(&candidate) {
+                let mut link_style = style.clone();
+                link_style.link = Some(uri);
+                link_style.color = TextColor::Link;
+                push_run(runs, font, &link_style, linked);
+                push_run(runs, font, style, suffix);
+            } else {
+                push_run(runs, font, style, token);
+            }
+        } else {
+            push_run(runs, font, style, token);
+        }
+        push_run(runs, font, style, spaces);
+    }
+}
+
+fn collect_footnotes(markdown: &str) -> Vec<(String, String)> {
+    let mut definitions = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    for event in Parser::new_ext(markdown, markdown_options()) {
+        match event {
+            Event::Start(Tag::FootnoteDefinition(label)) => {
+                current = Some((label.into_string(), String::new()));
+            }
+            Event::End(TagEnd::FootnoteDefinition) => {
+                if let Some((label, text)) = current.take() {
+                    definitions.push((label, text.trim().to_string()));
+                }
+            }
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                if let Some((_, buffer)) = current.as_mut() {
+                    buffer.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, buffer)) = current.as_mut() {
+                    buffer.push(' ');
+                }
+            }
+            _ => {}
+        }
+    }
+    definitions
 }
 
 /// Renders Markdown (headings, paragraphs, bold/italic, lists, GFM tables,
@@ -1032,7 +1551,7 @@ fn heading_scale(level: HeadingLevel) -> f64 {
 /// PDF.
 pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
     let opts = effective_opts(opts)?;
-    let mut eng = LayoutEngine::new(&opts)?;
+    let mut eng = LayoutEngine::new_markdown(&opts)?;
     eng.emit_title(&opts)?;
     let base = opts.base_font_size_pt;
 
@@ -1040,14 +1559,21 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
     let mut runs: Vec<Run> = Vec::new();
     let mut bold: u32 = 0;
     let mut emph: u32 = 0;
+    let mut strike: u32 = 0;
+    let mut active_link: Option<String> = None;
     let mut in_heading: Option<HeadingLevel> = None;
+    let mut pending_heading_margin: Option<HeadingLevel> = None;
     // Each entry is a list level; Some(n) = next ordered index, None = bullet.
     let mut lists: Vec<Option<u64>> = Vec::new();
-    let mut pending_marker: Option<String> = None;
+    let mut pending_marker: Option<ListMarker> = None;
     let mut in_code_block = false;
     let mut code_buf = String::new();
     let mut skip_depth: u32 = 0; // inside ignored constructs (images)
-    // Raw-HTML block accumulator (tag-stripped text renders as a paragraph).
+    let mut footnote_depth: u32 = 0;
+    let footnote_definitions = collect_footnotes(markdown);
+    let mut footnote_numbers: BTreeMap<String, usize> = BTreeMap::new();
+    let mut next_footnote = 1_usize;
+    // Raw-HTML block accumulator (source renders literally as a paragraph).
     let mut html_block: Option<String> = None;
     // GFM table accumulators.
     let mut table_rows: Option<Vec<Vec<String>>> = None;
@@ -1070,10 +1596,10 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
         size: f64,
         indent: f64,
         leading: f64,
-        marker: &mut Option<String>,
+        marker: &mut Option<ListMarker>,
         gap_after: f64,
     ) -> Result<()> {
-        let marker_arg = marker.take().map(|m| (m, StandardFont::Helvetica));
+        let marker_arg = marker.take();
         if runs.iter().all(|r| r.text.trim().is_empty()) && marker_arg.is_none() {
             runs.clear();
             return Ok(());
@@ -1084,17 +1610,48 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
         Ok(())
     }
 
-    for event in Parser::new_ext(markdown, Options::ENABLE_TABLES) {
+    fn consume_heading_margin(
+        eng: &mut LayoutEngine,
+        pending: &mut Option<HeadingLevel>,
+        base: f64,
+    ) {
+        if pending.take().is_some() {
+            eng.advance(base * 0.85);
+        }
+    }
+
+    for event in Parser::new_ext(markdown, markdown_options()) {
+        if footnote_depth > 0 {
+            match event {
+                Event::Start(_) => footnote_depth += 1,
+                Event::End(_) => footnote_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
         match event {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
                     in_heading = Some(level);
-                    eng.advance(base * 0.8);
+                    if pending_heading_margin.take().is_some() {
+                        eng.advance(base * adjacent_heading_gap_factor(level));
+                    } else {
+                        eng.advance(base * 0.8);
+                    }
                 }
-                Tag::Paragraph => {}
+                Tag::Paragraph => {
+                    consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
+                }
                 Tag::Strong => bold += 1,
                 Tag::Emphasis => emph += 1,
+                Tag::Strikethrough => strike += 1,
                 Tag::List(start) => {
+                    consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
+                    if lists.len() >= MAX_MARKDOWN_NESTING {
+                        return Err(PdfCoreError::InvalidInput(format!(
+                            "Markdown nesting depth exceeds limit {MAX_MARKDOWN_NESTING}"
+                        )));
+                    }
                     // In tight lists the parent item's inline text is still
                     // buffered (no Paragraph wrapper); flush it at the parent
                     // depth so child items start on their own lines.
@@ -1104,7 +1661,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                             &mut runs,
                             base,
                             18.0 * lists.len() as f64,
-                            1.3,
+                            MARKDOWN_LINE_HEIGHT_FACTOR,
                             &mut pending_marker,
                             base * 0.2,
                         )?;
@@ -1120,7 +1677,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                             &mut runs,
                             base,
                             18.0 * lists.len() as f64,
-                            1.3,
+                            MARKDOWN_LINE_HEIGHT_FACTOR,
                             &mut pending_marker,
                             base * 0.2,
                         )?;
@@ -1133,17 +1690,20 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         }
                         _ => "-".to_string(),
                     };
-                    pending_marker = Some(marker);
+                    pending_marker = Some(ListMarker::Text(marker));
                 }
                 Tag::CodeBlock(_) => {
+                    consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
                     // Fenced and indented blocks render the same way.
                     in_code_block = true;
                     code_buf.clear();
                 }
                 Tag::HtmlBlock => {
+                    consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
                     html_block = Some(String::new());
                 }
                 Tag::Table(_) => {
+                    consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
                     table_rows = Some(Vec::new());
                 }
                 Tag::TableHead | Tag::TableRow => {
@@ -1152,8 +1712,23 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 Tag::TableCell => {
                     table_cell = Some(String::new());
                 }
-                Tag::Image { .. } => skip_depth += 1,
-                Tag::Link { .. } => {}
+                Tag::Image { .. } => {
+                    let style = RunStyle {
+                        color: TextColor::Muted,
+                        ..RunStyle::default()
+                    };
+                    push_run(
+                        &mut runs,
+                        StandardFont::HelveticaOblique,
+                        &style,
+                        "[Image omitted for secure conversion]",
+                    );
+                    skip_depth += 1;
+                }
+                Tag::Link { dest_url, .. } => {
+                    active_link = safe_link_uri(&dest_url);
+                }
+                Tag::FootnoteDefinition(_) => footnote_depth = 1,
                 // Block quotes render as plain content; footnotes and
                 // everything else are ignored gracefully.
                 _ => {}
@@ -1166,25 +1741,22 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         &mut runs,
                         size,
                         18.0 * lists.len() as f64,
-                        1.25,
+                        1.6,
                         &mut pending_marker,
-                        base * 0.55,
+                        0.0,
                     )?;
                     in_heading = None;
+                    pending_heading_margin = Some(level);
                 }
                 TagEnd::Paragraph => {
                     let indent = 18.0 * lists.len() as f64;
-                    let gap = if lists.is_empty() {
-                        base * 0.65
-                    } else {
-                        base * 0.2
-                    };
+                    let gap = if lists.is_empty() { base } else { 0.0 };
                     flush_block(
                         &mut eng,
                         &mut runs,
                         base,
                         indent,
-                        1.3,
+                        MARKDOWN_LINE_HEIGHT_FACTOR,
                         &mut pending_marker,
                         gap,
                     )?;
@@ -1197,7 +1769,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         &mut runs,
                         base,
                         indent,
-                        1.3,
+                        MARKDOWN_LINE_HEIGHT_FACTOR,
                         &mut pending_marker,
                         base * 0.2,
                     )?;
@@ -1210,6 +1782,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 }
                 TagEnd::Strong => bold = bold.saturating_sub(1),
                 TagEnd::Emphasis => emph = emph.saturating_sub(1),
+                TagEnd::Strikethrough => strike = strike.saturating_sub(1),
                 TagEnd::CodeBlock => {
                     in_code_block = false;
                     let indent = 18.0 * lists.len() as f64;
@@ -1218,15 +1791,22 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 }
                 TagEnd::HtmlBlock => {
                     if let Some(html) = html_block.take() {
-                        let text = sanitize_run(&strip_html_tags(&html));
+                        let text = sanitize_run(&html);
                         if !text.trim().is_empty() {
                             let block = [Run {
                                 font: StandardFont::Helvetica,
                                 text,
+                                style: RunStyle::default(),
                             }];
                             let indent = 18.0 * lists.len() as f64;
-                            eng.emit_paragraph(&block, base, indent, 1.3, None)?;
-                            eng.advance(base * 0.65);
+                            eng.emit_paragraph(
+                                &block,
+                                base,
+                                indent,
+                                MARKDOWN_LINE_HEIGHT_FACTOR,
+                                None,
+                            )?;
+                            eng.advance(base);
                         }
                     }
                 }
@@ -1235,7 +1815,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         && !rows.is_empty()
                     {
                         eng.advance(base * 0.35);
-                        render_table(&mut eng, &rows, base)?;
+                        render_table(&mut eng, &rows, base, TableStyle::Markdown)?;
                         eng.advance(base * 0.45);
                     }
                     table_row.clear();
@@ -1248,11 +1828,11 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 }
                 TagEnd::TableCell => {
                     if let Some(cell) = table_cell.take() {
-                        table_row.push(sanitize_run(&cell));
+                        table_row.push(sanitize_table_cell(&cell));
                     }
                 }
                 TagEnd::Image => skip_depth = skip_depth.saturating_sub(1),
-                TagEnd::Link => {}
+                TagEnd::Link => active_link = None,
                 _ => {}
             },
             Event::Text(text) => {
@@ -1265,7 +1845,17 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                     code_buf.push_str(&text);
                 } else {
                     let font = inline_font(bold, emph, in_heading.is_some());
-                    push_run(&mut runs, font, &sanitize_run(&text));
+                    let style = RunStyle {
+                        link: active_link.clone(),
+                        strikethrough: strike > 0,
+                        color: if active_link.is_some() {
+                            TextColor::Link
+                        } else {
+                            TextColor::Black
+                        },
+                        ..RunStyle::default()
+                    };
+                    push_markdown_text(&mut runs, font, &text, &style, active_link.is_none());
                 }
             }
             Event::Code(text) => {
@@ -1273,11 +1863,26 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                     if let Some(cell) = table_cell.as_mut() {
                         cell.push_str(&text);
                     } else {
-                        push_run(&mut runs, StandardFont::Courier, &sanitize_run(&text));
+                        let style = RunStyle {
+                            link: active_link.clone(),
+                            strikethrough: strike > 0,
+                            color: if active_link.is_some() {
+                                TextColor::Link
+                            } else {
+                                TextColor::Black
+                            },
+                            ..RunStyle::default()
+                        };
+                        push_run(
+                            &mut runs,
+                            StandardFont::Courier,
+                            &style,
+                            &sanitize_run(&text),
+                        );
                     }
                 }
             }
-            Event::SoftBreak | Event::HardBreak => {
+            Event::SoftBreak => {
                 if skip_depth == 0 {
                     if let Some(cell) = table_cell.as_mut() {
                         cell.push(' ');
@@ -1285,11 +1890,44 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         code_buf.push('\n');
                     } else {
                         let font = inline_font(bold, emph, in_heading.is_some());
-                        push_run(&mut runs, font, " ");
+                        let style = RunStyle {
+                            link: active_link.clone(),
+                            strikethrough: strike > 0,
+                            color: if active_link.is_some() {
+                                TextColor::Link
+                            } else {
+                                TextColor::Black
+                            },
+                            ..RunStyle::default()
+                        };
+                        push_run(&mut runs, font, &style, " ");
+                    }
+                }
+            }
+            Event::HardBreak => {
+                if skip_depth == 0 {
+                    if let Some(cell) = table_cell.as_mut() {
+                        cell.push('\n');
+                    } else if in_code_block {
+                        code_buf.push('\n');
+                    } else {
+                        let font = inline_font(bold, emph, in_heading.is_some());
+                        let style = RunStyle {
+                            link: active_link.clone(),
+                            strikethrough: strike > 0,
+                            color: if active_link.is_some() {
+                                TextColor::Link
+                            } else {
+                                TextColor::Black
+                            },
+                            ..RunStyle::default()
+                        };
+                        push_run(&mut runs, font, &style, "\n");
                     }
                 }
             }
             Event::Rule => {
+                consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
                 eng.ensure_room(base * 1.4);
                 eng.advance(base * 0.7);
                 let (x1, x2) = (eng.left(), eng.left() + eng.usable_width());
@@ -1297,28 +1935,52 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 eng.draw_rule(x1, x2, y, 0.5);
                 eng.advance(base * 0.7);
             }
-            // Raw HTML: strip tags and keep the human-visible text.
+            // Raw HTML is inert source text, matching allowDangerousHtml:false.
             Event::Html(html) | Event::InlineHtml(html) => {
+                consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
                 if skip_depth > 0 {
                     continue;
                 }
                 if let Some(buf) = html_block.as_mut() {
                     buf.push_str(&html);
                 } else if let Some(cell) = table_cell.as_mut() {
-                    cell.push_str(&strip_html_tags(&html));
+                    cell.push_str(&html);
                 } else {
-                    let text = sanitize_run(&strip_html_tags(&html));
+                    let text = sanitize_run(&html);
                     if !text.trim().is_empty() {
                         let font = inline_font(bold, emph, in_heading.is_some());
-                        push_run(&mut runs, font, &text);
+                        let style = RunStyle {
+                            link: active_link.clone(),
+                            strikethrough: strike > 0,
+                            color: if active_link.is_some() {
+                                TextColor::Link
+                            } else {
+                                TextColor::Black
+                            },
+                            ..RunStyle::default()
+                        };
+                        push_run(&mut runs, font, &style, &text);
                     }
                 }
             }
-            // Math, footnotes, task-list markers: skip gracefully.
-            Event::InlineMath(_)
-            | Event::DisplayMath(_)
-            | Event::FootnoteReference(_)
-            | Event::TaskListMarker(_) => {}
+            Event::FootnoteReference(label) => {
+                let label = label.into_string();
+                let number = *footnote_numbers.entry(label).or_insert_with(|| {
+                    let number = next_footnote;
+                    next_footnote += 1;
+                    number
+                });
+                let style = RunStyle {
+                    superscript: true,
+                    ..RunStyle::default()
+                };
+                let font = inline_font(bold, emph, in_heading.is_some());
+                push_run(&mut runs, font, &style, &number.to_string());
+            }
+            Event::TaskListMarker(checked) => {
+                pending_marker = Some(ListMarker::Task(checked));
+            }
+            Event::InlineMath(_) | Event::DisplayMath(_) => {}
         }
     }
     // Flush any dangling inline content (defensive; parser normally closes).
@@ -1329,53 +1991,92 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
             &mut runs,
             base,
             indent,
-            1.3,
+            MARKDOWN_LINE_HEIGHT_FACTOR,
             &mut pending_marker,
             0.0,
         )?;
     }
 
-    eng.finish()
-}
+    if !footnote_definitions.is_empty() {
+        eng.ensure_room(base * 2.0);
+        eng.advance(base * 0.6);
+        eng.draw_rule(
+            eng.left(),
+            eng.left() + eng.usable_width() * 0.35,
+            eng.y,
+            0.5,
+        );
+        eng.advance(base * 0.5);
+        let heading = [Run {
+            font: StandardFont::HelveticaBold,
+            text: "Footnotes".to_string(),
+            style: RunStyle::default(),
+        }];
+        eng.emit_paragraph(
+            &heading,
+            base * heading_scale(HeadingLevel::H2),
+            0.0,
+            1.6,
+            None,
+        )?;
+        eng.advance(base * 0.85);
 
-/// Crude raw-HTML handling: drops `<...>` tag spans (each removed tag leaves
-/// one space so words don't fuse) and decodes the common entities, so the
-/// human-visible inner text survives as plain paragraph content.
-fn strip_html_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' if !in_tag => in_tag = true,
-            '>' if in_tag => {
-                in_tag = false;
-                out.push(' ');
-            }
-            _ if in_tag => {}
-            _ => out.push(c),
+        let mut definitions = Vec::with_capacity(footnote_definitions.len());
+        for (label, text) in &footnote_definitions {
+            let number = *footnote_numbers.entry(label.clone()).or_insert_with(|| {
+                let number = next_footnote;
+                next_footnote += 1;
+                number
+            });
+            definitions.push((number, text));
+        }
+        definitions.sort_by_key(|(number, _)| *number);
+        for (number, text) in definitions {
+            let backreference = match eng.font_session.resolve("↩") {
+                Ok(_) => "↩",
+                Err(PdfCoreError::TextUnsupported {
+                    code: "glyph-coverage",
+                    ..
+                }) => "<-",
+                Err(error) => return Err(error),
+            };
+            let note_runs = [
+                Run {
+                    font: StandardFont::HelveticaBold,
+                    text: format!("{number}. "),
+                    style: RunStyle::default(),
+                },
+                Run {
+                    font: StandardFont::Helvetica,
+                    text: format!("{} ", sanitize_run(text)),
+                    style: RunStyle::default(),
+                },
+                Run {
+                    font: StandardFont::Helvetica,
+                    text: backreference.to_string(),
+                    style: RunStyle::default(),
+                },
+            ];
+            eng.emit_paragraph(&note_runs, base * 0.9, 0.0, 1.25, None)?;
+            eng.advance(base * 0.2);
         }
     }
-    // Decode &amp; last so "&amp;lt;" yields the literal "&lt;".
-    out.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
+
+    eng.finish()
 }
 
 /// Renders a code block on per-line light-gray background rectangles. Standard
 /// Courier keeps its character-count wrapping; embedded runs use hmtx widths.
 fn render_code_block(eng: &mut LayoutEngine, code: &str, base: f64, indent: f64) -> Result<()> {
     let size = base * 0.9;
-    let pad = 6.0;
-    let lead = size * 1.4;
+    let pad = 9.0;
+    let lead = base * MARKDOWN_LINE_HEIGHT_FACTOR;
     let block_w = (eng.usable_width() - indent).max(size);
     // Courier is monospace at 600/1000 em.
     let char_w = 0.6 * size;
     let max_chars = (((block_w - 2.0 * pad) / char_w).floor() as usize).max(1);
 
-    eng.advance(base * 0.35);
-    let left = eng.left() + indent;
+    let mut lines: Vec<(String, FontChoice)> = Vec::new();
     for raw_line in code.lines() {
         let line = sanitize_code_run(raw_line);
         let choice = eng.font_session.resolve(&line)?;
@@ -1408,19 +2109,49 @@ fn render_code_block(eng: &mut LayoutEngine, code: &str, base: f64, indent: f64)
             }
         };
         for chunk in chunks {
-            eng.ensure_room(lead);
-            let top = eng.y;
-            eng.draw_rect_fill(left, top - lead, block_w, lead, 0.93);
+            lines.push((chunk, choice.clone()));
+        }
+    }
+    if lines.is_empty() {
+        lines.push((String::new(), FontChoice::Standard));
+    }
+
+    eng.advance(base * 0.35);
+    let left = eng.left() + indent;
+    let mut line_index = 0;
+    while line_index < lines.len() {
+        let available = eng.y - eng.bottom_margin - 2.0 * pad;
+        let available_lines = (available / lead).floor().max(0.0) as usize;
+        if available_lines == 0 {
+            eng.break_page();
+            continue;
+        }
+        let line_count = (lines.len() - line_index).min(available_lines);
+        let fragment_height = 2.0 * pad + lead * line_count as f64;
+        eng.draw_rect_fill(
+            left,
+            eng.y - fragment_height,
+            block_w,
+            fragment_height,
+            0.953,
+        );
+        eng.advance(pad);
+        for (chunk, choice) in &lines[line_index..line_index + line_count] {
             eng.advance(lead);
             let baseline = eng.y + size * 0.32;
             eng.draw_text_line(
                 StandardFont::Courier,
-                &choice,
+                choice,
                 size,
-                left + pad,
-                baseline,
-                &chunk,
+                (left + pad, baseline),
+                chunk,
+                TextColor::Black,
             )?;
+        }
+        eng.advance(pad);
+        line_index += line_count;
+        if line_index < lines.len() {
+            eng.break_page();
         }
     }
     eng.advance(base * 0.65);
@@ -1479,6 +2210,7 @@ pub fn images_to_pdf(images: &[&[u8]], opts: &DocOptions) -> Result<Vec<u8>> {
                 height: ih,
                 samples: rgb.into_raw(),
             }),
+            links: Vec::new(),
         });
     }
 

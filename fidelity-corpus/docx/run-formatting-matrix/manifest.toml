@@ -4,4 +4,6 @@ ssim_threshold = 0.96
 max_page_count_delta = 0
 word_version = "Microsoft Word 2021"
 ground_truth_exported_at = "2026-07-09"
+input_sha256 = "277b7de459e002d2bca994d715f4b74f106cd56524f3381cd159db8431fbadfa"
+golden_sha256 = "c08dcf5de07627884bafe32e229d3a2979169b7787a26e333319294692d70ff6"
 notes = "Synthetic fixture; ground-truth.pdf metadata records Microsoft Word 2021, exported 2026-07-09."

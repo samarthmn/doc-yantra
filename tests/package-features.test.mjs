@@ -13,7 +13,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import zlib from "node:zlib";
@@ -30,6 +31,14 @@ const PACKAGED_FONTS = [
   "LiberationSans-Regular.ttf",
   "LiberationSans-Bold.ttf",
   "LiberationMono-Regular.ttf",
+  "NotoSansCJKsc-Regular.otf",
+  "NotoSansCJKtc-Regular.otf",
+  "NotoSansCJKjp-Regular.otf",
+  "NotoSansCJKkr-Regular.otf",
+  "NotoSansArabic-Variable.ttf",
+  "NotoSansDevanagari-Variable.ttf",
+  "NotoSansThai-Variable.ttf",
+  "NotoEmoji-Variable.ttf",
 ];
 
 const main = require(PKG);
@@ -131,6 +140,22 @@ describe("engine metadata", () => {
 // --- embedded Unicode fonts -----------------------------------------------
 
 describe("embedded Unicode fonts", () => {
+  test("font manifest resolves every font, checksum, and license", () => {
+    const manifest = JSON.parse(readFileSync(join(PKG, "fonts", "manifest.json"), "utf8"));
+    assert.equal(manifest.fonts.length, PACKAGED_FONTS.length);
+    for (const font of manifest.fonts) {
+      const fontPath = join(PKG, "fonts", font.file);
+      const licensePath = join(PKG, "fonts", font.license);
+      assert.ok(existsSync(fontPath), `${font.file} must be packaged`);
+      assert.ok(existsSync(licensePath), `${font.license} must be packaged`);
+      assert.equal(
+        createHash("sha256").update(readFileSync(fontPath)).digest("hex"),
+        font.sha256,
+        `${font.file} sha256 must match the manifest`,
+      );
+    }
+  });
+
   test("register_font() accepts all packaged Liberation faces", () => {
     const manifest = JSON.parse(readFileSync(join(PKG, "package.json"), "utf8"));
     assert.ok(manifest.files.includes("fonts"), "npm package includes runtime fonts");
@@ -169,21 +194,40 @@ describe("embedded Unicode fonts", () => {
     assert.equal(JSON.parse(main.validate_pdf(pdf)).pageCount, main.page_count(pdf));
   });
 
-  test("Arabic watermark fails closed with an unsupported prefix", () => {
+  test("Arabic watermark shapes and renders with the packaged Arabic face", () => {
     registerPackagedFonts();
-    assert.throws(
-      () => main.apply_watermark(mock("pdf"), JSON.stringify({ lines: ["مرحبا"] })),
-      (error) => isUnsupportedError(error) && error.message.startsWith("unsupported:script:"),
-    );
+    const output = main.apply_watermark(mock("pdf"), JSON.stringify({ lines: ["مرحبا"] }));
+    assert.equal(Buffer.from(output.subarray(0, 5)).toString("latin1"), "%PDF-");
+    assert.ok(main.page_count(output) >= 1, "Arabic watermark output must have pages");
   });
 
-  test("CJK without a covering face fails closed with an unsupported prefix", () => {
+  test("CJK CSV with Japanese, Chinese, and Korean rows produces a valid PDF", () => {
     registerPackagedFonts();
-    assert.throws(
-      () => main.apply_watermark(mock("pdf"), JSON.stringify({ lines: ["你好"] })),
-      (error) =>
-        isUnsupportedError(error) && error.message.startsWith("unsupported:glyph-coverage:"),
-    );
+    const pdf = main.csv_to_pdf(Buffer.from(
+      "locale,value\nja,こんにちは\nzh,机密文件\nko,비밀 문서\n",
+      "utf8",
+    ));
+    assert.ok(isPdf(pdf));
+    assert.ok(main.page_count(pdf) >= 1);
+  });
+
+  test("CJK watermark produces a valid PDF", () => {
+    registerPackagedFonts();
+    const pdf = main.apply_watermark(mock("pdf"), JSON.stringify({ lines: ["机密文件"] }));
+    assert.ok(isPdf(pdf));
+    assert.ok(main.page_count(pdf) >= 1);
+  });
+
+  test("BMP emoji U+2603 behavior is recorded", (t) => {
+    registerPackagedFonts();
+    try {
+      const pdf = main.apply_watermark(mock("pdf"), JSON.stringify({ lines: ["☃"] }));
+      assert.ok(isPdf(pdf));
+      t.diagnostic("U+2603 is covered by the packaged font set");
+    } catch (error) {
+      assert.ok(isUnsupportedError(error), `unexpected emoji error: ${error}`);
+      t.diagnostic(`U+2603 remains fail-closed: ${error.message}`);
+    }
   });
 
   test("register_font rejects over 32 MiB before wasm allocation", () => {
@@ -211,8 +255,34 @@ describe("embedded Unicode fonts", () => {
       "export function register_font(bytes) {",
       "    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);",
       "}",
+      "export function apply_watermark(pdf, watermark_json, watermark_image) {",
+      "    wasm.apply_watermark();",
+      "}",
+      "export function csv_to_pdf(csv) {",
+      "    wasm.csv_to_pdf();",
+      "}",
+      "export function markdown_to_pdf(markdown) {",
+      "    wasm.markdown_to_pdf();",
+      "}",
+      "export function merge_pdfs(pdfs, watermark_json, watermark_image) {",
+      "    wasm.merge_pdfs();",
+      "}",
+      "export function page_count(pdf) {",
+      "    wasm.page_count();",
+      "}",
       "export function redact_pdf(pdf, areas_json) {",
       "    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);",
+      "    wasm.redact_pdf();",
+      "}",
+      "export function redact_pdf_with_report(pdf, areas_json) {",
+      "    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);",
+      "    wasm.redact_pdf_with_report();",
+      "}",
+      "export function text_to_pdf(text) {",
+      "    wasm.text_to_pdf();",
+      "}",
+      "export function validate_pdf(pdf) {",
+      "    wasm.validate_pdf();",
       "}",
       "",
     ].join("\n");

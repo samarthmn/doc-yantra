@@ -11,7 +11,8 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use crate::error::{PdfCoreError, Result};
 use crate::fonts::StandardFont;
 use crate::redact_types::{
-    BoxPts, PageRotation, RedactArea, RedactOutput, derotate_box, exceeds_requested, resolve_rect,
+    BoxPts, PageRotation, RedactArea, RedactOutput, RedactionObjectKind, RedactionWarning,
+    RedactionWarningCode, derotate_box, exceeds_requested, resolve_rect,
 };
 
 const BBOX_MARGIN_PT: f64 = 1.0;
@@ -112,6 +113,7 @@ struct GraphicsState {
     text: TextStyle,
     line_width: f64,
     miter_limit: f64,
+    clip: ActiveClip,
 }
 
 impl Default for GraphicsState {
@@ -121,6 +123,67 @@ impl Default for GraphicsState {
             text: TextStyle::default(),
             line_width: 1.0,
             miter_limit: 10.0,
+            clip: ActiveClip::Unbounded,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipRule {
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ActiveClip {
+    Unbounded,
+    Empty { last_rule: ClipRule },
+    ConservativeBounds { bounds: BoxPts, last_rule: ClipRule },
+}
+
+impl ActiveClip {
+    fn intersect(&mut self, path_bounds: Option<BoxPts>, rule: ClipRule) {
+        *self = match (*self, path_bounds) {
+            (_, None) => Self::Empty { last_rule: rule },
+            (Self::Unbounded, Some(bounds)) => Self::ConservativeBounds {
+                bounds,
+                last_rule: rule,
+            },
+            (Self::Empty { last_rule }, Some(_)) => {
+                let _winding_history = (last_rule, rule);
+                Self::Empty { last_rule: rule }
+            }
+            (
+                Self::ConservativeBounds {
+                    bounds: active,
+                    last_rule,
+                },
+                Some(path),
+            ) => {
+                let _winding_history = (last_rule, rule);
+                let bounds = BoxPts {
+                    left: active.left.max(path.left),
+                    right: active.right.min(path.right),
+                    bottom: active.bottom.max(path.bottom),
+                    top: active.top.min(path.top),
+                };
+                if bounds.is_finite_and_nonempty() {
+                    Self::ConservativeBounds {
+                        bounds,
+                        last_rule: rule,
+                    }
+                } else {
+                    Self::Empty { last_rule: rule }
+                }
+            }
+        };
+    }
+
+    fn conservative_bounds(self, page_bounds: BoxPts) -> Option<BoxPts> {
+        match self {
+            Self::Unbounded => Some(page_bounds),
+            Self::Empty { .. } => None,
+            Self::ConservativeBounds { bounds, .. } => intersect_box(bounds, page_bounds),
         }
     }
 }
@@ -131,7 +194,7 @@ struct TextObject {
     post_graphics_ops: Vec<Operation>,
     matrix: Matrix,
     line_matrix: Matrix,
-    bounds: Option<BoxPts>,
+    removed_glyphs: Vec<BoxPts>,
     used_text_clip: bool,
     shown_bytes: usize,
     show_count: usize,
@@ -146,7 +209,7 @@ impl TextObject {
             post_graphics_ops: Vec::new(),
             matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
-            bounds: None,
+            removed_glyphs: Vec::new(),
             used_text_clip: false,
             shown_bytes: 0,
             show_count: 0,
@@ -158,7 +221,7 @@ impl TextObject {
 
 #[derive(Debug)]
 struct AnnotationRemoval {
-    removed: Vec<(BoxPts, &'static str)>,
+    removed: Vec<(BoxPts, RedactionObjectKind)>,
     object_ids: BTreeSet<ObjectId>,
 }
 
@@ -168,11 +231,73 @@ enum FontWidths {
         widths: Box<[Option<f64>; 256]>,
         missing: Option<f64>,
         standard: Option<(StandardFont, StandardCodeEncoding)>,
+        valid_codes: Option<Box<[bool; 256]>>,
     },
     Cid {
         widths: BTreeMap<u16, f64>,
         default_width: f64,
+        vertical_widths: BTreeMap<u16, VerticalMetric>,
+        default_vertical: VerticalMetric,
+        encoding: CidCodeMap,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritingMode {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VerticalMetric {
+    /// `w1y`: the vertical advance, negative because vertical text runs downward.
+    displacement_y: f64,
+    /// `v_x`: the horizontal component of the position vector. Defaults to half the
+    /// glyph's width, which centres the glyph on the vertical baseline.
+    position_x: Option<f64>,
+    // `v_y` is parsed but not carried: for the standard vertical origin it places the
+    // em box exactly where the advance already puts it, so the displacement-derived
+    // cell below is equivalent. Deriving the cell from `v_y` and the font's ascent
+    // instead would inflate it past the advance and start swallowing the neighbouring
+    // glyph in a vertical run.
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DecodedCode {
+    start: usize,
+    end: usize,
+    width: f64,
+    is_space: bool,
+    vertical: Option<VerticalMetric>,
+    glyph_box: [f64; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CodeKey {
+    len: u8,
+    value: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CodeSpace {
+    len: u8,
+    start: u32,
+    end: u32,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddedCMap {
+    codespaces: Vec<CodeSpace>,
+    cid_map: BTreeMap<CodeKey, u16>,
+    unicode_map: BTreeMap<CodeKey, Vec<u16>>,
+    writing_mode: WritingMode,
+}
+
+#[derive(Debug, Clone)]
+enum CidCodeMap {
+    IdentityH,
+    IdentityV,
+    Embedded(EmbeddedCMap),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,24 +311,46 @@ struct FontMetrics {
     widths: FontWidths,
     ascent: f64,
     descent: f64,
-    x_min: f64,
-    x_max: f64,
+    glyph_boxes: Option<Box<[Option<[f64; 4]>; 256]>>,
 }
 
 impl FontMetrics {
-    fn for_each_code_width(
+    fn writing_mode(&self) -> WritingMode {
+        match &self.widths {
+            FontWidths::Simple { .. } => WritingMode::Horizontal,
+            FontWidths::Cid { encoding, .. } => match encoding {
+                CidCodeMap::IdentityH => WritingMode::Horizontal,
+                CidCodeMap::IdentityV => WritingMode::Vertical,
+                CidCodeMap::Embedded(cmap) => cmap.writing_mode,
+            },
+        }
+    }
+
+    fn for_each_code(
         &self,
         bytes: &[u8],
         page_index: u32,
-        mut visit: impl FnMut(f64, bool) -> Result<()>,
+        mut visit: impl FnMut(DecodedCode) -> Result<()>,
     ) -> Result<()> {
         match &self.widths {
             FontWidths::Simple {
                 widths,
                 missing,
                 standard,
+                valid_codes,
             } => {
-                for code in bytes {
+                for (start, code) in bytes.iter().enumerate() {
+                    if valid_codes
+                        .as_ref()
+                        .is_some_and(|valid| !valid[usize::from(*code)])
+                    {
+                        return Err(unsupported(
+                            page_index,
+                            format!(
+                                "Type3 character code {code} has no validated Encoding/CharProc"
+                            ),
+                        ));
+                    }
                     let width = widths[usize::from(*code)]
                         .or(*missing)
                         .or_else(|| {
@@ -230,22 +377,67 @@ impl FontMetrics {
                             format!("font has a negative width for character code {code}"),
                         ));
                     }
-                    visit(width, *code == b' ')?;
+                    let glyph_box = self
+                        .glyph_boxes
+                        .as_ref()
+                        .and_then(|boxes| boxes[usize::from(*code)])
+                        .unwrap_or([0.0, self.descent, width, self.ascent]);
+                    visit(DecodedCode {
+                        start,
+                        end: start + 1,
+                        width,
+                        is_space: *code == b' ',
+                        vertical: None,
+                        glyph_box,
+                    })?;
                 }
                 Ok(())
             }
             FontWidths::Cid {
                 widths,
                 default_width,
+                vertical_widths,
+                default_vertical,
+                encoding,
             } => {
-                if !bytes.len().is_multiple_of(2) {
-                    return Err(unsupported(
-                        page_index,
-                        "Identity-H text string contains an incomplete two-byte CID",
-                    ));
-                }
-                for pair in bytes.chunks_exact(2) {
-                    let cid = u16::from_be_bytes([pair[0], pair[1]]);
+                let mut offset = 0usize;
+                while offset < bytes.len() {
+                    let (consumed, cid, is_space) = match encoding {
+                        CidCodeMap::IdentityH | CidCodeMap::IdentityV => {
+                            let pair = bytes.get(offset..offset + 2).ok_or_else(|| {
+                                unsupported(
+                                    page_index,
+                                    "Identity-H text string contains an incomplete two-byte CID",
+                                )
+                            })?;
+                            (2, u16::from_be_bytes([pair[0], pair[1]]), false)
+                        }
+                        CidCodeMap::Embedded(cmap) => {
+                            let (consumed, key) = cmap.decode_next(bytes, offset, page_index)?;
+                            let cid = cmap.cid_map.get(&key).copied().ok_or_else(|| {
+                                unsupported(
+                                    page_index,
+                                    format!(
+                                        "embedded CMap has no CID mapping for {}-byte code {:X}",
+                                        key.len, key.value
+                                    ),
+                                )
+                            })?;
+                            cmap.unicode_map.get(&key).ok_or_else(|| {
+                                unsupported(
+                                    page_index,
+                                    format!(
+                                        "ToUnicode has no mapping for {}-byte code {:X}",
+                                        key.len, key.value
+                                    ),
+                                )
+                            })?;
+                            // PDF word spacing is keyed to a one-byte source
+                            // character code 0x20. ToUnicode affects extraction,
+                            // not text positioning.
+                            (consumed, cid, key.len == 1 && key.value == 0x20)
+                        }
+                    };
                     let width = widths.get(&cid).copied().unwrap_or(*default_width);
                     if width < 0.0 {
                         return Err(unsupported(
@@ -253,12 +445,73 @@ impl FontMetrics {
                             format!("font has a negative width for CID {cid}"),
                         ));
                     }
-                    visit(width, false)?;
+                    let vertical = (self.writing_mode() == WritingMode::Vertical).then(|| {
+                        let mut metric = vertical_widths
+                            .get(&cid)
+                            .copied()
+                            .unwrap_or(*default_vertical);
+                        if metric.position_x.is_none() {
+                            metric.position_x = Some(width / 2.0);
+                        }
+                        metric
+                    });
+                    visit(DecodedCode {
+                        start: offset,
+                        end: offset + consumed,
+                        width,
+                        is_space,
+                        vertical,
+                        glyph_box: [0.0, self.descent, width, self.ascent],
+                    })?;
+                    offset += consumed;
                 }
                 Ok(())
             }
         }
     }
+}
+
+impl EmbeddedCMap {
+    fn decode_next(
+        &self,
+        bytes: &[u8],
+        offset: usize,
+        page_index: u32,
+    ) -> Result<(usize, CodeKey)> {
+        let mut matches = Vec::new();
+        for length in 1..=4usize {
+            let Some(code_bytes) = bytes.get(offset..offset + length) else {
+                continue;
+            };
+            let value = code_value(code_bytes);
+            if self.codespaces.iter().any(|space| {
+                usize::from(space.len) == length && value >= space.start && value <= space.end
+            }) {
+                matches.push(CodeKey {
+                    len: length as u8,
+                    value,
+                });
+            }
+        }
+        if matches.len() != 1 {
+            return Err(unsupported(
+                page_index,
+                if matches.is_empty() {
+                    "text bytes do not match any embedded CMap codespace"
+                } else {
+                    "text bytes ambiguously match multiple embedded CMap codespaces"
+                },
+            ));
+        }
+        let key = matches[0];
+        Ok((usize::from(key.len), key))
+    }
+}
+
+fn code_value(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0u32, |value, byte| (value << 8) | u32::from(*byte))
 }
 
 struct FontResolver<'a> {
@@ -308,15 +561,55 @@ struct PagePlan {
     page_index: u32,
     width: f32,
     height: f32,
+    page_bounds: BoxPts,
     boxes: Vec<BoxPts>,
 }
 
 #[derive(Debug)]
 struct ContentResult {
     operations: Vec<Operation>,
-    removed: Vec<(BoxPts, &'static str)>,
+    removed: Vec<(BoxPts, RedactionObjectKind)>,
     removed_xobjects: BTreeSet<Vec<u8>>,
-    removed_form_ids: BTreeSet<ObjectId>,
+    removed_xobject_ids: BTreeSet<ObjectId>,
+    removed_shadings: BTreeSet<Vec<u8>>,
+    removed_shading_ids: BTreeSet<ObjectId>,
+    rewritten_forms: BTreeMap<Vec<u8>, FormRewrite>,
+    rewritten_form_ids: BTreeSet<ObjectId>,
+}
+
+#[derive(Debug)]
+struct XObjectRemoval {
+    bounds: BoxPts,
+    name: Vec<u8>,
+    object_ids: BTreeSet<ObjectId>,
+    kind: RedactionObjectKind,
+}
+
+#[derive(Debug)]
+struct FormRewrite {
+    original_id: ObjectId,
+    stream: Stream,
+    resources: Dictionary,
+    operations: Vec<Operation>,
+    nested_forms: BTreeMap<Vec<u8>, FormRewrite>,
+}
+
+#[derive(Debug)]
+enum XObjectAction {
+    Keep,
+    Remove(XObjectRemoval),
+    Rewrite(FormRewrite, Box<ContentResult>),
+}
+
+#[derive(Debug, Default)]
+struct PathGeometry {
+    bounds: Option<BoxPts>,
+    output_indices: Vec<usize>,
+    pending_clip: Option<ClipRule>,
+    has_current_point: bool,
+    has_subpath_start: bool,
+    stroke_scale_x: f64,
+    stroke_scale_y: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,12 +627,19 @@ struct PageAnalysisContext<'a> {
 
 /// Applies fail-closed Zone-1 redaction to service-compatible areas.
 ///
-/// Text objects, intersecting Form XObject invocations, and intersecting
-/// annotations are removed in full. Images remain and requested/removed bounds
-/// receive opaque black coverage. Saved bytes are reloaded and re-analyzed
-/// before this function returns.
+/// Intersecting text, raster, vector, shading, Form XObject, and annotation
+/// content is removed in full. Requested and over-removed bounds receive opaque
+/// black coverage. Saved bytes are reloaded and re-analyzed before this function
+/// returns.
 pub fn redact_pure(pdf: &[u8], areas: &[RedactArea]) -> Result<RedactOutput> {
+    if areas.is_empty() {
+        return Err(PdfCoreError::InvalidInput(
+            "redaction request contains no areas".to_string(),
+        ));
+    }
+
     let mut document = Document::load_mem(pdf)?;
+    crate::meta::guard_object_count(&document)?;
     crate::meta::ensure_not_encrypted(pdf, &document, true)?;
 
     let page_count = u32::try_from(document.get_pages().len()).map_err(|_| {
@@ -352,23 +652,30 @@ pub fn redact_pure(pdf: &[u8], areas: &[RedactArea]) -> Result<RedactOutput> {
     }
 
     let plans = build_page_plans(&document, areas)?;
-    if plans.is_empty() {
-        return Ok(RedactOutput {
-            pdf: pdf.to_vec(),
-            page_count,
-            warnings: Vec::new(),
-        });
-    }
 
     let mut warnings = Vec::new();
     let mut removed_total = 0usize;
-    let mut removed_form_ids = BTreeSet::new();
+    let mut removed_xobject_ids = BTreeSet::new();
+    let mut removed_shading_ids = BTreeSet::new();
+    let mut rewritten_form_ids = BTreeSet::new();
     let mut removed_annotation_ids = BTreeSet::new();
+    let mut pages_with_removed_content = BTreeSet::new();
     for plan in &plans {
         let annotation_removal = remove_annotations(&mut document, plan)?;
         removed_annotation_ids.extend(annotation_removal.object_ids);
         let result = analyze_page_content(&document, plan, AnalyzeMode::Rewrite)?;
-        removed_form_ids.extend(result.removed_form_ids.iter().copied());
+        removed_xobject_ids.extend(result.removed_xobject_ids.iter().copied());
+        removed_shading_ids.extend(result.removed_shading_ids.iter().copied());
+        rewritten_form_ids.extend(result.rewritten_form_ids.iter().copied());
+        if !result.removed.is_empty() {
+            pages_with_removed_content.insert(plan.page_index);
+            if structure_tree_has_replacement_text(&document)? {
+                return Err(unsupported(
+                    plan.page_index,
+                    "removed page content may have replacement text in the structure tree",
+                ));
+            }
+        }
 
         let mut removed = annotation_removal.removed;
         removed.extend(result.removed);
@@ -388,14 +695,20 @@ pub fn redact_pure(pdf: &[u8], areas: &[RedactArea]) -> Result<RedactOutput> {
         }
         for (bounds, kind) in &removed {
             if exceeds_requested(bounds, &plan.boxes, plan.width, plan.height) {
-                warnings.push(format!(
-                    "page {}: redaction removed a whole {kind} spanning ({:.1}, {:.1})-({:.1}, {:.1}) pt, beyond the requested area; the full bounds were covered with a black box",
-                    plan.page_index,
-                    bounds.left,
-                    bounds.bottom,
-                    bounds.right,
-                    bounds.top,
-                ));
+                warnings.push(RedactionWarning {
+                    code: RedactionWarningCode::OverRedaction,
+                    page: plan.page_index,
+                    kind: *kind,
+                    message: format!(
+                        "page {}: redaction removed a whole {} spanning ({:.1}, {:.1})-({:.1}, {:.1}) pt, beyond the requested area; the full bounds were covered with a black box",
+                        plan.page_index,
+                        kind.message_label(),
+                        bounds.left,
+                        bounds.bottom,
+                        bounds.right,
+                        bounds.top,
+                    ),
+                });
             }
         }
 
@@ -406,11 +719,24 @@ pub fn redact_pure(pdf: &[u8], areas: &[RedactArea]) -> Result<RedactOutput> {
                 .map(|(bounds, _)| *bounds)
                 .filter(|bounds| bounds.area() > 0.0),
         );
+        attach_rewritten_forms(
+            &mut document,
+            plan.page_id,
+            result.rewritten_forms,
+            plan.page_index,
+        )?;
         detach_unused_xobjects(
             &mut document,
             plan.page_id,
             &result.operations,
             &result.removed_xobjects,
+            plan.page_index,
+        )?;
+        detach_unused_shadings(
+            &mut document,
+            plan.page_id,
+            &result.operations,
+            &result.removed_shadings,
             plan.page_index,
         )?;
         replace_page_content(
@@ -423,15 +749,42 @@ pub fn redact_pure(pdf: &[u8], areas: &[RedactArea]) -> Result<RedactOutput> {
     }
 
     document.prune_objects();
-    ensure_removed_objects_are_unreachable(&document, &removed_form_ids, "Form XObject")?;
-    ensure_removed_objects_are_unreachable(&document, &removed_annotation_ids, "annotation")?;
+    ensure_removed_objects_are_unreachable(
+        &document,
+        &removed_xobject_ids,
+        "XObject or image mask",
+    )?;
+    ensure_removed_objects_are_unreachable(&document, &removed_shading_ids, "shading resource")?;
+    ensure_removed_objects_are_unreachable(
+        &document,
+        &removed_annotation_ids,
+        "annotation or form field",
+    )?;
+    ensure_removed_objects_are_unreachable(
+        &document,
+        &rewritten_form_ids,
+        "original rewritten Form XObject",
+    )?;
     document.renumber_objects();
     let mut output = Vec::new();
     document.save_to(&mut output).map_err(|error| {
         PdfCoreError::Unsupported(format!("redaction output could not be serialized: {error}"))
     })?;
 
-    verify_output(&output, areas, page_count)?;
+    verify_output(&output, areas, page_count, &pages_with_removed_content)?;
+    if output == pdf {
+        return Err(PdfCoreError::Unsupported(
+            "redaction produced unchanged output".to_string(),
+        ));
+    }
+    warnings.sort_by(|left, right| {
+        (left.page, left.code, left.kind, left.message.as_str()).cmp(&(
+            right.page,
+            right.code,
+            right.kind,
+            right.message.as_str(),
+        ))
+    });
     Ok(RedactOutput {
         pdf: output,
         page_count,
@@ -439,10 +792,16 @@ pub fn redact_pure(pdf: &[u8], areas: &[RedactArea]) -> Result<RedactOutput> {
     })
 }
 
-fn verify_output(pdf: &[u8], areas: &[RedactArea], expected_pages: u32) -> Result<()> {
+fn verify_output(
+    pdf: &[u8],
+    areas: &[RedactArea],
+    expected_pages: u32,
+    pages_with_removed_content: &BTreeSet<u32>,
+) -> Result<()> {
     let document = Document::load_mem(pdf).map_err(|error| {
         PdfCoreError::Unsupported(format!("redaction output could not be reloaded: {error}"))
     })?;
+    crate::meta::guard_object_count(&document)?;
     crate::meta::ensure_not_encrypted(pdf, &document, true)?;
     let actual_pages = u32::try_from(document.get_pages().len()).map_err(|_| {
         PdfCoreError::Unsupported("redaction output page count overflowed u32".to_string())
@@ -452,9 +811,15 @@ fn verify_output(pdf: &[u8], areas: &[RedactArea], expected_pages: u32) -> Resul
             "redaction round-trip changed page count from {expected_pages} to {actual_pages}"
         )));
     }
+    if !pages_with_removed_content.is_empty() && structure_tree_has_replacement_text(&document)? {
+        return Err(PdfCoreError::Unsupported(
+            "redaction output retains replacement text after page-content removal".to_string(),
+        ));
+    }
 
     for plan in build_page_plans(&document, areas)? {
         verify_annotations(&document, &plan)?;
+        verify_acroform_fields(&document, &plan)?;
         let result = analyze_page_content(&document, &plan, AnalyzeMode::Verify)?;
         if !result.removed.is_empty() {
             return Err(PdfCoreError::Unsupported(format!(
@@ -486,12 +851,18 @@ fn build_page_plans(document: &Document, areas: &[RedactArea]) -> Result<Vec<Pag
             .or_default()
             .push(area.rect());
     }
+    if let Some(page_index) = grouped
+        .keys()
+        .find(|page_index| !page_by_index.contains_key(page_index))
+    {
+        return Err(out_of_range_page_error(*page_index, pages.len()));
+    }
 
     let mut plans = Vec::new();
     for (page_index, rects) in grouped {
-        let Some(&page_id) = page_by_index.get(&page_index) else {
-            continue;
-        };
+        let &page_id = page_by_index
+            .get(&page_index)
+            .ok_or_else(|| out_of_range_page_error(page_index, pages.len()))?;
         let (origin_x, origin_y, width, height) = page_box(document, page_id, page_index)?;
         let rotation = page_rotation(document, page_id, page_index)?;
         let (displayed_width, displayed_height) = match rotation {
@@ -544,11 +915,24 @@ fn build_page_plans(document: &Document, areas: &[RedactArea]) -> Result<Vec<Pag
                 page_index,
                 width: page_width,
                 height: page_height,
+                page_bounds: BoxPts {
+                    left: origin_x as f32,
+                    right: (origin_x + width) as f32,
+                    bottom: origin_y as f32,
+                    top: (origin_y + height) as f32,
+                },
                 boxes,
             });
         }
     }
     Ok(plans)
+}
+
+fn out_of_range_page_error(page_index: u32, page_count: usize) -> PdfCoreError {
+    let page_label = if page_count == 1 { "page" } else { "pages" };
+    PdfCoreError::InvalidInput(format!(
+        "redaction page index {page_index} is out of range (document has {page_count} {page_label})"
+    ))
 }
 
 fn page_box(
@@ -1541,7 +1925,10 @@ fn analyze_page_content(
     mode: AnalyzeMode,
 ) -> Result<ContentResult> {
     let bytes = strict_page_content(document, plan.page_id, plan.page_index)?;
-    let content = decode_content_strict(&bytes, plan.page_index, "page content stream")?;
+    let mut content = decode_content_strict(&bytes, plan.page_index, "page content stream")?;
+    if mode == AnalyzeMode::Verify {
+        content.operations = strip_generated_coverage(document, content.operations, plan)?;
+    }
     let resources = find_inherited(document, plan.page_id, b"Resources")?
         .map(|object| deref(document, object))
         .transpose()?
@@ -1551,7 +1938,114 @@ fn analyze_page_content(
                 .map_err(|_| unsupported(plan.page_index, "page /Resources is not a dictionary"))
         })
         .transpose()?;
-    analyze_operations(document, resources, content.operations, plan, mode)
+    analyze_operations(
+        document,
+        resources,
+        content.operations,
+        plan,
+        mode,
+        GraphicsState::default(),
+        &mut Vec::new(),
+    )
+}
+
+fn strip_generated_coverage(
+    document: &Document,
+    operations: Vec<Operation>,
+    plan: &PagePlan,
+) -> Result<Vec<Operation>> {
+    let black_index = operations
+        .iter()
+        .rposition(|operation| operation.operator == "rg")
+        .ok_or_else(|| unsupported(plan.page_index, "output has no generated black coverage"))?;
+    if black_index == 0
+        || operations[black_index - 1].operator != "q"
+        || operations
+            .last()
+            .map(|operation| operation.operator.as_str())
+            != Some("Q")
+    {
+        return Err(unsupported(
+            plan.page_index,
+            "output generated coverage wrapper is malformed",
+        ));
+    }
+    require_operands(&operations[black_index - 1], 0, plan.page_index)?;
+    require_operands(&operations[black_index], 3, plan.page_index)?;
+    if operations[black_index]
+        .operands
+        .iter()
+        .map(|operand| number(document, operand, plan.page_index, "coverage color"))
+        .collect::<Result<Vec<_>>>()?
+        .iter()
+        .any(|value| value.abs() > f64::EPSILON)
+    {
+        return Err(unsupported(
+            plan.page_index,
+            "output generated coverage is not opaque black",
+        ));
+    }
+    require_operands(
+        operations
+            .last()
+            .ok_or_else(|| unsupported(plan.page_index, "output content is empty"))?,
+        0,
+        plan.page_index,
+    )?;
+
+    let coverage_operations = &operations[black_index + 1..operations.len() - 1];
+    if coverage_operations.is_empty() || !coverage_operations.len().is_multiple_of(2) {
+        return Err(unsupported(
+            plan.page_index,
+            "output generated coverage rectangles are malformed",
+        ));
+    }
+    let mut coverage_bounds = Vec::with_capacity(coverage_operations.len() / 2);
+    for pair in coverage_operations.chunks_exact(2) {
+        if pair[0].operator != "re" || pair[1].operator != "f" {
+            return Err(unsupported(
+                plan.page_index,
+                "output generated coverage contains an unexpected operator",
+            ));
+        }
+        require_operands(&pair[0], 4, plan.page_index)?;
+        require_operands(&pair[1], 0, plan.page_index)?;
+        let values = pair[0]
+            .operands
+            .iter()
+            .map(|operand| number(document, operand, plan.page_index, "coverage rectangle"))
+            .collect::<Result<Vec<_>>>()?;
+        if values[2] <= 0.0 || values[3] <= 0.0 {
+            return Err(unsupported(
+                plan.page_index,
+                "output generated coverage rectangle is degenerate",
+            ));
+        }
+        coverage_bounds.push(BoxPts {
+            left: values[0] as f32,
+            right: (values[0] + values[2]) as f32,
+            bottom: values[1] as f32,
+            top: (values[1] + values[3]) as f32,
+        });
+    }
+    if plan.boxes.iter().any(|requested| {
+        !coverage_bounds
+            .iter()
+            .any(|coverage| boxes_approximately_equal(*requested, *coverage))
+    }) {
+        return Err(unsupported(
+            plan.page_index,
+            "output is missing a requested black coverage rectangle",
+        ));
+    }
+    Ok(operations[..black_index - 1].to_vec())
+}
+
+fn boxes_approximately_equal(a: BoxPts, b: BoxPts) -> bool {
+    (a.left - b.left).abs() < 0.01
+        && (a.right - b.right).abs() < 0.01
+        && (a.bottom - b.bottom).abs() < 0.01
+        && (a.top - b.top).abs() < 0.01
 }
 
 fn analyze_operations(
@@ -1560,9 +2054,11 @@ fn analyze_operations(
     operations: Vec<Operation>,
     plan: &PagePlan,
     mode: AnalyzeMode,
+    initial_graphics: GraphicsState,
+    form_stack: &mut Vec<ObjectId>,
 ) -> Result<ContentResult> {
     let mut fonts = FontResolver::new(document, resources, plan.page_index);
-    let mut graphics = GraphicsState::default();
+    let mut graphics = initial_graphics;
     let mut stack = Vec::new();
     let mut marked_stack = Vec::new();
     let mut structure_replacement_text = None;
@@ -1570,7 +2066,22 @@ fn analyze_operations(
     let mut output = Vec::with_capacity(operations.len());
     let mut removed = Vec::new();
     let mut removed_xobjects = BTreeSet::new();
-    let mut removed_form_ids = BTreeSet::new();
+    let mut removed_xobject_ids = BTreeSet::new();
+    let mut removed_shadings = BTreeSet::new();
+    let mut removed_shading_ids = BTreeSet::new();
+    let mut rewritten_forms = BTreeMap::new();
+    let mut rewritten_form_ids = BTreeSet::new();
+    let mut path = PathGeometry::default();
+    let mut suppressed_output_indices = BTreeSet::new();
+    let do_counts = operations
+        .iter()
+        .filter(|operation| operation.operator == "Do")
+        .filter_map(|operation| operation.operands.first())
+        .filter_map(|operand| operand.as_name().ok())
+        .fold(BTreeMap::<Vec<u8>, usize>::new(), |mut counts, name| {
+            *counts.entry(name.to_vec()).or_default() += 1;
+            counts
+        });
 
     for operation in operations {
         if let Some(text) = text_object.as_mut() {
@@ -1586,13 +2097,11 @@ fn analyze_operations(
                     ));
                 }
                 text.operations.push(operation);
-                let completed = text_object
+                let mut completed = text_object
                     .take()
                     .ok_or_else(|| unsupported(plan.page_index, "text object state disappeared"))?;
-                let intersects = completed
-                    .bounds
-                    .is_some_and(|bounds| intersects_any(bounds, &plan.boxes));
-                if intersects {
+                if !completed.removed_glyphs.is_empty() {
+                    prune_unobservable_shows(&mut completed.operations);
                     if completed.unsafe_marked_content {
                         return Err(unsupported(
                             plan.page_index,
@@ -1605,29 +2114,24 @@ fn analyze_operations(
                             "intersecting text uses a clipping rendering mode; removal could alter unrelated page content",
                         ));
                     }
-                    let bounds = completed.bounds.ok_or_else(|| {
-                        unsupported(
-                            plan.page_index,
-                            "intersecting text has no computable bounds",
-                        )
-                    })?;
-                    if removed.len() >= MAX_REMOVED_OBJECTS_PER_PAGE {
+                    if removed.len() + completed.removed_glyphs.len() > MAX_REMOVED_OBJECTS_PER_PAGE
+                    {
                         return Err(unsupported(
                             plan.page_index,
                             "redaction intersects too many content objects for safe rewriting",
                         ));
                     }
-                    removed.push((bounds, "text object"));
-                    if mode == AnalyzeMode::Rewrite {
-                        output.extend(style_carrier(&graphics.text));
-                        output.extend(completed.post_graphics_ops);
-                    }
-                } else {
-                    output.extend(completed.operations);
+                    removed.extend(
+                        completed
+                            .removed_glyphs
+                            .into_iter()
+                            .map(|bounds| (bounds, RedactionObjectKind::Text)),
+                    );
                 }
+                output.extend(completed.operations);
                 continue;
             }
-            process_text_operation(
+            let emitted = process_text_operation(
                 PageAnalysisContext {
                     document,
                     resources,
@@ -1639,8 +2143,9 @@ fn analyze_operations(
                 &mut fonts,
                 &mut marked_stack,
                 &mut structure_replacement_text,
+                plan,
             )?;
-            text.operations.push(operation);
+            text.operations.extend(emitted);
             continue;
         }
 
@@ -1674,25 +2179,182 @@ fn analyze_operations(
                 output.push(operation);
             }
             "Do" => {
-                let remove = analyze_xobject(document, resources, &operation, graphics.ctm, plan)?;
-                if let Some((bounds, name, form_id)) = remove {
+                let name = operation
+                    .operands
+                    .first()
+                    .and_then(|operand| operand.as_name().ok())
+                    .ok_or_else(|| unsupported(plan.page_index, "Do operand is not a name"))?;
+                let action = analyze_xobject(
+                    PageAnalysisContext {
+                        document,
+                        resources,
+                        page_index: plan.page_index,
+                    },
+                    &operation,
+                    &graphics,
+                    plan,
+                    mode,
+                    do_counts.get(name).copied().unwrap_or_default(),
+                    form_stack,
+                )?;
+                match action {
+                    XObjectAction::Keep => output.push(operation),
+                    XObjectAction::Remove(removal) => {
+                        if removed.len() >= MAX_REMOVED_OBJECTS_PER_PAGE {
+                            return Err(unsupported(
+                                plan.page_index,
+                                "redaction intersects too many content objects for safe rewriting",
+                            ));
+                        }
+                        removed.push((removal.bounds, removal.kind));
+                        removed_xobjects.insert(removal.name);
+                        removed_xobject_ids.extend(removal.object_ids);
+                    }
+                    XObjectAction::Rewrite(rewrite, nested) => {
+                        removed.extend(nested.removed);
+                        removed_xobjects.extend(nested.removed_xobjects);
+                        removed_xobject_ids.extend(nested.removed_xobject_ids);
+                        removed_shadings.extend(nested.removed_shadings);
+                        removed_shading_ids.extend(nested.removed_shading_ids);
+                        rewritten_form_ids.extend(nested.rewritten_form_ids);
+                        rewritten_form_ids.insert(rewrite.original_id);
+                        rewritten_forms.insert(name.to_vec(), rewrite);
+                        output.push(operation);
+                    }
+                }
+            }
+            "BI" => {
+                validate_inline_image(&operation, plan.page_index)?;
+                let placed = transform_box(graphics.ctm, [0.0, 0.0, 1.0, 1.0], plan.page_index)?;
+                let visible = visible_graphics_bounds(placed, graphics.clip, plan.page_bounds);
+                if visible.is_some_and(|bounds| intersects_any(bounds, &plan.boxes)) {
                     if removed.len() >= MAX_REMOVED_OBJECTS_PER_PAGE {
                         return Err(unsupported(
                             plan.page_index,
                             "redaction intersects too many content objects for safe rewriting",
                         ));
                     }
-                    removed.push((bounds, "Form XObject"));
-                    removed_xobjects.insert(name);
-                    removed_form_ids.insert(form_id);
+                    removed.push((
+                        visible.ok_or_else(|| {
+                            unsupported(plan.page_index, "inline image has no visible bounds")
+                        })?,
+                        RedactionObjectKind::InlineImage,
+                    ));
                 } else {
                     output.push(operation);
                 }
             }
-            "BI" => {
-                validate_inline_image(&operation, plan.page_index)?;
-                let _placed = transform_box(graphics.ctm, [0.0, 0.0, 1.0, 1.0], plan.page_index)?;
+            "m" | "l" | "c" | "v" | "y" | "h" | "re" => {
+                let bounds = analyze_path_construction(
+                    document,
+                    &operation,
+                    graphics.ctm,
+                    &mut path,
+                    plan.page_index,
+                )?;
+                path.stroke_scale_x = path
+                    .stroke_scale_x
+                    .max(graphics.ctm.a.abs() + graphics.ctm.c.abs());
+                path.stroke_scale_y = path
+                    .stroke_scale_y
+                    .max(graphics.ctm.b.abs() + graphics.ctm.d.abs());
+                if let Some(bounds) = bounds {
+                    path.bounds = Some(match path.bounds {
+                        Some(existing) => union_box(existing, bounds),
+                        None => bounds,
+                    });
+                }
+                path.output_indices.push(output.len());
                 output.push(operation);
+            }
+            "W" | "W*" => {
+                require_operands(&operation, 0, plan.page_index)?;
+                if path.pending_clip.is_some() {
+                    return Err(unsupported(
+                        plan.page_index,
+                        "path has more than one clipping operator before termination",
+                    ));
+                }
+                path.pending_clip = Some(match operation.operator.as_str() {
+                    "W" => ClipRule::NonZero,
+                    "W*" => ClipRule::EvenOdd,
+                    _ => unreachable!("matched clipping operator"),
+                });
+                path.output_indices.push(output.len());
+                output.push(operation);
+            }
+            "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                require_operands(&operation, 0, plan.page_index)?;
+                let mut bounds = path.bounds;
+                if matches!(
+                    operation.operator.as_str(),
+                    "S" | "s" | "B" | "B*" | "b" | "b*"
+                ) {
+                    bounds = bounds
+                        .map(|bounds| {
+                            inflate_stroked_path_bounds(bounds, &graphics, &path, plan.page_index)
+                        })
+                        .transpose()?;
+                }
+                let visible = bounds.and_then(|bounds| {
+                    visible_graphics_bounds(bounds, graphics.clip, plan.page_bounds)
+                });
+                if visible.is_some_and(|bounds| intersects_any(bounds, &plan.boxes)) {
+                    if removed.len() >= MAX_REMOVED_OBJECTS_PER_PAGE {
+                        return Err(unsupported(
+                            plan.page_index,
+                            "redaction intersects too many content objects for safe rewriting",
+                        ));
+                    }
+                    if path.pending_clip.is_some() {
+                        if matches!(operation.operator.as_str(), "s" | "b" | "b*") {
+                            output.push(Operation::new("h", vec![]));
+                        }
+                        output.push(Operation::new("n", vec![]));
+                    } else {
+                        suppressed_output_indices.extend(path.output_indices.iter().copied());
+                    }
+                    removed.push((
+                        visible.ok_or_else(|| {
+                            unsupported(plan.page_index, "painted vector path has no bounds")
+                        })?,
+                        RedactionObjectKind::VectorPath,
+                    ));
+                } else {
+                    output.push(operation);
+                }
+                if let Some(rule) = path.pending_clip {
+                    graphics.clip.intersect(path.bounds, rule);
+                }
+                path = PathGeometry::default();
+            }
+            "n" => {
+                require_operands(&operation, 0, plan.page_index)?;
+                output.push(operation);
+                if let Some(rule) = path.pending_clip {
+                    graphics.clip.intersect(path.bounds, rule);
+                }
+                path = PathGeometry::default();
+            }
+            "sh" => {
+                let (name, shading_id) = analyze_shading(document, resources, &operation, plan)?;
+                let Some(bounds) = graphics.clip.conservative_bounds(plan.page_bounds) else {
+                    output.push(operation);
+                    continue;
+                };
+                if !intersects_any(bounds, &plan.boxes) {
+                    output.push(operation);
+                    continue;
+                }
+                if removed.len() >= MAX_REMOVED_OBJECTS_PER_PAGE {
+                    return Err(unsupported(
+                        plan.page_index,
+                        "redaction intersects too many content objects for safe rewriting",
+                    ));
+                }
+                removed.push((bounds, RedactionObjectKind::Shading));
+                removed_shadings.insert(name);
+                removed_shading_ids.insert(shading_id);
             }
             "gs" => {
                 apply_ext_gstate(
@@ -1792,14 +2454,32 @@ fn analyze_operations(
             "unbalanced marked-content BMC/BDC/EMC stack",
         ));
     }
+    if path.pending_clip.is_some() {
+        return Err(unsupported(
+            plan.page_index,
+            "clipping path has no terminating painting or n operator",
+        ));
+    }
+    let operations = output
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            (!suppressed_output_indices.contains(&index)).then_some(operation)
+        })
+        .collect();
     Ok(ContentResult {
-        operations: output,
+        operations,
         removed,
         removed_xobjects,
-        removed_form_ids,
+        removed_xobject_ids,
+        removed_shadings,
+        removed_shading_ids,
+        rewritten_forms,
+        rewritten_form_ids,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_text_operation(
     context: PageAnalysisContext<'_>,
     operation: &Operation,
@@ -1808,12 +2488,14 @@ fn process_text_operation(
     fonts: &mut FontResolver<'_>,
     marked_stack: &mut Vec<bool>,
     structure_replacement_text: &mut Option<bool>,
-) -> Result<()> {
+    plan: &PagePlan,
+) -> Result<Vec<Operation>> {
     let PageAnalysisContext {
         document,
         resources,
         page_index,
     } = context;
+    let mut emitted = vec![operation.clone()];
     match operation.operator.as_str() {
         "Tf" => {
             require_operands(operation, 2, page_index)?;
@@ -1873,7 +2555,9 @@ fn process_text_operation(
             let bytes = operation.operands[0]
                 .as_str()
                 .map_err(|_| unsupported(page_index, "Tj operand is not a string"))?;
-            show_text(bytes, text, graphics, fonts, page_index)?;
+            if let Some(rewritten) = show_text(bytes, text, graphics, fonts, plan)? {
+                emitted = vec![rewritten];
+            }
         }
         "TJ" => {
             require_operands(operation, 1, page_index)?;
@@ -1886,17 +2570,32 @@ fn process_text_operation(
                     "TJ array exceeds safe analysis complexity limits",
                 ));
             }
+            let mut rewritten_items = Vec::with_capacity(array.len());
+            let mut changed = false;
             for item in array {
                 match deref(document, item)? {
                     Object::String(bytes, _) => {
-                        show_text(bytes, text, graphics, fonts, page_index)?
+                        if let Some(rewritten) = show_text(bytes, text, graphics, fonts, plan)? {
+                            let items = rewritten
+                                .operands
+                                .first()
+                                .and_then(|operand| operand.as_array().ok())
+                                .ok_or_else(|| {
+                                    unsupported(
+                                        page_index,
+                                        "glyph rewrite did not produce a TJ array",
+                                    )
+                                })?;
+                            rewritten_items.extend(items.iter().cloned());
+                            changed = true;
+                        } else {
+                            rewritten_items.push(item.clone());
+                        }
                     }
                     Object::Integer(_) | Object::Real(_) => {
                         let adjustment = number(document, item, page_index, "TJ adjustment")?;
-                        let advance = -adjustment / 1000.0
-                            * graphics.text.size
-                            * graphics.text.horizontal_scale;
-                        text.matrix = text.matrix.concat(Matrix::translation(advance, 0.0));
+                        apply_tj_adjustment(text, graphics, fonts, adjustment, page_index)?;
+                        rewritten_items.push(item.clone());
                     }
                     _ => {
                         return Err(unsupported(
@@ -1906,6 +2605,9 @@ fn process_text_operation(
                     }
                 }
             }
+            if changed {
+                emitted = vec![Operation::new("TJ", vec![Object::Array(rewritten_items)])];
+            }
         }
         "'" => {
             require_operands(operation, 1, page_index)?;
@@ -1913,7 +2615,9 @@ fn process_text_operation(
             let bytes = operation.operands[0]
                 .as_str()
                 .map_err(|_| unsupported(page_index, "' operand is not a string"))?;
-            show_text(bytes, text, graphics, fonts, page_index)?;
+            if let Some(rewritten) = show_text(bytes, text, graphics, fonts, plan)? {
+                emitted = vec![Operation::new("T*", vec![]), rewritten];
+            }
         }
         "\"" => {
             require_operands(operation, 3, page_index)?;
@@ -1933,7 +2637,14 @@ fn process_text_operation(
             let bytes = operation.operands[2]
                 .as_str()
                 .map_err(|_| unsupported(page_index, "\" text operand is not a string"))?;
-            show_text(bytes, text, graphics, fonts, page_index)?;
+            if let Some(rewritten) = show_text(bytes, text, graphics, fonts, plan)? {
+                emitted = vec![
+                    Operation::new("Tw", vec![operation.operands[0].clone()]),
+                    Operation::new("Tc", vec![operation.operands[1].clone()]),
+                    Operation::new("T*", vec![]),
+                    rewritten,
+                ];
+            }
         }
         "gs" => {
             apply_ext_gstate(document, resources, operation, graphics, fonts, page_index)?;
@@ -2015,7 +2726,7 @@ fn process_text_operation(
             ));
         }
     }
-    Ok(())
+    Ok(emitted)
 }
 
 fn show_text(
@@ -2023,8 +2734,9 @@ fn show_text(
     text: &mut TextObject,
     graphics: &GraphicsState,
     fonts: &mut FontResolver<'_>,
-    page_index: u32,
-) -> Result<()> {
+    plan: &PagePlan,
+) -> Result<Option<Operation>> {
+    let page_index = plan.page_index;
     text.shown_bytes = text.shown_bytes.checked_add(bytes.len()).ok_or_else(|| {
         unsupported(
             page_index,
@@ -2055,64 +2767,331 @@ fn show_text(
         ));
     }
     let metrics = fonts.get(font_name)?;
-    let glyph_x1 = metrics.x_min * graphics.text.size / 1000.0 * graphics.text.horizontal_scale;
-    let glyph_x2 = metrics.x_max * graphics.text.size / 1000.0 * graphics.text.horizontal_scale;
-    let glyph_left = glyph_x1.min(glyph_x2);
-    let glyph_right = glyph_x1.max(glyph_x2);
-    let mut advance = 0.0;
-    let mut left = f64::INFINITY;
-    let mut right = f64::NEG_INFINITY;
-    metrics.for_each_code_width(bytes, page_index, |width, is_space| {
-        left = left.min(advance + glyph_left);
-        right = right.max(advance + glyph_right);
-        let word_spacing = if is_space {
+    let mut boundaries = Vec::new();
+    let mut removed = Vec::new();
+    let mut displacement_milli = Vec::new();
+    metrics.for_each_code(bytes, page_index, |code| {
+        let word_spacing = if code.is_space {
             graphics.text.word_spacing
         } else {
             0.0
         };
-        let step =
-            (width / 1000.0 * graphics.text.size + graphics.text.char_spacing + word_spacing)
-                * graphics.text.horizontal_scale;
-        advance += step;
-        left = left.min(advance);
-        right = right.max(advance);
-        Ok(())
-    })?;
-    if ![advance, left, right].iter().all(|value| value.is_finite()) && !bytes.is_empty() {
-        return Err(unsupported(page_index, "text advance is non-finite"));
-    }
-
-    if !bytes.is_empty() {
-        if (4..=7).contains(&graphics.text.rendering_mode) {
-            text.used_text_clip = true;
-        }
-        let lower = metrics.descent * graphics.text.size / 1000.0 + graphics.text.rise;
-        let upper = metrics.ascent * graphics.text.size / 1000.0 + graphics.text.rise;
+        let spacing = graphics.text.char_spacing + word_spacing;
+        let (step_milli, step_x, step_y, glyph_left, glyph_right, lower, upper) =
+            if let Some(vertical) = code.vertical {
+                let position_x = vertical.position_x.ok_or_else(|| {
+                    unsupported(
+                        page_index,
+                        "vertical glyph has no horizontal origin displacement",
+                    )
+                })?;
+                let step_milli = vertical.displacement_y + 1000.0 * spacing / graphics.text.size;
+                let origin_x =
+                    -position_x / 1000.0 * graphics.text.size * graphics.text.horizontal_scale;
+                let glyph_left = origin_x
+                    + code.glyph_box[0] / 1000.0
+                        * graphics.text.size
+                        * graphics.text.horizontal_scale;
+                let glyph_right = origin_x
+                    + code.glyph_box[2] / 1000.0
+                        * graphics.text.size
+                        * graphics.text.horizontal_scale;
+                let cell_end = vertical.displacement_y / 1000.0 * graphics.text.size;
+                (
+                    step_milli,
+                    0.0,
+                    step_milli / 1000.0 * graphics.text.size,
+                    glyph_left,
+                    glyph_right,
+                    cell_end.min(0.0) + graphics.text.rise,
+                    cell_end.max(0.0) + graphics.text.rise,
+                )
+            } else {
+                let step_milli = code.width + 1000.0 * spacing / graphics.text.size;
+                let step_x =
+                    step_milli / 1000.0 * graphics.text.size * graphics.text.horizontal_scale;
+                // `glyph_box` already describes where the glyph paints relative to the
+                // pen: the advance cell for fonts whose outlines we do not resolve, and
+                // the /FontMatrix-transformed box for Type 3. Do not union it with the
+                // advance cell — a Type 3 /FontMatrix may translate the glyph away from
+                // the origin, and stretching the box back to the pen would swallow
+                // neighbouring glyphs that carry no ink there.
+                (
+                    step_milli,
+                    step_x,
+                    0.0,
+                    code.glyph_box[0] / 1000.0
+                        * graphics.text.size
+                        * graphics.text.horizontal_scale,
+                    code.glyph_box[2] / 1000.0
+                        * graphics.text.size
+                        * graphics.text.horizontal_scale,
+                    code.glyph_box[1] / 1000.0 * graphics.text.size + graphics.text.rise,
+                    code.glyph_box[3] / 1000.0 * graphics.text.size + graphics.text.rise,
+                )
+            };
         let transform = graphics.ctm.concat(text.matrix);
-        let mut bounds = transform_box(
+        let mut bounds = transform_glyph_box(
             transform,
-            [left, lower.min(upper), right, lower.max(upper)],
+            [
+                glyph_left.min(glyph_right),
+                lower.min(upper),
+                glyph_left.max(glyph_right),
+                lower.max(upper),
+            ],
             page_index,
         )?;
         if matches!(graphics.text.rendering_mode, 1 | 2 | 5 | 6) {
-            bounds = inflate_stroked_text(bounds, graphics, page_index)?;
+            bounds = inflate_stroked_text_bounds(bounds, graphics, page_index)?;
         }
-        text.bounds = Some(match text.bounds {
-            Some(existing) => union_box(existing, bounds),
-            None => bounds,
-        });
+        let visible = visible_graphics_bounds(bounds, graphics.clip, plan.page_bounds);
+        let remove = visible.is_some_and(|visible| intersects_any(visible, &plan.boxes));
+        if remove {
+            text.removed_glyphs.push(visible.ok_or_else(|| {
+                unsupported(page_index, "intersecting glyph has no visible bounds")
+            })?);
+            if (4..=7).contains(&graphics.text.rendering_mode) {
+                text.used_text_clip = true;
+            }
+        }
+        boundaries.push((code.start, code.end));
+        removed.push(remove);
+        displacement_milli.push(step_milli);
+        text.matrix = text.matrix.concat(Matrix::translation(step_x, step_y));
+        Ok(())
+    })?;
+    if removed.iter().any(|value| *value) {
+        rewrite_glyph_bytes_as_tj(
+            bytes,
+            &boundaries,
+            &removed,
+            &displacement_milli,
+            page_index,
+        )
+        .map(Some)
+    } else {
+        Ok(None)
     }
-    text.matrix = text.matrix.concat(Matrix::translation(advance, 0.0));
+}
+
+fn apply_tj_adjustment(
+    text: &mut TextObject,
+    graphics: &GraphicsState,
+    fonts: &mut FontResolver<'_>,
+    adjustment: f64,
+    page_index: u32,
+) -> Result<()> {
+    let font_name = graphics
+        .text
+        .font
+        .as_deref()
+        .ok_or_else(|| unsupported(page_index, "TJ adjustment has no selected font"))?;
+    let writing_mode = fonts.get(font_name)?.writing_mode();
+    let displacement = -adjustment / 1000.0 * graphics.text.size;
+    text.matrix = match writing_mode {
+        WritingMode::Horizontal => text.matrix.concat(Matrix::translation(
+            displacement * graphics.text.horizontal_scale,
+            0.0,
+        )),
+        WritingMode::Vertical => text.matrix.concat(Matrix::translation(0.0, displacement)),
+    };
     Ok(())
 }
 
-fn analyze_xobject(
+fn analyze_path_construction(
+    document: &Document,
+    operation: &Operation,
+    ctm: Matrix,
+    path: &mut PathGeometry,
+    page_index: u32,
+) -> Result<Option<BoxPts>> {
+    let points = match operation.operator.as_str() {
+        "m" => {
+            let [x, y] = two_numbers(document, operation, page_index)?;
+            path.has_current_point = true;
+            path.has_subpath_start = true;
+            vec![(x, y)]
+        }
+        "l" => {
+            require_path_current_point(path, page_index, "l")?;
+            let [x, y] = two_numbers(document, operation, page_index)?;
+            vec![(x, y)]
+        }
+        "c" => {
+            require_path_current_point(path, page_index, "c")?;
+            require_operands(operation, 6, page_index)?;
+            let values = operation
+                .operands
+                .iter()
+                .map(|operand| number(document, operand, page_index, "c"))
+                .collect::<Result<Vec<_>>>()?;
+            vec![
+                (values[0], values[1]),
+                (values[2], values[3]),
+                (values[4], values[5]),
+            ]
+        }
+        "v" | "y" => {
+            require_path_current_point(path, page_index, &operation.operator)?;
+            require_operands(operation, 4, page_index)?;
+            let values = operation
+                .operands
+                .iter()
+                .map(|operand| number(document, operand, page_index, &operation.operator))
+                .collect::<Result<Vec<_>>>()?;
+            vec![(values[0], values[1]), (values[2], values[3])]
+        }
+        "re" => {
+            require_operands(operation, 4, page_index)?;
+            let values = operation
+                .operands
+                .iter()
+                .map(|operand| number(document, operand, page_index, "re"))
+                .collect::<Result<Vec<_>>>()?;
+            let x1 = values[0] + values[2];
+            let y1 = values[1] + values[3];
+            if ![x1, y1].iter().all(|value| value.is_finite()) {
+                return Err(unsupported(page_index, "re bounds are non-finite"));
+            }
+            path.has_current_point = true;
+            path.has_subpath_start = true;
+            vec![
+                (values[0], values[1]),
+                (values[0], y1),
+                (x1, values[1]),
+                (x1, y1),
+            ]
+        }
+        "h" => {
+            require_operands(operation, 0, page_index)?;
+            if !path.has_current_point || !path.has_subpath_start {
+                return Err(unsupported(
+                    page_index,
+                    "h appears before a path subpath start",
+                ));
+            }
+            return Ok(None);
+        }
+        _ => {
+            return Err(unsupported(
+                page_index,
+                format!(
+                    "unexpected path construction operator {}",
+                    operation.operator
+                ),
+            ));
+        }
+    };
+    transformed_points_box(ctm, &points, page_index).map(Some)
+}
+
+fn require_path_current_point(path: &PathGeometry, page_index: u32, operator: &str) -> Result<()> {
+    if !path.has_current_point {
+        return Err(unsupported(
+            page_index,
+            format!("{operator} appears before a path current point"),
+        ));
+    }
+    Ok(())
+}
+
+fn transformed_points_box(
+    matrix: Matrix,
+    points: &[(f64, f64)],
+    page_index: u32,
+) -> Result<BoxPts> {
+    if !matrix.is_finite()
+        || points
+            .iter()
+            .flat_map(|(x, y)| [x, y])
+            .any(|value| !value.is_finite())
+    {
+        return Err(unsupported(
+            page_index,
+            "path bounds contain non-finite values",
+        ));
+    }
+    let transformed: Vec<_> = points.iter().map(|(x, y)| matrix.point(*x, *y)).collect();
+    let bounds = BoxPts {
+        left: (transformed
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min)
+            - BBOX_MARGIN_PT) as f32,
+        right: (transformed
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max)
+            + BBOX_MARGIN_PT) as f32,
+        bottom: (transformed
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min)
+            - BBOX_MARGIN_PT) as f32,
+        top: (transformed
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::NEG_INFINITY, f64::max)
+            + BBOX_MARGIN_PT) as f32,
+    };
+    if ![bounds.left, bounds.right, bounds.bottom, bounds.top]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(unsupported(
+            page_index,
+            "transformed path bounds exceed supported precision",
+        ));
+    }
+    Ok(bounds)
+}
+
+fn analyze_shading(
     document: &Document,
     resources: Option<&Dictionary>,
     operation: &Operation,
-    ctm: Matrix,
     plan: &PagePlan,
-) -> Result<Option<(BoxPts, Vec<u8>, ObjectId)>> {
+) -> Result<(Vec<u8>, ObjectId)> {
+    require_operands(operation, 1, plan.page_index)?;
+    let name = operation.operands[0]
+        .as_name()
+        .map_err(|_| unsupported(plan.page_index, "sh operand is not a name"))?;
+    let shading = resource_entry(document, resources, b"Shading", name, plan.page_index)?;
+    let (shading_id, resolved) = document.dereference(shading).map_err(|error| {
+        unsupported(
+            plan.page_index,
+            format!("shading resource cannot be resolved: {error}"),
+        )
+    })?;
+    if !matches!(resolved, Object::Dictionary(_) | Object::Stream(_)) {
+        return Err(unsupported(
+            plan.page_index,
+            "shading resource is neither a dictionary nor a stream",
+        ));
+    }
+    let shading_id = shading_id.ok_or_else(|| {
+        unsupported(
+            plan.page_index,
+            "shading resource is direct and cannot be pruned safely",
+        )
+    })?;
+    Ok((name.to_vec(), shading_id))
+}
+
+fn analyze_xobject(
+    context: PageAnalysisContext<'_>,
+    operation: &Operation,
+    invoking_graphics: &GraphicsState,
+    plan: &PagePlan,
+    mode: AnalyzeMode,
+    invocation_count: usize,
+    form_stack: &mut Vec<ObjectId>,
+) -> Result<XObjectAction> {
+    let PageAnalysisContext {
+        document,
+        resources,
+        page_index: _,
+    } = context;
     require_operands(operation, 1, plan.page_index)?;
     let name = operation.operands[0]
         .as_name()
@@ -2136,8 +3115,58 @@ fn analyze_xobject(
         .map_err(|_| unsupported(plan.page_index, "XObject /Subtype is not a name"))?;
     match subtype {
         b"Image" => {
-            let _bounds = transform_box(ctm, [0.0, 0.0, 1.0, 1.0], plan.page_index)?;
-            Ok(None)
+            let placed =
+                transform_box(invoking_graphics.ctm, [0.0, 0.0, 1.0, 1.0], plan.page_index)?;
+            let Some(bounds) =
+                visible_graphics_bounds(placed, invoking_graphics.clip, plan.page_bounds)
+            else {
+                return Ok(XObjectAction::Keep);
+            };
+            if !intersects_any(bounds, &plan.boxes) {
+                return Ok(XObjectAction::Keep);
+            }
+            let image_id = xobject_id.ok_or_else(|| {
+                unsupported(
+                    plan.page_index,
+                    "intersecting image XObject is a direct stream and cannot be pruned safely",
+                )
+            })?;
+            let mut object_ids = BTreeSet::from([image_id]);
+            for key in [b"SMask".as_slice(), b"Mask"] {
+                let Ok(mask) = stream.dict.get(key) else {
+                    continue;
+                };
+                if let Object::Reference(mask_id) = mask {
+                    deref(document, mask)?.as_stream().map_err(|_| {
+                        unsupported(
+                            plan.page_index,
+                            format!(
+                                "image /{} reference is not a stream",
+                                String::from_utf8_lossy(key)
+                            ),
+                        )
+                    })?;
+                    object_ids.insert(*mask_id);
+                } else if key == b"SMask"
+                    && !matches!(deref(document, mask)?, Object::Name(value) if value == b"None")
+                {
+                    return Err(unsupported(
+                        plan.page_index,
+                        "image /SMask is neither an indirect stream nor /None",
+                    ));
+                } else if key == b"Mask" && !matches!(deref(document, mask)?, Object::Array(_)) {
+                    return Err(unsupported(
+                        plan.page_index,
+                        "image /Mask is neither an indirect stream nor a color-key array",
+                    ));
+                }
+            }
+            Ok(XObjectAction::Remove(XObjectRemoval {
+                bounds,
+                name: name.to_vec(),
+                object_ids,
+                kind: RedactionObjectKind::ImageXObject,
+            }))
         }
         b"Form" => {
             let bbox_object = stream.dict.get(b"BBox").map_err(|_| {
@@ -2182,19 +3211,24 @@ fn analyze_xobject(
                 }
                 Err(_) => Matrix::IDENTITY,
             };
-            let bounds = transform_box(
-                ctm.concat(matrix),
+            let form_bounds = transform_box(
+                invoking_graphics.ctm.concat(matrix),
                 [values[0], values[1], values[2], values[3]],
                 plan.page_index,
             )?;
-            if bounds.area() <= 0.0 {
+            if form_bounds.area() <= 0.0 {
                 return Err(unsupported(
                     plan.page_index,
                     "Form XObject has a degenerate placed /BBox",
                 ));
             }
+            let Some(bounds) =
+                visible_graphics_bounds(form_bounds, invoking_graphics.clip, plan.page_bounds)
+            else {
+                return Ok(XObjectAction::Keep);
+            };
             if !intersects_any(bounds, &plan.boxes) {
-                return Ok(None);
+                return Ok(XObjectAction::Keep);
             }
             let form_id = xobject_id.ok_or_else(|| {
                 unsupported(
@@ -2202,7 +3236,133 @@ fn analyze_xobject(
                     "intersecting Form XObject is a direct stream and cannot be pruned safely",
                 )
             })?;
-            Ok(Some((bounds, name.to_vec(), form_id)))
+            if invocation_count != 1 {
+                return Err(unsupported(
+                    plan.page_index,
+                    format!(
+                        "intersecting Form XObject /{} is invoked {invocation_count} times in one content stream",
+                        String::from_utf8_lossy(name)
+                    ),
+                ));
+            }
+            if form_stack.len() >= 64 {
+                return Err(unsupported(
+                    plan.page_index,
+                    "Form XObject nesting exceeds 64 levels",
+                ));
+            }
+            if form_stack.contains(&form_id) {
+                return Err(unsupported(
+                    plan.page_index,
+                    "cyclic Form XObject invocation cannot be rewritten safely",
+                ));
+            }
+
+            let local_resources = stream
+                .dict
+                .get(b"Resources")
+                .ok()
+                .map(|object| deref(document, object))
+                .transpose()?
+                .map(|object| {
+                    object.as_dict().map_err(|_| {
+                        unsupported(
+                            plan.page_index,
+                            "Form XObject /Resources is not a dictionary",
+                        )
+                    })
+                })
+                .transpose()?;
+            let mut effective_resources =
+                merge_resources(document, resources, local_resources, plan.page_index)?;
+            remove_self_form_binding(
+                document,
+                &mut effective_resources,
+                name,
+                form_id,
+                plan.page_index,
+            )?;
+            let bytes = strict_stream_content(
+                stream,
+                plan.page_index,
+                &format!("Form XObject /{}", String::from_utf8_lossy(name)),
+                MAX_DECODED_CONTENT_BYTES,
+            )?;
+            let content = decode_content_strict(
+                &bytes,
+                plan.page_index,
+                &format!(
+                    "Form XObject /{} content stream",
+                    String::from_utf8_lossy(name)
+                ),
+            )?;
+            if !content
+                .operations
+                .iter()
+                .any(|operation| matches!(operation.operator.as_str(), "W" | "W*"))
+            {
+                return Ok(XObjectAction::Remove(XObjectRemoval {
+                    bounds,
+                    name: name.to_vec(),
+                    object_ids: BTreeSet::from([form_id]),
+                    kind: RedactionObjectKind::FormXObject,
+                }));
+            }
+            form_stack.push(form_id);
+            let mut form_graphics = invoking_graphics.clone();
+            form_graphics.ctm = invoking_graphics.ctm.concat(matrix);
+            // A Form XObject establishes its /BBox as an additional clip while
+            // otherwise inheriting the invoking graphics state.
+            form_graphics
+                .clip
+                .intersect(Some(form_bounds), ClipRule::NonZero);
+            let nested = analyze_operations(
+                document,
+                Some(&effective_resources),
+                content.operations,
+                plan,
+                mode,
+                form_graphics,
+                form_stack,
+            );
+            let popped = form_stack.pop();
+            if popped != Some(form_id) {
+                return Err(unsupported(
+                    plan.page_index,
+                    "Form XObject analysis stack became inconsistent",
+                ));
+            }
+            let mut nested = nested?;
+            if nested.removed.is_empty() && nested.rewritten_forms.is_empty() {
+                return Ok(XObjectAction::Keep);
+            }
+            let mut rewritten_resources = effective_resources;
+            prune_unused_resource_names(
+                document,
+                &mut rewritten_resources,
+                &nested.operations,
+                b"XObject",
+                "Do",
+                &nested.removed_xobjects,
+                plan.page_index,
+            )?;
+            prune_unused_resource_names(
+                document,
+                &mut rewritten_resources,
+                &nested.operations,
+                b"Shading",
+                "sh",
+                &nested.removed_shadings,
+                plan.page_index,
+            )?;
+            let rewrite = FormRewrite {
+                original_id: form_id,
+                stream: stream.clone(),
+                resources: rewritten_resources,
+                operations: std::mem::take(&mut nested.operations),
+                nested_forms: std::mem::take(&mut nested.rewritten_forms),
+            };
+            Ok(XObjectAction::Rewrite(rewrite, Box::new(nested)))
         }
         other => Err(unsupported(
             plan.page_index,
@@ -2310,10 +3470,7 @@ fn parse_font(document: &Document, object: &Object, page_index: u32) -> Result<F
         .as_name()
         .map_err(|_| unsupported(page_index, "font /Subtype is not a name"))?;
     match subtype {
-        b"Type3" => Err(unsupported(
-            page_index,
-            "Type3 fonts are outside the pure redaction envelope",
-        )),
+        b"Type3" => parse_type3_font(document, dict, page_index),
         b"Type0" => parse_cid_font(document, dict, page_index),
         b"Type1" | b"TrueType" | b"MMType1" => parse_simple_font(document, dict, page_index),
         other => Err(unsupported(
@@ -2324,6 +3481,508 @@ fn parse_font(document: &Document, object: &Object, page_index: u32) -> Result<F
             ),
         )),
     }
+}
+
+fn parse_type3_font(
+    document: &Document,
+    dict: &Dictionary,
+    page_index: u32,
+) -> Result<FontMetrics> {
+    let matrix_values = dict
+        .get(b"FontMatrix")
+        .map_err(|_| unsupported(page_index, "Type3 font has no /FontMatrix"))?;
+    let matrix_values = deref(document, matrix_values)?
+        .as_array()
+        .map_err(|_| unsupported(page_index, "Type3 /FontMatrix is not an array"))?;
+    let values = number_array::<6>(document, matrix_values, page_index, "Type3 /FontMatrix")?;
+    let matrix = Matrix {
+        a: values[0],
+        b: values[1],
+        c: values[2],
+        d: values[3],
+        e: values[4],
+        f: values[5],
+    };
+    if !matrix.is_finite() || matrix.a <= 0.0 || matrix.b.abs() > 1e-9 {
+        return Err(unsupported(
+            page_index,
+            "Type3 /FontMatrix has unsupported vertical or non-positive text advance",
+        ));
+    }
+
+    let font_bbox = dict
+        .get(b"FontBBox")
+        .map_err(|_| unsupported(page_index, "Type3 font has no /FontBBox"))?;
+    let font_bbox = deref(document, font_bbox)?
+        .as_array()
+        .map_err(|_| unsupported(page_index, "Type3 /FontBBox is not an array"))?;
+    let font_bbox = number_array::<4>(document, font_bbox, page_index, "Type3 /FontBBox")?;
+    let mut extents = type3_metric_box(matrix, font_bbox, page_index)?;
+
+    let first = dict
+        .get(b"FirstChar")
+        .map_err(|_| unsupported(page_index, "Type3 font has no /FirstChar"))?;
+    let first = deref(document, first)?
+        .as_i64()
+        .map_err(|_| unsupported(page_index, "Type3 /FirstChar is not an integer"))?;
+    let last = dict
+        .get(b"LastChar")
+        .map_err(|_| unsupported(page_index, "Type3 font has no /LastChar"))?;
+    let last = deref(document, last)?
+        .as_i64()
+        .map_err(|_| unsupported(page_index, "Type3 /LastChar is not an integer"))?;
+    if !(0..=255).contains(&first) || !(first..=255).contains(&last) {
+        return Err(unsupported(page_index, "Type3 character range is invalid"));
+    }
+    let width_objects = dict
+        .get(b"Widths")
+        .map_err(|_| unsupported(page_index, "Type3 font has no /Widths"))?;
+    let width_objects = deref(document, width_objects)?
+        .as_array()
+        .map_err(|_| unsupported(page_index, "Type3 /Widths is not an array"))?;
+    let expected_widths = usize::try_from(last - first + 1)
+        .map_err(|_| unsupported(page_index, "Type3 /Widths length overflowed"))?;
+    if width_objects.len() != expected_widths {
+        return Err(unsupported(
+            page_index,
+            "Type3 /Widths length does not match /FirstChar../LastChar",
+        ));
+    }
+    let mut raw_widths = Box::new([None; 256]);
+    let mut widths = Box::new([None; 256]);
+    for (offset, object) in width_objects.iter().enumerate() {
+        let code = usize::try_from(first)
+            .ok()
+            .and_then(|first| first.checked_add(offset))
+            .ok_or_else(|| unsupported(page_index, "Type3 character code overflowed"))?;
+        let raw = number(document, object, page_index, "Type3 width")?;
+        raw_widths[code] = Some(raw);
+        widths[code] = Some(raw * matrix.a * 1000.0);
+    }
+
+    // The code -> glyph-name map: a named base encoding (bare or via /BaseEncoding),
+    // then any /Differences layered on top. A Differences-only /Encoding dictionary
+    // stays valid, which is the shape most Type 3 producers emit.
+    let encoding = dict
+        .get(b"Encoding")
+        .map_err(|_| unsupported(page_index, "Type3 font has no /Encoding"))?;
+    let encoding = deref(document, encoding)?;
+    let mut glyph_names: Vec<Option<Vec<u8>>> = vec![None; 256];
+    let mut apply_base_encoding = |name: &[u8]| -> Result<()> {
+        if !is_known_base_encoding(name) {
+            return Err(unsupported(
+                page_index,
+                format!(
+                    "Type3 /Encoding /{} is not a supported base encoding",
+                    String::from_utf8_lossy(name)
+                ),
+            ));
+        }
+        for code in 0u16..256 {
+            let code = code as u8;
+            if let Some(glyph) = base_encoding_glyph_name(name, code) {
+                glyph_names[usize::from(code)] = Some(glyph.as_bytes().to_vec());
+            }
+        }
+        Ok(())
+    };
+    let differences = match encoding {
+        Object::Name(name) => {
+            apply_base_encoding(name)?;
+            None
+        }
+        Object::Dictionary(encoding) => {
+            if let Ok(base) = encoding.get(b"BaseEncoding") {
+                let base = deref(document, base)?
+                    .as_name()
+                    .map_err(|_| unsupported(page_index, "Type3 /BaseEncoding is not a name"))?
+                    .to_vec();
+                apply_base_encoding(&base)?;
+            }
+            match encoding.get(b"Differences") {
+                Ok(differences) => Some(
+                    deref(document, differences)?
+                        .as_array()
+                        .map_err(|_| unsupported(page_index, "Type3 /Differences is not an array"))?
+                        .clone(),
+                ),
+                Err(_) => None,
+            }
+        }
+        _ => {
+            return Err(unsupported(
+                page_index,
+                "Type3 /Encoding is neither a name nor a dictionary",
+            ));
+        }
+    };
+    if let Some(differences) = &differences {
+        let mut next_code: Option<i64> = None;
+        for item in differences {
+            match deref(document, item)? {
+                Object::Integer(code) => {
+                    if !(0..=255).contains(code) {
+                        return Err(unsupported(
+                            page_index,
+                            "Type3 /Differences code is invalid",
+                        ));
+                    }
+                    next_code = Some(*code);
+                }
+                Object::Name(name) => {
+                    let code = next_code.ok_or_else(|| {
+                        unsupported(page_index, "Type3 /Differences starts with a glyph name")
+                    })?;
+                    if code > 255 {
+                        return Err(unsupported(
+                            page_index,
+                            "Type3 /Differences exceeds code 255",
+                        ));
+                    }
+                    glyph_names[code as usize] = Some(name.clone());
+                    next_code = Some(code + 1);
+                }
+                _ => {
+                    return Err(unsupported(
+                        page_index,
+                        "Type3 /Differences contains an invalid object",
+                    ));
+                }
+            }
+        }
+    }
+    if differences.is_none()
+        && !matches!(encoding, Object::Name(_))
+        && glyph_names.iter().all(Option::is_none)
+    {
+        return Err(unsupported(
+            page_index,
+            "Type3 /Encoding has neither a base encoding nor /Differences",
+        ));
+    }
+
+    let charprocs = dict
+        .get(b"CharProcs")
+        .map_err(|_| unsupported(page_index, "Type3 font has no /CharProcs"))?;
+    let charprocs = deref(document, charprocs)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "Type3 /CharProcs is not a dictionary"))?;
+    let mut valid_codes = Box::new([false; 256]);
+    let mut glyph_boxes: Box<[Option<[f64; 4]>; 256]> = Box::new([None; 256]);
+    let mut parsed_charprocs = BTreeMap::<Vec<u8>, (Option<[f64; 4]>, f64)>::new();
+    for code in 0usize..256 {
+        let Some(name) = glyph_names[code].clone() else {
+            continue;
+        };
+        // A base encoding names every ASCII code, but a Type 3 font only draws the
+        // subset it declares. Codes without a width or a CharProc simply stay invalid;
+        // text that uses one still refuses typed at show time.
+        let Some(raw_width) = raw_widths[code] else {
+            continue;
+        };
+        if !charprocs.has(&name) {
+            continue;
+        }
+        let (glyph_bbox, glyph_width) = if let Some(metrics) = parsed_charprocs.get(&name) {
+            *metrics
+        } else {
+            let charproc = charprocs
+                .get(&name)
+                .map_err(|_| unsupported(page_index, "Type3 CharProc disappeared"))?;
+            let charproc = deref(document, charproc)?
+                .as_stream()
+                .map_err(|_| unsupported(page_index, "Type3 CharProc is not a stream"))?;
+            let bytes = strict_stream_content(
+                charproc,
+                page_index,
+                "Type3 CharProc",
+                MAX_DECODED_CONTENT_BYTES,
+            )?;
+            let _operations =
+                decode_content_strict(&bytes, page_index, "Type3 CharProc content stream")?
+                    .operations;
+            let metrics = parse_type3_glyph_prefix(&bytes, page_index)?;
+            if metrics.vertical_displacement.abs() > 1e-9 {
+                return Err(unsupported(
+                    page_index,
+                    "Type3 CharProc declares a vertical displacement",
+                ));
+            }
+            let parsed = (metrics.bbox, metrics.width);
+            parsed_charprocs.insert(name.clone(), parsed);
+            parsed
+        };
+        if (glyph_width - raw_width).abs() > 0.01 {
+            return Err(unsupported(
+                page_index,
+                format!("Type3 code {code} /Widths and CharProc metrics disagree"),
+            ));
+        }
+        // `d0` leaves the glyph shape unbounded, so the font's /FontBBox is the only
+        // conservative extent available for it.
+        let metric_box = glyph_bbox.unwrap_or(font_bbox);
+        let transformed = type3_metric_box(matrix, metric_box, page_index)?;
+        // The /FontMatrix can translate and scale the glyph away from the pen origin,
+        // so the advance cell alone does not describe where a Type 3 glyph is painted.
+        // Record the transformed box per code and let intersection use it.
+        glyph_boxes[code] = Some([
+            f64::from(transformed.left),
+            f64::from(transformed.bottom),
+            f64::from(transformed.right),
+            f64::from(transformed.top),
+        ]);
+        extents = union_box(extents, transformed);
+        valid_codes[code] = true;
+    }
+
+    Ok(FontMetrics {
+        widths: FontWidths::Simple {
+            widths,
+            missing: None,
+            standard: None,
+            valid_codes: Some(valid_codes),
+        },
+        ascent: f64::from(extents.top),
+        descent: f64::from(extents.bottom),
+        glyph_boxes: Some(glyph_boxes),
+    })
+}
+
+/// Glyph names for codes 32..=126, shared by the standard Latin text encodings.
+const ASCII_GLYPH_NAMES: [&str; 95] = [
+    "space",
+    "exclam",
+    "quotedbl",
+    "numbersign",
+    "dollar",
+    "percent",
+    "ampersand",
+    "quotesingle",
+    "parenleft",
+    "parenright",
+    "asterisk",
+    "plus",
+    "comma",
+    "hyphen",
+    "period",
+    "slash",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "colon",
+    "semicolon",
+    "less",
+    "equal",
+    "greater",
+    "question",
+    "at",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "bracketleft",
+    "backslash",
+    "bracketright",
+    "asciicircum",
+    "underscore",
+    "grave",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "braceleft",
+    "bar",
+    "braceright",
+    "asciitilde",
+];
+
+/// The code -> glyph-name mapping of a named base encoding.
+///
+/// Only the printable ASCII range is modelled. A code outside it resolves to `None`,
+/// which leaves the code invalid: text that actually uses it then refuses typed rather
+/// than being redacted against a guessed glyph.
+fn base_encoding_glyph_name(encoding: &[u8], code: u8) -> Option<&'static str> {
+    if !(32..=126).contains(&code) {
+        return None;
+    }
+    let name = ASCII_GLYPH_NAMES[usize::from(code) - 32];
+    // StandardEncoding is the only one of the three that spells the two quote codes
+    // as quoteright/quoteleft rather than quotesingle/grave.
+    Some(match (encoding, code) {
+        (b"StandardEncoding", 39) => "quoteright",
+        (b"StandardEncoding", 96) => "quoteleft",
+        _ => name,
+    })
+}
+
+fn is_known_base_encoding(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"StandardEncoding" | b"WinAnsiEncoding" | b"MacRomanEncoding"
+    )
+}
+
+/// The metrics a Type 3 CharProc declares in its mandatory leading operator.
+///
+/// `d1` declares the advance *and* a glyph bounding box; `d0` declares only the
+/// advance and explicitly leaves the shape unbounded, so the caller must fall back to
+/// the font's `/FontBBox` for a conservative extent.
+struct Type3GlyphMetrics {
+    width: f64,
+    vertical_displacement: f64,
+    bbox: Option<[f64; 4]>,
+}
+
+fn parse_type3_glyph_prefix(bytes: &[u8], page_index: u32) -> Result<Type3GlyphMetrics> {
+    let mut tokens: Vec<&[u8]> = Vec::with_capacity(7);
+    let mut offset = 0usize;
+    while tokens.len() < 7 {
+        offset = skip_content_space_and_comments(bytes, offset);
+        if offset >= bytes.len() {
+            return Err(unsupported(
+                page_index,
+                "Type3 CharProc ends before its required leading d0/d1 operator",
+            ));
+        }
+        let end = skip_regular(bytes, offset);
+        if end == offset {
+            return Err(unsupported(
+                page_index,
+                "Type3 CharProc glyph metrics contain a delimiter",
+            ));
+        }
+        tokens.push(&bytes[offset..end]);
+        offset = end;
+        // `wx wy d0` is complete after three tokens; `d1` needs the four bbox numbers.
+        if tokens.len() == 3 && tokens[2] == b"d0" {
+            let width = parse_type3_number(tokens[0], page_index)?;
+            let vertical_displacement = parse_type3_number(tokens[1], page_index)?;
+            return Ok(Type3GlyphMetrics {
+                width,
+                vertical_displacement,
+                bbox: None,
+            });
+        }
+    }
+    if tokens[6] != b"d1" {
+        return Err(unsupported(
+            page_index,
+            "Type3 CharProc does not begin with `wx wy d0` or six numbers and d1",
+        ));
+    }
+    let mut values = [0.0; 6];
+    for (index, token) in tokens[..6].iter().enumerate() {
+        values[index] = parse_type3_number(token, page_index)?;
+    }
+    Ok(Type3GlyphMetrics {
+        width: values[0],
+        vertical_displacement: values[1],
+        bbox: Some([values[2], values[3], values[4], values[5]]),
+    })
+}
+
+fn parse_type3_number(token: &[u8], page_index: u32) -> Result<f64> {
+    let text = std::str::from_utf8(token)
+        .map_err(|_| unsupported(page_index, "Type3 CharProc metric is not ASCII"))?;
+    let value = text
+        .parse::<f64>()
+        .map_err(|_| unsupported(page_index, "Type3 CharProc has an invalid metric number"))?;
+    if !value.is_finite() {
+        return Err(unsupported(
+            page_index,
+            "Type3 CharProc has a non-finite metric number",
+        ));
+    }
+    Ok(value)
+}
+
+fn type3_metric_box(matrix: Matrix, values: [f64; 4], page_index: u32) -> Result<BoxPts> {
+    if !values.iter().all(|value| value.is_finite()) {
+        return Err(unsupported(page_index, "Type3 metric box is non-finite"));
+    }
+    let points = [
+        matrix.point(values[0], values[1]),
+        matrix.point(values[0], values[3]),
+        matrix.point(values[2], values[1]),
+        matrix.point(values[2], values[3]),
+    ];
+    let bounds = BoxPts {
+        left: (points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min)
+            * 1000.0) as f32,
+        right: (points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max)
+            * 1000.0) as f32,
+        bottom: (points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min)
+            * 1000.0) as f32,
+        top: (points
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::NEG_INFINITY, f64::max)
+            * 1000.0) as f32,
+    };
+    if !bounds.is_finite_and_nonempty() {
+        return Err(unsupported(page_index, "Type3 metric box is degenerate"));
+    }
+    Ok(bounds)
 }
 
 fn parse_simple_font(
@@ -2364,7 +4023,7 @@ fn parse_simple_font(
                 .map_err(|_| unsupported(page_index, "font /FontDescriptor is not a dictionary"))
         })
         .transpose()?;
-    let (ascent, descent, x_min, x_max) = font_extents(document, descriptor, page_index)?;
+    let (ascent, descent, _x_min, _x_max) = font_extents(document, descriptor, page_index)?;
     let missing = descriptor
         .and_then(|descriptor| descriptor.get(b"MissingWidth").ok())
         .map(|object| number(document, object, page_index, "FontDescriptor /MissingWidth"))
@@ -2401,29 +4060,104 @@ fn parse_simple_font(
             widths,
             missing,
             standard,
+            valid_codes: None,
         },
         ascent,
         descent,
-        x_min,
-        x_max,
+        glyph_boxes: None,
     })
+}
+
+/// The `/Ordering` of a Type0 font's descendant `/CIDSystemInfo`, e.g. `Japan1`.
+fn cid_system_ordering(
+    document: &Document,
+    dict: &Dictionary,
+    page_index: u32,
+) -> Result<Option<Vec<u8>>> {
+    let Ok(descendants) = dict.get(b"DescendantFonts") else {
+        return Ok(None);
+    };
+    let descendants = deref(document, descendants)?
+        .as_array()
+        .map_err(|_| unsupported(page_index, "Type0 /DescendantFonts is not an array"))?;
+    let Some(descendant) = descendants.first() else {
+        return Ok(None);
+    };
+    let descendant = deref(document, descendant)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "Type0 descendant font is not a dictionary"))?;
+    let Ok(system_info) = descendant.get(b"CIDSystemInfo") else {
+        return Ok(None);
+    };
+    let system_info = deref(document, system_info)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "/CIDSystemInfo is not a dictionary"))?;
+    let Ok(ordering) = system_info.get(b"Ordering") else {
+        return Ok(None);
+    };
+    match deref(document, ordering)? {
+        Object::String(bytes, _) => Ok(Some(bytes.clone())),
+        _ => Err(unsupported(
+            page_index,
+            "/CIDSystemInfo /Ordering is not a string",
+        )),
+    }
 }
 
 fn parse_cid_font(document: &Document, dict: &Dictionary, page_index: u32) -> Result<FontMetrics> {
     let encoding = dict
         .get(b"Encoding")
         .map_err(|_| unsupported(page_index, "Type0 font has no /Encoding"))?;
-    let encoding = deref(document, encoding)?
-        .as_name()
-        .map_err(|_| unsupported(page_index, "Type0 /Encoding is not a named CMap"))?;
-    if encoding != b"Identity-H" {
-        return Err(unsupported(
-            page_index,
-            format!(
-                "Type0 CMap /{} is unsupported; only /Identity-H is safe",
-                String::from_utf8_lossy(encoding)
-            ),
-        ));
+    let mut encoding = match deref(document, encoding)? {
+        Object::Name(name) if name == b"Identity-H" => CidCodeMap::IdentityH,
+        Object::Name(name) if name == b"Identity-V" => CidCodeMap::IdentityV,
+        Object::Name(name) => {
+            // A predefined CMap only produces the right CIDs for the character
+            // collection it was written against, so refuse rather than map a font's
+            // codes through a foreign collection.
+            let name = name.clone();
+            if let Some((ordering, _)) = predefined_cmap(&name) {
+                let declared = cid_system_ordering(document, dict, page_index)?;
+                if declared.as_deref() != Some(ordering) {
+                    return Err(unsupported(
+                        page_index,
+                        format!(
+                            "predefined Type0 CMap /{} expects the {} character collection",
+                            String::from_utf8_lossy(&name),
+                            String::from_utf8_lossy(ordering)
+                        ),
+                    ));
+                }
+            }
+            CidCodeMap::Embedded(load_predefined_cmap(&name, page_index, 0)?)
+        }
+        Object::Stream(stream) => CidCodeMap::Embedded(parse_encoding_cmap(stream, page_index)?),
+        _ => {
+            return Err(unsupported(
+                page_index,
+                "Type0 /Encoding is neither an Identity CMap nor an embedded CMap stream",
+            ));
+        }
+    };
+    if let CidCodeMap::Embedded(cmap) = &mut encoding {
+        match dict.get(b"ToUnicode") {
+            Ok(to_unicode) => {
+                let to_unicode = deref(document, to_unicode)?.as_stream().map_err(|_| {
+                    unsupported(page_index, "Type0 /ToUnicode is not a CMap stream")
+                })?;
+                cmap.unicode_map = parse_to_unicode_cmap(to_unicode, &cmap.codespaces, page_index)?;
+            }
+            // A predefined Unicode-keyed CMap already knows the text behind every code
+            // (the code *is* the UTF-16 unit), so it needs no /ToUnicode stream. An
+            // embedded CMap carries no such guarantee and still requires one.
+            Err(_) if !cmap.unicode_map.is_empty() => {}
+            Err(_) => {
+                return Err(unsupported(
+                    page_index,
+                    "embedded Type0 CMap has no /ToUnicode",
+                ));
+            }
+        }
     }
     let descendants = dict
         .get(b"DescendantFonts")
@@ -2466,7 +4200,7 @@ fn parse_cid_font(document: &Document, dict: &Dictionary, page_index: u32) -> Re
                 .map_err(|_| unsupported(page_index, "CID /FontDescriptor is not a dictionary"))
         })
         .transpose()?;
-    let (ascent, descent, x_min, x_max) = font_extents(document, descriptor, page_index)?;
+    let (ascent, descent, _x_min, _x_max) = font_extents(document, descriptor, page_index)?;
     let default_width = descendant
         .get(b"DW")
         .map(|object| number(document, object, page_index, "CID /DW"))
@@ -2478,16 +4212,843 @@ fn parse_cid_font(document: &Document, dict: &Dictionary, page_index: u32) -> Re
             .map_err(|_| unsupported(page_index, "CID /W is not an array"))?;
         parse_cid_widths(document, array, &mut widths, page_index)?;
     }
+    let default_vertical = if let Ok(object) = descendant.get(b"DW2") {
+        let array = deref(document, object)?
+            .as_array()
+            .map_err(|_| unsupported(page_index, "CID /DW2 is not an array"))?;
+        // /DW2 is [v_y, w1y]; the position component is validated but not carried.
+        let [_position_y, displacement_y] =
+            number_array::<2>(document, array, page_index, "CID /DW2")?;
+        VerticalMetric {
+            displacement_y,
+            position_x: None,
+        }
+    } else {
+        VerticalMetric {
+            displacement_y: -1000.0,
+            position_x: None,
+        }
+    };
+    let mut vertical_widths = BTreeMap::new();
+    if let Ok(object) = descendant.get(b"W2") {
+        let array = deref(document, object)?
+            .as_array()
+            .map_err(|_| unsupported(page_index, "CID /W2 is not an array"))?;
+        parse_cid_vertical_widths(document, array, &mut vertical_widths, page_index)?;
+    }
     Ok(FontMetrics {
         widths: FontWidths::Cid {
             widths,
             default_width,
+            vertical_widths,
+            default_vertical,
+            encoding,
         },
         ascent,
         descent,
-        x_min,
-        x_max,
+        glyph_boxes: None,
     })
+}
+
+#[derive(Debug, Clone)]
+enum CMapToken {
+    Hex(Vec<u8>),
+    Integer(i64),
+    Word(Vec<u8>),
+    ArrayStart,
+    ArrayEnd,
+}
+
+/// The predefined Adobe CMaps we carry, with the character collection each belongs to.
+///
+/// Only the Unicode-keyed families are vendored. Their character *codes* are UCS-2 or
+/// UTF-16 code units, so the code-to-Unicode mapping a redaction needs is the identity
+/// and no separate ToUnicode table has to be shipped or trusted. The legacy
+/// byte-encoded CMaps (RKSJ, EUC, Big5, UHC ...) carry no such property and remain a
+/// typed refusal rather than a guess.
+const PREDEFINED_CMAPS: &[(&[u8], &[u8], &[u8])] = &[
+    (
+        b"UniJIS-UCS2-H",
+        b"Japan1",
+        include_bytes!("../assets/cmaps/UniJIS-UCS2-H"),
+    ),
+    (
+        b"UniJIS-UCS2-V",
+        b"Japan1",
+        include_bytes!("../assets/cmaps/UniJIS-UCS2-V"),
+    ),
+    (
+        b"UniJIS-UTF16-H",
+        b"Japan1",
+        include_bytes!("../assets/cmaps/UniJIS-UTF16-H"),
+    ),
+    (
+        b"UniJIS-UTF16-V",
+        b"Japan1",
+        include_bytes!("../assets/cmaps/UniJIS-UTF16-V"),
+    ),
+    (
+        b"UniGB-UCS2-H",
+        b"GB1",
+        include_bytes!("../assets/cmaps/UniGB-UCS2-H"),
+    ),
+    (
+        b"UniGB-UCS2-V",
+        b"GB1",
+        include_bytes!("../assets/cmaps/UniGB-UCS2-V"),
+    ),
+    (
+        b"UniGB-UTF16-H",
+        b"GB1",
+        include_bytes!("../assets/cmaps/UniGB-UTF16-H"),
+    ),
+    (
+        b"UniGB-UTF16-V",
+        b"GB1",
+        include_bytes!("../assets/cmaps/UniGB-UTF16-V"),
+    ),
+    (
+        b"UniCNS-UCS2-H",
+        b"CNS1",
+        include_bytes!("../assets/cmaps/UniCNS-UCS2-H"),
+    ),
+    (
+        b"UniCNS-UCS2-V",
+        b"CNS1",
+        include_bytes!("../assets/cmaps/UniCNS-UCS2-V"),
+    ),
+    (
+        b"UniCNS-UTF16-H",
+        b"CNS1",
+        include_bytes!("../assets/cmaps/UniCNS-UTF16-H"),
+    ),
+    (
+        b"UniCNS-UTF16-V",
+        b"CNS1",
+        include_bytes!("../assets/cmaps/UniCNS-UTF16-V"),
+    ),
+    (
+        b"UniKS-UCS2-H",
+        b"Korea1",
+        include_bytes!("../assets/cmaps/UniKS-UCS2-H"),
+    ),
+    (
+        b"UniKS-UCS2-V",
+        b"Korea1",
+        include_bytes!("../assets/cmaps/UniKS-UCS2-V"),
+    ),
+    (
+        b"UniKS-UTF16-H",
+        b"Korea1",
+        include_bytes!("../assets/cmaps/UniKS-UTF16-H"),
+    ),
+    (
+        b"UniKS-UTF16-V",
+        b"Korea1",
+        include_bytes!("../assets/cmaps/UniKS-UTF16-V"),
+    ),
+];
+
+/// `usecmap` chains are one level deep in the shipped resources; the bound keeps a
+/// hand-built chain from recursing without limit.
+const MAX_USECMAP_DEPTH: usize = 4;
+
+fn predefined_cmap(name: &[u8]) -> Option<(&'static [u8], &'static [u8])> {
+    PREDEFINED_CMAPS
+        .iter()
+        .find(|(cmap, _, _)| *cmap == name)
+        .map(|(_, ordering, bytes)| (*ordering, *bytes))
+}
+
+/// Builds a CMap from a vendored predefined resource, following its `usecmap` base.
+fn load_predefined_cmap(name: &[u8], page_index: u32, depth: usize) -> Result<EmbeddedCMap> {
+    if depth > MAX_USECMAP_DEPTH {
+        return Err(unsupported(
+            page_index,
+            "predefined CMap usecmap chain is too deep",
+        ));
+    }
+    let Some((_, bytes)) = predefined_cmap(name) else {
+        return Err(unsupported(
+            page_index,
+            format!(
+                "predefined Type0 CMap /{} is not supported",
+                String::from_utf8_lossy(name)
+            ),
+        ));
+    };
+    let tokens = tokenize_cmap(bytes, page_index)?;
+
+    // A vertical CMap inherits its codespaces and CID mappings from the horizontal one
+    // it names, then overrides the entries whose glyphs differ when set vertically.
+    let mut base = match find_usecmap_reference(&tokens) {
+        Some(base_name) => Some(load_predefined_cmap(&base_name, page_index, depth + 1)?),
+        None => None,
+    };
+
+    let program_wmode = parse_cmap_wmode(&tokens, page_index)?.unwrap_or(0);
+    let writing_mode = match program_wmode {
+        0 => WritingMode::Horizontal,
+        1 => WritingMode::Vertical,
+        _ => {
+            return Err(unsupported(
+                page_index,
+                "predefined CMap /WMode is not 0 or 1",
+            ));
+        }
+    };
+
+    let mut codespaces = parse_cmap_codespaces(&tokens, page_index).unwrap_or_default();
+    if codespaces.is_empty() {
+        codespaces = base
+            .as_ref()
+            .map(|base| base.codespaces.clone())
+            .unwrap_or_default();
+    }
+    if codespaces.is_empty() {
+        return Err(unsupported(
+            page_index,
+            "predefined CMap declares no codespace ranges",
+        ));
+    }
+
+    let mut cid_map = base
+        .take()
+        .map(|base| base.cid_map)
+        .unwrap_or_else(BTreeMap::new);
+    // Parse this CMap's own blocks separately, so duplicate detection still applies
+    // within one program while a vertical CMap may legitimately *override* the
+    // horizontal entries it inherited through `usecmap`.
+    let mut overlay = BTreeMap::new();
+    parse_cmap_cid_mappings(&tokens, &codespaces, &mut overlay, page_index)?;
+    cid_map.extend(overlay);
+    if cid_map.is_empty() {
+        return Err(unsupported(
+            page_index,
+            "predefined CMap has no CID mappings",
+        ));
+    }
+
+    // Codes in these CMaps *are* UTF-16 code units, so the code-to-Unicode mapping is
+    // exact without a ToUnicode stream.
+    let mut unicode_map = BTreeMap::new();
+    for key in cid_map.keys() {
+        let units = match key.len {
+            4 => vec![(key.value >> 16) as u16, (key.value & 0xFFFF) as u16],
+            _ => vec![key.value as u16],
+        };
+        unicode_map.insert(*key, units);
+    }
+
+    Ok(EmbeddedCMap {
+        codespaces,
+        cid_map,
+        unicode_map,
+        writing_mode,
+    })
+}
+
+/// Finds the `/Name usecmap` reference a CMap program declares, if any.
+fn find_usecmap_reference(tokens: &[CMapToken]) -> Option<Vec<u8>> {
+    tokens.iter().enumerate().find_map(|(index, token)| {
+        if token_word(token) != Some(b"usecmap") || index == 0 {
+            return None;
+        }
+        let previous = token_word(&tokens[index - 1])?;
+        previous
+            .strip_prefix(b"/")
+            .map(<[u8]>::to_vec)
+            .or_else(|| Some(previous.to_vec()))
+    })
+}
+
+/// Reads every `begincidchar` / `begincidrange` block into `cid_map`, overriding any
+/// entry inherited from a `usecmap` base.
+fn parse_cmap_cid_mappings(
+    tokens: &[CMapToken],
+    codespaces: &[CodeSpace],
+    cid_map: &mut BTreeMap<CodeKey, u16>,
+    page_index: u32,
+) -> Result<()> {
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if token_word(&tokens[index]) == Some(b"begincidchar") {
+            let count = cmap_block_count(tokens, index, page_index, "cidchar")?;
+            index += 1;
+            for _ in 0..count {
+                let code = cmap_code_token(tokens.get(index), page_index, "cidchar code")?;
+                let cid = cmap_integer(tokens.get(index + 1), page_index, "cidchar CID")?;
+                let cid = u16::try_from(cid)
+                    .map_err(|_| unsupported(page_index, "cidchar CID exceeds 65535"))?;
+                insert_cid_mapping(cid_map, code, cid, codespaces, page_index)?;
+                index += 2;
+            }
+            continue;
+        }
+        if token_word(&tokens[index]) == Some(b"begincidrange") {
+            let count = cmap_block_count(tokens, index, page_index, "cidrange")?;
+            index += 1;
+            for _ in 0..count {
+                let start = cmap_code_token(tokens.get(index), page_index, "cidrange start")?;
+                let end = cmap_code_token(tokens.get(index + 1), page_index, "cidrange end")?;
+                let first_cid = cmap_integer(tokens.get(index + 2), page_index, "cidrange CID")?;
+                let range = cmap_code_range(start, end, page_index, "cidrange")?;
+                for (offset, code) in range.into_iter().enumerate() {
+                    let cid =
+                        first_cid
+                            .checked_add(i64::try_from(offset).map_err(|_| {
+                                unsupported(page_index, "cidrange offset overflowed")
+                            })?)
+                            .ok_or_else(|| unsupported(page_index, "cidrange CID overflowed"))?;
+                    let cid = u16::try_from(cid)
+                        .map_err(|_| unsupported(page_index, "cidrange CID exceeds 65535"))?;
+                    insert_cid_mapping(cid_map, code, cid, codespaces, page_index)?;
+                }
+                index += 3;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn parse_encoding_cmap(stream: &Stream, page_index: u32) -> Result<EmbeddedCMap> {
+    let bytes = strict_stream_content(
+        stream,
+        page_index,
+        "Type0 Encoding CMap",
+        MAX_DECODED_CONTENT_BYTES,
+    )?;
+    let tokens = tokenize_cmap(&bytes, page_index)?;
+    reject_usecmap(&tokens, page_index)?;
+    let program_wmode = parse_cmap_wmode(&tokens, page_index)?;
+    let dictionary_wmode = match stream.dict.get(b"WMode") {
+        Ok(Object::Integer(value)) => Some(*value),
+        Ok(_) => {
+            return Err(unsupported(
+                page_index,
+                "Encoding CMap dictionary /WMode is not an integer",
+            ));
+        }
+        Err(_) => None,
+    };
+    let wmode = match (dictionary_wmode, program_wmode) {
+        (Some(left), Some(right)) if left != right => {
+            return Err(unsupported(
+                page_index,
+                "Encoding CMap dictionary and program /WMode values contradict",
+            ));
+        }
+        (Some(value), _) | (_, Some(value)) => value,
+        (None, None) => 0,
+    };
+    let writing_mode = match wmode {
+        0 => WritingMode::Horizontal,
+        1 => WritingMode::Vertical,
+        _ => {
+            return Err(unsupported(
+                page_index,
+                "Encoding CMap /WMode is not 0 or 1",
+            ));
+        }
+    };
+    let codespaces = parse_cmap_codespaces(&tokens, page_index)?;
+    let mut cid_map = BTreeMap::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if token_word(&tokens[index]) == Some(b"begincidchar") {
+            let count = cmap_block_count(&tokens, index, page_index, "cidchar")?;
+            index += 1;
+            for _ in 0..count {
+                let code = cmap_code_token(tokens.get(index), page_index, "cidchar code")?;
+                let cid = cmap_integer(tokens.get(index + 1), page_index, "cidchar CID")?;
+                let cid = u16::try_from(cid)
+                    .map_err(|_| unsupported(page_index, "cidchar CID exceeds 65535"))?;
+                insert_cid_mapping(&mut cid_map, code, cid, &codespaces, page_index)?;
+                index += 2;
+            }
+            continue;
+        }
+        if token_word(&tokens[index]) == Some(b"begincidrange") {
+            let count = cmap_block_count(&tokens, index, page_index, "cidrange")?;
+            index += 1;
+            for _ in 0..count {
+                let start = cmap_code_token(tokens.get(index), page_index, "cidrange start")?;
+                let end = cmap_code_token(tokens.get(index + 1), page_index, "cidrange end")?;
+                let first_cid = cmap_integer(tokens.get(index + 2), page_index, "cidrange CID")?;
+                let range = cmap_code_range(start, end, page_index, "cidrange")?;
+                for (offset, code) in range.into_iter().enumerate() {
+                    let cid =
+                        first_cid
+                            .checked_add(i64::try_from(offset).map_err(|_| {
+                                unsupported(page_index, "cidrange offset overflowed")
+                            })?)
+                            .ok_or_else(|| unsupported(page_index, "cidrange CID overflowed"))?;
+                    let cid = u16::try_from(cid)
+                        .map_err(|_| unsupported(page_index, "cidrange CID exceeds 65535"))?;
+                    insert_cid_mapping(&mut cid_map, code, cid, &codespaces, page_index)?;
+                }
+                index += 3;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    if cid_map.is_empty() {
+        return Err(unsupported(
+            page_index,
+            "embedded Encoding CMap has no CID mappings",
+        ));
+    }
+    Ok(EmbeddedCMap {
+        codespaces,
+        cid_map,
+        unicode_map: BTreeMap::new(),
+        writing_mode,
+    })
+}
+
+fn parse_cmap_wmode(tokens: &[CMapToken], page_index: u32) -> Result<Option<i64>> {
+    let mut value = None;
+    for window in tokens.windows(3) {
+        if token_word(&window[0]) != Some(b"WMode") || token_word(&window[2]) != Some(b"def") {
+            continue;
+        }
+        let current = cmap_integer(Some(&window[1]), page_index, "CMap WMode")?;
+        if value
+            .replace(current)
+            .is_some_and(|previous| previous != current)
+        {
+            return Err(unsupported(
+                page_index,
+                "Encoding CMap defines contradictory WMode values",
+            ));
+        }
+    }
+    Ok(value)
+}
+
+fn parse_to_unicode_cmap(
+    stream: &Stream,
+    encoding_spaces: &[CodeSpace],
+    page_index: u32,
+) -> Result<BTreeMap<CodeKey, Vec<u16>>> {
+    let bytes = strict_stream_content(
+        stream,
+        page_index,
+        "Type0 ToUnicode CMap",
+        MAX_DECODED_CONTENT_BYTES,
+    )?;
+    let tokens = tokenize_cmap(&bytes, page_index)?;
+    reject_usecmap(&tokens, page_index)?;
+    let unicode_spaces = parse_cmap_codespaces(&tokens, page_index)?;
+    if !same_codespaces(encoding_spaces, &unicode_spaces) {
+        return Err(unsupported(
+            page_index,
+            "Encoding and ToUnicode CMap codespaces differ",
+        ));
+    }
+    let mut mappings = BTreeMap::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if token_word(&tokens[index]) == Some(b"beginbfchar") {
+            let count = cmap_block_count(&tokens, index, page_index, "bfchar")?;
+            index += 1;
+            for _ in 0..count {
+                let code = cmap_code_token(tokens.get(index), page_index, "bfchar code")?;
+                let unicode = cmap_unicode_token(tokens.get(index + 1), page_index)?;
+                insert_unicode_mapping(&mut mappings, code, unicode, encoding_spaces, page_index)?;
+                index += 2;
+            }
+            continue;
+        }
+        if token_word(&tokens[index]) == Some(b"beginbfrange") {
+            let count = cmap_block_count(&tokens, index, page_index, "bfrange")?;
+            index += 1;
+            for _ in 0..count {
+                let start = cmap_code_token(tokens.get(index), page_index, "bfrange start")?;
+                let end = cmap_code_token(tokens.get(index + 1), page_index, "bfrange end")?;
+                let codes = cmap_code_range(start, end, page_index, "bfrange")?;
+                index += 2;
+                match tokens.get(index) {
+                    Some(CMapToken::Hex(first)) => {
+                        for (offset, code) in codes.into_iter().enumerate() {
+                            let destination = increment_big_endian(first, offset, page_index)?;
+                            let unicode = decode_utf16be(&destination, page_index)?;
+                            insert_unicode_mapping(
+                                &mut mappings,
+                                code,
+                                unicode,
+                                encoding_spaces,
+                                page_index,
+                            )?;
+                        }
+                        index += 1;
+                    }
+                    Some(CMapToken::ArrayStart) => {
+                        index += 1;
+                        for code in codes {
+                            let unicode = cmap_unicode_token(tokens.get(index), page_index)?;
+                            insert_unicode_mapping(
+                                &mut mappings,
+                                code,
+                                unicode,
+                                encoding_spaces,
+                                page_index,
+                            )?;
+                            index += 1;
+                        }
+                        if !matches!(tokens.get(index), Some(CMapToken::ArrayEnd)) {
+                            return Err(unsupported(
+                                page_index,
+                                "array-form bfrange has the wrong number of destinations",
+                            ));
+                        }
+                        index += 1;
+                    }
+                    _ => {
+                        return Err(unsupported(
+                            page_index,
+                            "bfrange destination is neither a hex string nor an array",
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        index += 1;
+    }
+    if mappings.is_empty() {
+        return Err(unsupported(page_index, "ToUnicode CMap has no mappings"));
+    }
+    Ok(mappings)
+}
+
+fn tokenize_cmap(bytes: &[u8], page_index: u32) -> Result<Vec<CMapToken>> {
+    let mut tokens = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        offset = skip_content_space_and_comments(bytes, offset);
+        if offset >= bytes.len() {
+            break;
+        }
+        match bytes[offset] {
+            b'[' => {
+                tokens.push(CMapToken::ArrayStart);
+                offset += 1;
+            }
+            b']' => {
+                tokens.push(CMapToken::ArrayEnd);
+                offset += 1;
+            }
+            b'<' if bytes.get(offset + 1) != Some(&b'<') => {
+                let end = bytes[offset + 1..]
+                    .iter()
+                    .position(|byte| *byte == b'>')
+                    .map(|relative| offset + 1 + relative)
+                    .ok_or_else(|| unsupported(page_index, "CMap hex string is unterminated"))?;
+                let hex: Vec<u8> = bytes[offset + 1..end]
+                    .iter()
+                    .copied()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect();
+                if hex.is_empty() || !hex.len().is_multiple_of(2) {
+                    return Err(unsupported(
+                        page_index,
+                        "CMap hex string has invalid length",
+                    ));
+                }
+                let mut decoded = Vec::with_capacity(hex.len() / 2);
+                for pair in hex.chunks_exact(2) {
+                    decoded.push(
+                        (hex_nibble(pair[0], page_index)? << 4) | hex_nibble(pair[1], page_index)?,
+                    );
+                }
+                tokens.push(CMapToken::Hex(decoded));
+                offset = end + 1;
+            }
+            _ => {
+                let end = skip_regular(bytes, offset);
+                if end == offset {
+                    offset += 1;
+                    continue;
+                }
+                let word = &bytes[offset..end];
+                if let Ok(word) = std::str::from_utf8(word) {
+                    if let Ok(value) = word.parse::<i64>() {
+                        tokens.push(CMapToken::Integer(value));
+                    } else {
+                        tokens.push(CMapToken::Word(word.as_bytes().to_vec()));
+                    }
+                } else {
+                    return Err(unsupported(page_index, "CMap token is not ASCII"));
+                }
+                offset = end;
+            }
+        }
+        if tokens.len() > MAX_CONTENT_TOKENS {
+            return Err(unsupported(page_index, "CMap exceeds safe token limits"));
+        }
+    }
+    Ok(tokens)
+}
+
+fn hex_nibble(byte: u8, page_index: u32) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(unsupported(
+            page_index,
+            "CMap hex string contains a non-hex digit",
+        )),
+    }
+}
+
+fn token_word(token: &CMapToken) -> Option<&[u8]> {
+    match token {
+        CMapToken::Word(word) => Some(word),
+        _ => None,
+    }
+}
+
+fn reject_usecmap(tokens: &[CMapToken], page_index: u32) -> Result<()> {
+    if tokens
+        .iter()
+        .any(|token| token_word(token) == Some(b"usecmap"))
+    {
+        return Err(unsupported(
+            page_index,
+            "CMap usecmap inheritance is outside the safe embedded envelope",
+        ));
+    }
+    Ok(())
+}
+
+fn cmap_block_count(
+    tokens: &[CMapToken],
+    begin: usize,
+    page_index: u32,
+    label: &str,
+) -> Result<usize> {
+    let count = begin
+        .checked_sub(1)
+        .and_then(|index| tokens.get(index))
+        .and_then(|token| match token {
+            CMapToken::Integer(value) => Some(*value),
+            _ => None,
+        })
+        .ok_or_else(|| unsupported(page_index, format!("{label} has no entry count")))?;
+    let count = usize::try_from(count)
+        .map_err(|_| unsupported(page_index, format!("{label} count is negative")))?;
+    if count > 100_000 {
+        return Err(unsupported(
+            page_index,
+            format!("{label} exceeds safe mapping limits"),
+        ));
+    }
+    Ok(count)
+}
+
+fn parse_cmap_codespaces(tokens: &[CMapToken], page_index: u32) -> Result<Vec<CodeSpace>> {
+    let mut spaces = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if token_word(&tokens[index]) != Some(b"begincodespacerange") {
+            index += 1;
+            continue;
+        }
+        let count = cmap_block_count(tokens, index, page_index, "codespacerange")?;
+        index += 1;
+        for _ in 0..count {
+            let start = cmap_code_token(tokens.get(index), page_index, "codespace start")?;
+            let end = cmap_code_token(tokens.get(index + 1), page_index, "codespace end")?;
+            if start.len != end.len || start.value > end.value {
+                return Err(unsupported(page_index, "CMap codespace range is invalid"));
+            }
+            spaces.push(CodeSpace {
+                len: start.len,
+                start: start.value,
+                end: end.value,
+            });
+            index += 2;
+        }
+    }
+    if spaces.is_empty() || spaces.len() > 256 {
+        return Err(unsupported(
+            page_index,
+            "CMap must contain 1..=256 codespace ranges",
+        ));
+    }
+    Ok(spaces)
+}
+
+fn cmap_code_token(token: Option<&CMapToken>, page_index: u32, label: &str) -> Result<CodeKey> {
+    let bytes = match token {
+        Some(CMapToken::Hex(bytes)) if (1..=4).contains(&bytes.len()) => bytes,
+        _ => {
+            return Err(unsupported(
+                page_index,
+                format!("{label} is not a 1..=4-byte hex code"),
+            ));
+        }
+    };
+    Ok(CodeKey {
+        len: bytes.len() as u8,
+        value: code_value(bytes),
+    })
+}
+
+fn cmap_integer(token: Option<&CMapToken>, page_index: u32, label: &str) -> Result<i64> {
+    match token {
+        Some(CMapToken::Integer(value)) => Ok(*value),
+        _ => Err(unsupported(
+            page_index,
+            format!("{label} is not an integer"),
+        )),
+    }
+}
+
+fn cmap_code_range(
+    start: CodeKey,
+    end: CodeKey,
+    page_index: u32,
+    label: &str,
+) -> Result<Vec<CodeKey>> {
+    if start.len != end.len || start.value > end.value {
+        return Err(unsupported(
+            page_index,
+            format!("{label} source range is invalid"),
+        ));
+    }
+    let count = u64::from(end.value) - u64::from(start.value) + 1;
+    if count > 100_000 {
+        return Err(unsupported(
+            page_index,
+            format!("{label} range exceeds safe limits"),
+        ));
+    }
+    Ok((start.value..=end.value)
+        .map(|value| CodeKey {
+            len: start.len,
+            value,
+        })
+        .collect())
+}
+
+fn code_in_spaces(code: CodeKey, spaces: &[CodeSpace]) -> bool {
+    spaces
+        .iter()
+        .any(|space| space.len == code.len && code.value >= space.start && code.value <= space.end)
+}
+
+fn insert_cid_mapping(
+    mappings: &mut BTreeMap<CodeKey, u16>,
+    code: CodeKey,
+    cid: u16,
+    spaces: &[CodeSpace],
+    page_index: u32,
+) -> Result<()> {
+    if !code_in_spaces(code, spaces) {
+        return Err(unsupported(
+            page_index,
+            "CID mapping is outside all codespaces",
+        ));
+    }
+    if mappings.insert(code, cid).is_some() {
+        return Err(unsupported(
+            page_index,
+            "CMap contains a duplicate CID mapping",
+        ));
+    }
+    Ok(())
+}
+
+fn cmap_unicode_token(token: Option<&CMapToken>, page_index: u32) -> Result<Vec<u16>> {
+    match token {
+        Some(CMapToken::Hex(bytes)) => decode_utf16be(bytes, page_index),
+        _ => Err(unsupported(
+            page_index,
+            "ToUnicode destination is not a hex string",
+        )),
+    }
+}
+
+fn decode_utf16be(bytes: &[u8], page_index: u32) -> Result<Vec<u16>> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
+        return Err(unsupported(
+            page_index,
+            "ToUnicode destination is not valid UTF-16BE",
+        ));
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    if std::char::decode_utf16(units.iter().copied()).any(|value| value.is_err()) {
+        return Err(unsupported(
+            page_index,
+            "ToUnicode destination has invalid surrogates",
+        ));
+    }
+    Ok(units)
+}
+
+fn insert_unicode_mapping(
+    mappings: &mut BTreeMap<CodeKey, Vec<u16>>,
+    code: CodeKey,
+    unicode: Vec<u16>,
+    spaces: &[CodeSpace],
+    page_index: u32,
+) -> Result<()> {
+    if !code_in_spaces(code, spaces) {
+        return Err(unsupported(
+            page_index,
+            "ToUnicode mapping is outside all codespaces",
+        ));
+    }
+    if mappings.insert(code, unicode).is_some() {
+        return Err(unsupported(
+            page_index,
+            "ToUnicode contains a duplicate mapping",
+        ));
+    }
+    Ok(())
+}
+
+fn increment_big_endian(bytes: &[u8], offset: usize, page_index: u32) -> Result<Vec<u8>> {
+    if bytes.is_empty() || bytes.len() > 8 {
+        return Err(unsupported(
+            page_index,
+            "bfrange destination width is unsupported",
+        ));
+    }
+    let mut output = bytes.to_vec();
+    let mut carry = offset as u64;
+    for byte in output.iter_mut().rev() {
+        let value = u64::from(*byte) + (carry & 0xFF);
+        *byte = value as u8;
+        carry = (carry >> 8) + (value >> 8);
+    }
+    if carry != 0 {
+        return Err(unsupported(page_index, "bfrange destination overflowed"));
+    }
+    Ok(output)
+}
+
+fn same_codespaces(left: &[CodeSpace], right: &[CodeSpace]) -> bool {
+    let mut left: Vec<_> = left
+        .iter()
+        .map(|space| (space.len, space.start, space.end))
+        .collect();
+    let mut right: Vec<_> = right
+        .iter()
+        .map(|space| (space.len, space.start, space.end))
+        .collect();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 fn parse_cid_widths(
@@ -2531,6 +5092,83 @@ fn parse_cid_widths(
         }
     }
     Ok(())
+}
+
+fn parse_cid_vertical_widths(
+    document: &Document,
+    array: &[Object],
+    widths: &mut BTreeMap<u16, VerticalMetric>,
+    page_index: u32,
+) -> Result<()> {
+    let mut index = 0usize;
+    while index < array.len() {
+        let start = cid_number(document, &array[index], page_index)?;
+        index += 1;
+        let next = array
+            .get(index)
+            .ok_or_else(|| unsupported(page_index, "CID /W2 ends after a start CID"))?;
+        match deref(document, next)? {
+            Object::Array(values) => {
+                if values.is_empty() || !values.len().is_multiple_of(3) {
+                    return Err(unsupported(
+                        page_index,
+                        "CID /W2 array-form metrics are not complete triples",
+                    ));
+                }
+                for (offset, triple) in values.chunks_exact(3).enumerate() {
+                    let cid = u16::try_from(usize::from(start) + offset)
+                        .map_err(|_| unsupported(page_index, "CID /W2 range exceeds 65535"))?;
+                    widths.insert(cid, vertical_metric(document, triple, page_index)?);
+                }
+                index += 1;
+            }
+            Object::Integer(_) => {
+                let end = cid_number(document, next, page_index)?;
+                if end < start {
+                    return Err(unsupported(page_index, "CID /W2 range is inverted"));
+                }
+                let triple = array.get(index + 1..index + 4).ok_or_else(|| {
+                    unsupported(page_index, "CID /W2 range has incomplete vertical metrics")
+                })?;
+                let metric = vertical_metric(document, triple, page_index)?;
+                for cid in start..=end {
+                    widths.insert(cid, metric);
+                }
+                index += 4;
+            }
+            _ => return Err(unsupported(page_index, "CID /W2 contains an invalid range")),
+        }
+    }
+    Ok(())
+}
+
+fn vertical_metric(
+    document: &Document,
+    values: &[Object],
+    page_index: u32,
+) -> Result<VerticalMetric> {
+    if values.len() != 3 {
+        return Err(unsupported(
+            page_index,
+            "CID vertical metric is not a triple",
+        ));
+    }
+    // A /W2 entry is the triple (w1y, v_x, v_y); v_y is validated but not carried.
+    number(document, &values[2], page_index, "CID vertical position y")?;
+    Ok(VerticalMetric {
+        displacement_y: number(
+            document,
+            &values[0],
+            page_index,
+            "CID vertical displacement",
+        )?,
+        position_x: Some(number(
+            document,
+            &values[1],
+            page_index,
+            "CID vertical position x",
+        )?),
+    })
 }
 
 fn font_extents(
@@ -2653,12 +5291,19 @@ fn remove_annotations(document: &mut Document, plan: &PagePlan) -> Result<Annota
         doomed.extend(linked);
     }
 
-    if doomed.iter().any(|index| annotations[*index].widget) {
-        return Err(unsupported(
-            plan.page_index,
-            "intersecting Widget annotation may remain reachable from AcroForm fields",
-        ));
-    }
+    let doomed_widget_ids = doomed
+        .iter()
+        .filter(|index| annotations[**index].widget)
+        .map(|index| {
+            annotations[*index].id.ok_or_else(|| {
+                unsupported(
+                    plan.page_index,
+                    "intersecting Widget annotation is direct and cannot be pruned safely",
+                )
+            })
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    let removed_field_ids = unlink_widget_fields(document, &doomed_widget_ids, plan.page_index)?;
     if doomed.len() > MAX_REMOVED_OBJECTS_PER_PAGE {
         return Err(unsupported(
             plan.page_index,
@@ -2670,7 +5315,14 @@ fn remove_annotations(document: &mut Document, plan: &PagePlan) -> Result<Annota
     let mut removed_ids = BTreeSet::new();
     for (index, annotation) in annotations.into_iter().enumerate() {
         if doomed.contains(&index) {
-            removed.push((annotation.bounds, "annotation"));
+            removed.push((
+                annotation.bounds,
+                if annotation.widget {
+                    RedactionObjectKind::Widget
+                } else {
+                    RedactionObjectKind::Annotation
+                },
+            ));
             if let Some(id) = annotation.id {
                 removed_ids.insert(id);
             }
@@ -2678,6 +5330,7 @@ fn remove_annotations(document: &mut Document, plan: &PagePlan) -> Result<Annota
             kept.push(annotation.entry);
         }
     }
+    removed_ids.extend(removed_field_ids);
     let page = document.get_dictionary_mut(plan.page_id).map_err(|error| {
         unsupported(
             plan.page_index,
@@ -2695,6 +5348,288 @@ fn remove_annotations(document: &mut Document, plan: &PagePlan) -> Result<Annota
     })
 }
 
+#[derive(Debug, Default)]
+struct FieldSubtree {
+    object_ids: BTreeSet<ObjectId>,
+    widget_ids: BTreeSet<ObjectId>,
+    sensitive_ids: BTreeSet<ObjectId>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AcroFormLocation {
+    Indirect(ObjectId),
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FieldsLocation {
+    Indirect(ObjectId),
+    Direct,
+}
+
+fn unlink_widget_fields(
+    document: &mut Document,
+    doomed_widget_ids: &BTreeSet<ObjectId>,
+    page_index: u32,
+) -> Result<BTreeSet<ObjectId>> {
+    if doomed_widget_ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let acroform_object = document
+        .catalog()
+        .map_err(|error| unsupported(page_index, format!("PDF catalog cannot be read: {error}")))?
+        .get(b"AcroForm")
+        .map_err(|_| unsupported(page_index, "intersecting Widget has no catalog /AcroForm"))?
+        .clone();
+    let (acroform_location, mut acroform) = match acroform_object {
+        Object::Reference(acroform_id) => (
+            AcroFormLocation::Indirect(acroform_id),
+            document
+                .get_dictionary(acroform_id)
+                .map_err(|_| unsupported(page_index, "catalog /AcroForm is not a dictionary"))?
+                .clone(),
+        ),
+        Object::Dictionary(acroform) => (AcroFormLocation::Direct, acroform),
+        _ => {
+            return Err(unsupported(
+                page_index,
+                "catalog /AcroForm is not a dictionary",
+            ));
+        }
+    };
+    let fields_object = acroform
+        .get(b"Fields")
+        .map_err(|_| unsupported(page_index, "catalog /AcroForm has no /Fields"))?
+        .clone();
+    let (fields_location, field_entries) = match fields_object {
+        Object::Array(fields) => (FieldsLocation::Direct, fields),
+        Object::Reference(fields_id) => (
+            FieldsLocation::Indirect(fields_id),
+            document
+                .get_object(fields_id)
+                .map_err(|_| unsupported(page_index, "/AcroForm /Fields cannot be resolved"))?
+                .as_array()
+                .map_err(|_| unsupported(page_index, "/AcroForm /Fields is not an array"))?
+                .clone(),
+        ),
+        _ => {
+            return Err(unsupported(page_index, "/AcroForm /Fields is not an array"));
+        }
+    };
+
+    let mut roots = Vec::with_capacity(field_entries.len());
+    let mut globally_seen = BTreeSet::new();
+    for entry in &field_entries {
+        let root_id = entry.as_reference().map_err(|_| {
+            unsupported(
+                page_index,
+                "/AcroForm /Fields contains a direct field that cannot be pruned safely",
+            )
+        })?;
+        let mut subtree = FieldSubtree::default();
+        collect_field_subtree(document, root_id, None, &mut subtree, page_index)?;
+        if subtree
+            .object_ids
+            .iter()
+            .any(|object_id| !globally_seen.insert(*object_id))
+        {
+            return Err(unsupported(
+                page_index,
+                "AcroForm field objects are shared across root fields",
+            ));
+        }
+        roots.push((root_id, subtree));
+    }
+
+    let mut matched_widgets = BTreeSet::new();
+    let mut removed_roots = BTreeSet::new();
+    let mut removed_ids = BTreeSet::new();
+    for (root_id, subtree) in &roots {
+        if subtree.widget_ids.is_disjoint(doomed_widget_ids) {
+            continue;
+        }
+        if !subtree.widget_ids.is_subset(doomed_widget_ids) {
+            return Err(unsupported(
+                page_index,
+                "redacted AcroForm field also has a widget outside the requested area or page",
+            ));
+        }
+        matched_widgets.extend(subtree.widget_ids.iter().copied());
+        removed_roots.insert(*root_id);
+        removed_ids.extend(subtree.object_ids.iter().copied());
+        removed_ids.extend(subtree.sensitive_ids.iter().copied());
+    }
+    if matched_widgets != *doomed_widget_ids {
+        return Err(unsupported(
+            page_index,
+            "intersecting Widget is not uniquely reachable from /AcroForm /Fields",
+        ));
+    }
+
+    for object_id in &removed_ids {
+        let Ok(dictionary) = document.get_dictionary_mut(*object_id) else {
+            continue;
+        };
+        dictionary.remove(b"V");
+        dictionary.remove(b"DV");
+        dictionary.remove(b"AP");
+    }
+    let kept_fields: Vec<_> = field_entries
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .as_reference()
+                .is_ok_and(|field_id| !removed_roots.contains(&field_id))
+        })
+        .collect();
+    match fields_location {
+        FieldsLocation::Indirect(fields_id) => {
+            document
+                .objects
+                .insert(fields_id, Object::Array(kept_fields));
+        }
+        FieldsLocation::Direct => acroform.set("Fields", Object::Array(kept_fields)),
+    }
+    match acroform_location {
+        AcroFormLocation::Indirect(acroform_id) => {
+            document
+                .objects
+                .insert(acroform_id, Object::Dictionary(acroform));
+        }
+        AcroFormLocation::Direct => {
+            document
+                .catalog_mut()
+                .map_err(|_| unsupported(page_index, "catalog /AcroForm cannot be updated"))?
+                .set("AcroForm", Object::Dictionary(acroform));
+        }
+    }
+    Ok(removed_ids)
+}
+
+fn collect_field_subtree(
+    document: &Document,
+    field_id: ObjectId,
+    expected_parent: Option<ObjectId>,
+    subtree: &mut FieldSubtree,
+    page_index: u32,
+) -> Result<()> {
+    if !subtree.object_ids.insert(field_id) {
+        return Err(unsupported(
+            page_index,
+            "AcroForm field tree contains a cycle or shared child",
+        ));
+    }
+    if subtree.object_ids.len() > 100_000 {
+        return Err(unsupported(
+            page_index,
+            "AcroForm field tree exceeds safe inspection complexity limits",
+        ));
+    }
+    let dictionary = document
+        .get_dictionary(field_id)
+        .map_err(|_| unsupported(page_index, "AcroForm field reference is not a dictionary"))?;
+    match (expected_parent, dictionary.get(b"Parent")) {
+        (Some(expected), Ok(parent)) if parent.as_reference().ok() == Some(expected) => {}
+        (Some(_), _) => {
+            return Err(unsupported(
+                page_index,
+                "AcroForm child field has an inconsistent /Parent",
+            ));
+        }
+        (None, Ok(_)) => {
+            return Err(unsupported(
+                page_index,
+                "AcroForm root field unexpectedly has a /Parent",
+            ));
+        }
+        (None, Err(_)) => {}
+    }
+
+    if dictionary
+        .get(b"Subtype")
+        .ok()
+        .and_then(|object| deref(document, object).ok())
+        .and_then(|object| object.as_name().ok())
+        == Some(b"Widget")
+    {
+        subtree.widget_ids.insert(field_id);
+    }
+    for key in [b"V".as_slice(), b"DV"] {
+        if let Ok(Object::Reference(value_id)) = dictionary.get(key) {
+            subtree.sensitive_ids.insert(*value_id);
+        }
+    }
+    if let Ok(appearance) = dictionary.get(b"AP") {
+        collect_appearance_ids(
+            document,
+            appearance,
+            &mut subtree.sensitive_ids,
+            page_index,
+            0,
+        )?;
+    }
+    let Ok(kids) = dictionary.get(b"Kids") else {
+        return Ok(());
+    };
+    let kids = deref(document, kids)?
+        .as_array()
+        .map_err(|_| unsupported(page_index, "AcroForm field /Kids is not an array"))?;
+    for kid in kids {
+        let kid_id = kid
+            .as_reference()
+            .map_err(|_| unsupported(page_index, "AcroForm field /Kids contains a direct child"))?;
+        collect_field_subtree(document, kid_id, Some(field_id), subtree, page_index)?;
+    }
+    Ok(())
+}
+
+fn collect_appearance_ids(
+    document: &Document,
+    object: &Object,
+    ids: &mut BTreeSet<ObjectId>,
+    page_index: u32,
+    depth: usize,
+) -> Result<()> {
+    if depth > 64 {
+        return Err(unsupported(
+            page_index,
+            "Widget appearance dictionary exceeds safe nesting limits",
+        ));
+    }
+    match object {
+        Object::Reference(id) => {
+            if !ids.insert(*id) {
+                return Ok(());
+            }
+            let resolved = document.objects.get(id).ok_or_else(|| {
+                unsupported(
+                    page_index,
+                    format!(
+                        "Widget appearance reference {} {} cannot be resolved",
+                        id.0, id.1
+                    ),
+                )
+            })?;
+            if !matches!(resolved, Object::Stream(_)) {
+                collect_appearance_ids(document, resolved, ids, page_index, depth + 1)?;
+            }
+        }
+        Object::Array(values) => {
+            for value in values {
+                collect_appearance_ids(document, value, ids, page_index, depth + 1)?;
+            }
+        }
+        Object::Dictionary(dictionary) => {
+            for (_, value) in dictionary.iter() {
+                collect_appearance_ids(document, value, ids, page_index, depth + 1)?;
+            }
+        }
+        Object::Stream(_) => {}
+        _ => {}
+    }
+    Ok(())
+}
+
 fn verify_annotations(document: &Document, plan: &PagePlan) -> Result<()> {
     let Some(entries) = annotation_entries(document, plan.page_id, plan.page_index)? else {
         return Ok(());
@@ -2709,6 +5644,94 @@ fn verify_annotations(document: &Document, plan: &PagePlan) -> Result<()> {
                 plan.page_index,
                 "output verification found an intersecting annotation",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_acroform_fields(document: &Document, plan: &PagePlan) -> Result<()> {
+    let catalog = document.catalog().map_err(|error| {
+        unsupported(
+            plan.page_index,
+            format!("PDF catalog cannot be inspected for AcroForm fields: {error}"),
+        )
+    })?;
+    let Ok(acroform) = catalog.get(b"AcroForm") else {
+        return Ok(());
+    };
+    let acroform = deref(document, acroform)?
+        .as_dict()
+        .map_err(|_| unsupported(plan.page_index, "catalog /AcroForm is not a dictionary"))?;
+    let Ok(fields) = acroform.get(b"Fields") else {
+        return Ok(());
+    };
+    let fields = deref(document, fields)?
+        .as_array()
+        .map_err(|_| unsupported(plan.page_index, "/AcroForm /Fields is not an array"))?;
+    let mut pending = fields.clone();
+    let mut visited = BTreeSet::new();
+    let mut inspected = 0usize;
+    while let Some(field) = pending.pop() {
+        inspected += 1;
+        if inspected > 100_000 {
+            return Err(unsupported(
+                plan.page_index,
+                "AcroForm field tree exceeds safe verification complexity limits",
+            ));
+        }
+        if let Object::Reference(id) = field {
+            if !visited.insert(id) {
+                continue;
+            }
+            let resolved = document.objects.get(&id).ok_or_else(|| {
+                unsupported(
+                    plan.page_index,
+                    format!(
+                        "AcroForm field reference {} {} cannot be resolved",
+                        id.0, id.1
+                    ),
+                )
+            })?;
+            pending.push(resolved.clone());
+            continue;
+        }
+        let dictionary = field
+            .as_dict()
+            .map_err(|_| unsupported(plan.page_index, "AcroForm field is not a dictionary"))?;
+        if dictionary
+            .get(b"Subtype")
+            .ok()
+            .and_then(|object| deref(document, object).ok())
+            .and_then(|object| object.as_name().ok())
+            == Some(b"Widget")
+        {
+            let belongs_to_page = dictionary
+                .get(b"P")
+                .ok()
+                .and_then(|object| object.as_reference().ok())
+                .is_none_or(|page_id| page_id == plan.page_id);
+            if belongs_to_page
+                && intersects_any(
+                    annotation_rect(document, dictionary, plan.page_index)?,
+                    &plan.boxes,
+                )
+            {
+                return Err(unsupported(
+                    plan.page_index,
+                    "output verification found an intersecting Widget or form-field value",
+                ));
+            }
+        }
+        if let Ok(kids) = dictionary.get(b"Kids") {
+            pending.extend(
+                deref(document, kids)?
+                    .as_array()
+                    .map_err(|_| {
+                        unsupported(plan.page_index, "AcroForm field /Kids is not an array")
+                    })?
+                    .iter()
+                    .cloned(),
+            );
         }
     }
     Ok(())
@@ -2743,6 +5766,198 @@ fn annotation_rect(document: &Document, dict: &Dictionary, page_index: u32) -> R
         .map_err(|_| unsupported(page_index, "annotation /Rect is not an array"))?;
     let values = number_array::<4>(document, array, page_index, "annotation /Rect")?;
     normalized_box(values, page_index, "annotation /Rect")
+}
+
+fn merge_resources(
+    document: &Document,
+    inherited: Option<&Dictionary>,
+    local: Option<&Dictionary>,
+    page_index: u32,
+) -> Result<Dictionary> {
+    let mut merged = inherited.cloned().unwrap_or_default();
+    let Some(local) = local else {
+        return Ok(merged);
+    };
+    for (key, local_value) in local.iter() {
+        let category = merged
+            .get(key)
+            .ok()
+            .map(|inherited_value| {
+                let inherited_dict = deref(document, inherited_value)?.as_dict().ok();
+                let local_dict = deref(document, local_value)?.as_dict().ok();
+                Ok::<_, PdfCoreError>(match (inherited_dict, local_dict) {
+                    (Some(inherited_dict), Some(local_dict)) => {
+                        let mut category = inherited_dict.clone();
+                        for (name, value) in local_dict.iter() {
+                            category.set(name.clone(), value.clone());
+                        }
+                        Some(Object::Dictionary(category))
+                    }
+                    _ => None,
+                })
+            })
+            .transpose()?;
+        merged.set(
+            key.clone(),
+            category.flatten().unwrap_or_else(|| local_value.clone()),
+        );
+    }
+    if merged.len() > 100_000 {
+        return Err(unsupported(
+            page_index,
+            "merged Form XObject resources exceed safe complexity limits",
+        ));
+    }
+    Ok(merged)
+}
+
+fn remove_self_form_binding(
+    document: &Document,
+    resources: &mut Dictionary,
+    name: &[u8],
+    form_id: ObjectId,
+    page_index: u32,
+) -> Result<()> {
+    let Ok(xobjects_object) = resources.get(b"XObject") else {
+        return Ok(());
+    };
+    let mut xobjects = deref(document, xobjects_object)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "Form /Resources/XObject is not a dictionary"))?
+        .clone();
+    let is_self = xobjects
+        .get(name)
+        .ok()
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(id, _)| id)
+        == Some(form_id);
+    if !is_self {
+        return Ok(());
+    }
+    xobjects.remove(name);
+    if xobjects.is_empty() {
+        resources.remove(b"XObject");
+    } else {
+        resources.set("XObject", Object::Dictionary(xobjects));
+    }
+    Ok(())
+}
+
+fn prune_unused_resource_names(
+    document: &Document,
+    resources: &mut Dictionary,
+    operations: &[Operation],
+    category: &[u8],
+    operator: &str,
+    removed_names: &BTreeSet<Vec<u8>>,
+    page_index: u32,
+) -> Result<()> {
+    let remaining: BTreeSet<&[u8]> = operations
+        .iter()
+        .filter(|operation| operation.operator == operator)
+        .filter_map(|operation| operation.operands.first())
+        .filter_map(|operand| operand.as_name().ok())
+        .collect();
+    let unused: Vec<&Vec<u8>> = removed_names
+        .iter()
+        .filter(|name| !remaining.contains(name.as_slice()))
+        .collect();
+    if unused.is_empty() {
+        return Ok(());
+    }
+    let category_object = resources.get(category).map_err(|_| {
+        unsupported(
+            page_index,
+            format!(
+                "removed resource has no /{} dictionary",
+                String::from_utf8_lossy(category)
+            ),
+        )
+    })?;
+    let mut category_dict = deref(document, category_object)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "resource category is not a dictionary"))?
+        .clone();
+    for name in unused {
+        category_dict.remove(name);
+    }
+    if category_dict.is_empty() {
+        resources.remove(category);
+    } else {
+        resources.set(category.to_vec(), Object::Dictionary(category_dict));
+    }
+    Ok(())
+}
+
+fn materialize_form_rewrite(
+    document: &mut Document,
+    mut rewrite: FormRewrite,
+    page_index: u32,
+) -> Result<ObjectId> {
+    if !rewrite.nested_forms.is_empty() {
+        let xobjects_object = rewrite
+            .resources
+            .get(b"XObject")
+            .map_err(|_| unsupported(page_index, "rewritten Form has no /XObject resources"))?;
+        let mut xobjects = deref(document, xobjects_object)?
+            .as_dict()
+            .map_err(|_| unsupported(page_index, "rewritten Form /XObject is not a dictionary"))?
+            .clone();
+        for (name, nested) in rewrite.nested_forms {
+            let nested_id = materialize_form_rewrite(document, nested, page_index)?;
+            xobjects.set(name, Object::Reference(nested_id));
+        }
+        rewrite
+            .resources
+            .set("XObject", Object::Dictionary(xobjects));
+    }
+    let bytes = encode_operations(&rewrite.operations, page_index)?;
+    rewrite
+        .stream
+        .dict
+        .set("Resources", Object::Dictionary(rewrite.resources));
+    rewrite.stream.set_plain_content(bytes);
+    Ok(document.add_object(rewrite.stream))
+}
+
+fn attach_rewritten_forms(
+    document: &mut Document,
+    page_id: ObjectId,
+    rewritten_forms: BTreeMap<Vec<u8>, FormRewrite>,
+    page_index: u32,
+) -> Result<()> {
+    if rewritten_forms.is_empty() {
+        return Ok(());
+    }
+    let inherited = find_inherited(document, page_id, b"Resources")?
+        .ok_or_else(|| unsupported(page_index, "rewritten Form has no page /Resources"))?;
+    let inherited = deref(document, inherited)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "page /Resources is not a dictionary"))?
+        .clone();
+    let mut resources = merge_resources(document, Some(&inherited), None, page_index)?;
+    let xobjects_object = resources
+        .get(b"XObject")
+        .map_err(|_| unsupported(page_index, "rewritten Form has no /XObject dictionary"))?;
+    let mut xobjects = deref(document, xobjects_object)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "page /Resources/XObject is not a dictionary"))?
+        .clone();
+    for (name, rewrite) in rewritten_forms {
+        let form_id = materialize_form_rewrite(document, rewrite, page_index)?;
+        xobjects.set(name, Object::Reference(form_id));
+    }
+    resources.set("XObject", Object::Dictionary(xobjects));
+    document
+        .get_dictionary_mut(page_id)
+        .map_err(|error| {
+            unsupported(
+                page_index,
+                format!("page resources cannot be updated for rewritten Form: {error}"),
+            )
+        })?
+        .set("Resources", Object::Dictionary(resources));
+    Ok(())
 }
 
 fn detach_unused_xobjects(
@@ -2827,6 +6042,63 @@ fn detach_unused_xobjects(
         resources.remove(b"XObject");
     } else {
         resources.set("XObject", Object::Dictionary(xobjects));
+    }
+    document
+        .get_dictionary_mut(page_id)
+        .map_err(|error| {
+            unsupported(
+                page_index,
+                format!("page resources cannot be updated: {error}"),
+            )
+        })?
+        .set("Resources", Object::Dictionary(resources));
+    Ok(())
+}
+
+fn detach_unused_shadings(
+    document: &mut Document,
+    page_id: ObjectId,
+    operations: &[Operation],
+    removed_names: &BTreeSet<Vec<u8>>,
+    page_index: u32,
+) -> Result<()> {
+    if removed_names.is_empty() {
+        return Ok(());
+    }
+    let remaining: BTreeSet<&[u8]> = operations
+        .iter()
+        .filter(|operation| operation.operator == "sh")
+        .filter_map(|operation| operation.operands.first())
+        .filter_map(|operand| operand.as_name().ok())
+        .collect();
+    let unused: Vec<&Vec<u8>> = removed_names
+        .iter()
+        .filter(|name| !remaining.contains(name.as_slice()))
+        .collect();
+    if unused.is_empty() {
+        return Ok(());
+    }
+
+    let resources_object = find_inherited(document, page_id, b"Resources")?
+        .ok_or_else(|| unsupported(page_index, "removed shading has no page /Resources"))?;
+    let mut resources = deref(document, resources_object)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "page /Resources is not a dictionary"))?
+        .clone();
+    let shadings_object = resources
+        .get(b"Shading")
+        .map_err(|_| unsupported(page_index, "removed shading has no resource dictionary"))?;
+    let mut shadings = deref(document, shadings_object)?
+        .as_dict()
+        .map_err(|_| unsupported(page_index, "page /Resources/Shading is not a dictionary"))?
+        .clone();
+    for name in unused {
+        shadings.remove(name);
+    }
+    if shadings.is_empty() {
+        resources.remove(b"Shading");
+    } else {
+        resources.set("Shading", Object::Dictionary(shadings));
     }
     document
         .get_dictionary_mut(page_id)
@@ -2966,27 +6238,20 @@ fn inline_image_stream(operation: &Operation, page_index: u32) -> Result<&Stream
         .map_err(|_| unsupported(page_index, "inline image operand is not a parsed stream"))
 }
 
-fn style_carrier(style: &TextStyle) -> Vec<Operation> {
-    let mut operations = vec![Operation::new("BT", vec![])];
-    if let Some(font) = &style.font {
-        operations.push(Operation::new(
-            "Tf",
-            vec![Object::Name(font.clone()), (style.size as f32).into()],
-        ));
-    }
-    operations.extend([
-        Operation::new("Tc", vec![(style.char_spacing as f32).into()]),
-        Operation::new("Tw", vec![(style.word_spacing as f32).into()]),
-        Operation::new("Tz", vec![(style.horizontal_scale as f32 * 100.0).into()]),
-        Operation::new("TL", vec![(style.leading as f32).into()]),
-        Operation::new("Tr", vec![style.rendering_mode.into()]),
-        Operation::new("Ts", vec![(style.rise as f32).into()]),
-        Operation::new("ET", vec![]),
-    ]);
-    operations
+fn transform_box(matrix: Matrix, values: [f64; 4], page_index: u32) -> Result<BoxPts> {
+    transform_box_with_margin(matrix, values, BBOX_MARGIN_PT, page_index)
 }
 
-fn transform_box(matrix: Matrix, values: [f64; 4], page_index: u32) -> Result<BoxPts> {
+fn transform_glyph_box(matrix: Matrix, values: [f64; 4], page_index: u32) -> Result<BoxPts> {
+    transform_box_with_margin(matrix, values, 0.01, page_index)
+}
+
+fn transform_box_with_margin(
+    matrix: Matrix,
+    values: [f64; 4],
+    margin: f64,
+    page_index: u32,
+) -> Result<BoxPts> {
     if !matrix.is_finite() || !values.iter().all(|value| value.is_finite()) {
         return Err(unsupported(
             page_index,
@@ -3007,22 +6272,22 @@ fn transform_box(matrix: Matrix, values: [f64; 4], page_index: u32) -> Result<Bo
         .iter()
         .map(|point| point.0)
         .fold(f64::INFINITY, f64::min)
-        - BBOX_MARGIN_PT;
+        - margin;
     let max_x = points
         .iter()
         .map(|point| point.0)
         .fold(f64::NEG_INFINITY, f64::max)
-        + BBOX_MARGIN_PT;
+        + margin;
     let min_y = points
         .iter()
         .map(|point| point.1)
         .fold(f64::INFINITY, f64::min)
-        - BBOX_MARGIN_PT;
+        - margin;
     let max_y = points
         .iter()
         .map(|point| point.1)
         .fold(f64::NEG_INFINITY, f64::max)
-        + BBOX_MARGIN_PT;
+        + margin;
     if ![min_x, max_x, min_y, max_y]
         .iter()
         .all(|value| value.is_finite())
@@ -3050,19 +6315,41 @@ fn transform_box(matrix: Matrix, values: [f64; 4], page_index: u32) -> Result<Bo
     Ok(bounds)
 }
 
-fn inflate_stroked_text(
+fn inflate_stroked_text_bounds(
     bounds: BoxPts,
     graphics: &GraphicsState,
     page_index: u32,
 ) -> Result<BoxPts> {
-    let radius = graphics.line_width * graphics.miter_limit / 2.0;
+    let radius = graphics.line_width / 2.0;
     let x_margin = radius * (graphics.ctm.a.abs() + graphics.ctm.c.abs());
     let y_margin = radius * (graphics.ctm.b.abs() + graphics.ctm.d.abs());
+    inflate_bounds_by_margins(bounds, x_margin, y_margin, page_index)
+}
+
+fn inflate_stroked_path_bounds(
+    bounds: BoxPts,
+    graphics: &GraphicsState,
+    path: &PathGeometry,
+    page_index: u32,
+) -> Result<BoxPts> {
+    let radius = graphics.line_width * graphics.miter_limit / 2.0;
+    let x_scale = path
+        .stroke_scale_x
+        .max(graphics.ctm.a.abs() + graphics.ctm.c.abs());
+    let y_scale = path
+        .stroke_scale_y
+        .max(graphics.ctm.b.abs() + graphics.ctm.d.abs());
+    inflate_bounds_by_margins(bounds, radius * x_scale, radius * y_scale, page_index)
+}
+
+fn inflate_bounds_by_margins(
+    bounds: BoxPts,
+    x_margin: f64,
+    y_margin: f64,
+    page_index: u32,
+) -> Result<BoxPts> {
     if ![x_margin, y_margin].iter().all(|value| value.is_finite()) {
-        return Err(unsupported(
-            page_index,
-            "stroked text bounds are non-finite",
-        ));
+        return Err(unsupported(page_index, "stroked bounds are non-finite"));
     }
     let bounds = BoxPts {
         left: (f64::from(bounds.left) - x_margin) as f32,
@@ -3076,7 +6363,7 @@ fn inflate_stroked_text(
     {
         return Err(unsupported(
             page_index,
-            "stroked text bounds exceed supported precision",
+            "stroked bounds exceed supported precision",
         ));
     }
     Ok(bounds)
@@ -3111,6 +6398,25 @@ fn union_box(a: BoxPts, b: BoxPts) -> BoxPts {
         bottom: a.bottom.min(b.bottom),
         top: a.top.max(b.top),
     }
+}
+
+fn intersect_box(a: BoxPts, b: BoxPts) -> Option<BoxPts> {
+    let bounds = BoxPts {
+        left: a.left.max(b.left),
+        right: a.right.min(b.right),
+        bottom: a.bottom.max(b.bottom),
+        top: a.top.min(b.top),
+    };
+    bounds.is_finite_and_nonempty().then_some(bounds)
+}
+
+fn visible_graphics_bounds(
+    bounds: BoxPts,
+    clip: ActiveClip,
+    page_bounds: BoxPts,
+) -> Option<BoxPts> {
+    clip.conservative_bounds(page_bounds)
+        .and_then(|clip_bounds| intersect_box(bounds, clip_bounds))
 }
 
 fn intersects_any(bounds: BoxPts, boxes: &[BoxPts]) -> bool {
@@ -3473,9 +6779,158 @@ fn unsupported(page_index: u32, message: impl Into<String>) -> PdfCoreError {
     PdfCoreError::Unsupported(format!("page {page_index}: {}", message.into()))
 }
 
+/// True when the operator paints at least one glyph.
+fn shows_glyphs(operation: &Operation) -> bool {
+    let has_glyphs =
+        |object: &Object| matches!(object, Object::String(bytes, _) if !bytes.is_empty());
+    match operation.operator.as_str() {
+        "Tj" | "'" | "\"" => operation.operands.iter().any(has_glyphs),
+        "TJ" => operation
+            .operands
+            .first()
+            .and_then(|operand| operand.as_array().ok())
+            .is_some_and(|items| items.iter().any(has_glyphs)),
+        _ => false,
+    }
+}
+
+/// A show operator left glyph-free by run-level rewriting: it paints nothing and
+/// only carries the displacement of the glyphs that were removed.
+fn is_glyph_free_show(operation: &Operation) -> bool {
+    matches!(operation.operator.as_str(), "Tj" | "TJ" | "'" | "\"") && !shows_glyphs(operation)
+}
+
+/// Operators that re-seat the text position from the line matrix, making any
+/// displacement accumulated by earlier show operators unobservable. `'` and `"`
+/// begin with an implicit `T*`, so they re-seat before painting.
+fn reseats_text_position(operation: &Operation) -> bool {
+    matches!(
+        operation.operator.as_str(),
+        "Td" | "TD" | "Tm" | "T*" | "'" | "\""
+    )
+}
+
+/// Drops glyph-free show operators whose displacement cannot reach a later
+/// glyph. Removing every glyph of a run leaves `[-advance] TJ`, which paints
+/// nothing; if no subsequent glyph in the same `BT..ET` is positioned relative
+/// to it, the operator has no observable effect and must not survive into the
+/// redacted page.
+fn prune_unobservable_shows(operations: &mut Vec<Operation>) {
+    let mut keep = vec![true; operations.len()];
+    for index in 0..operations.len() {
+        if !is_glyph_free_show(&operations[index]) {
+            continue;
+        }
+        let mut observable = false;
+        for candidate in &operations[index + 1..] {
+            if reseats_text_position(candidate) || candidate.operator == "ET" {
+                break;
+            }
+            if shows_glyphs(candidate) {
+                observable = true;
+                break;
+            }
+        }
+        keep[index] = observable;
+    }
+    let mut index = 0;
+    operations.retain(|_| {
+        let retained = keep[index];
+        index += 1;
+        retained
+    });
+}
+
+fn rewrite_glyph_bytes_as_tj(
+    bytes: &[u8],
+    boundaries: &[(usize, usize)],
+    removed: &[bool],
+    displacement_milli: &[f64],
+    page_index: u32,
+) -> Result<Operation> {
+    if boundaries.len() != removed.len() || boundaries.len() != displacement_milli.len() {
+        return Err(unsupported(
+            page_index,
+            "glyph rewrite inputs have inconsistent lengths",
+        ));
+    }
+    let mut expected_start = 0usize;
+    for &(start, end) in boundaries {
+        if start != expected_start || end <= start || end > bytes.len() {
+            return Err(unsupported(
+                page_index,
+                "glyph rewrite boundaries do not partition the text string",
+            ));
+        }
+        expected_start = end;
+    }
+    if expected_start != bytes.len() {
+        return Err(unsupported(
+            page_index,
+            "glyph rewrite boundaries do not cover the text string",
+        ));
+    }
+
+    let mut items = Vec::new();
+    let mut kept_start = 0usize;
+    let mut index = 0usize;
+    while index < boundaries.len() {
+        if !removed[index] {
+            index += 1;
+            continue;
+        }
+        let removed_start = boundaries[index].0;
+        if kept_start < removed_start {
+            items.push(Object::string_literal(
+                bytes[kept_start..removed_start].to_vec(),
+            ));
+        }
+        let mut displacement = 0.0;
+        while index < boundaries.len() && removed[index] {
+            displacement += displacement_milli[index];
+            index += 1;
+        }
+        if !displacement.is_finite() || displacement.abs() > f64::from(f32::MAX) {
+            return Err(unsupported(
+                page_index,
+                "glyph rewrite displacement is outside supported numeric precision",
+            ));
+        }
+        items.push(Object::Real((-displacement) as f32));
+        kept_start = boundaries[index - 1].1;
+    }
+    if kept_start < bytes.len() {
+        items.push(Object::string_literal(bytes[kept_start..].to_vec()));
+    }
+    if items.is_empty() {
+        items.push(Object::string_literal(bytes.to_vec()));
+    }
+    Ok(Operation::new("TJ", vec![Object::Array(items)]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_glyph_removal_rewrite_is_an_algebraic_noop() {
+        let bytes = b"ALPHA BETA";
+        let boundaries = (0..bytes.len())
+            .map(|start| (start, start + 1))
+            .collect::<Vec<_>>();
+        let removed = vec![false; boundaries.len()];
+        let displacement_milli = vec![500.0; boundaries.len()];
+
+        let rewritten =
+            rewrite_glyph_bytes_as_tj(bytes, &boundaries, &removed, &displacement_milli, 0)
+                .expect("empty removal set is rewritable");
+
+        assert_eq!(rewritten.operator, "TJ");
+        assert_eq!(
+            rewritten.operands,
+            vec![Object::Array(vec![Object::string_literal(bytes.to_vec())])]
+        );
+    }
 
     #[test]
     fn matrix_concat_applies_rhs_before_lhs() {

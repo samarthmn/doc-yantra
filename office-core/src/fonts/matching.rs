@@ -72,6 +72,41 @@ pub fn resolve(db: &FontDb, family: &str, weight: u16, italic: bool) -> Resolved
     out
 }
 
+/// Returns deterministic coverage-fallback candidates after `primary`.
+/// Embedded document faces win, then packaged Noto faces, then metric-compatible
+/// bundled faces, with style distance breaking ties inside each class.
+pub fn coverage_fallbacks(db: &FontDb, primary: FaceId, weight: u16, italic: bool) -> Vec<FaceId> {
+    let mut ids: Vec<FaceId> = (0..db.len()).map(FaceId).collect();
+    ids.retain(|id| {
+        *id == primary || !family_key(&db.faces()[id.0].family_name).contains("lastresort")
+    });
+    ids.sort_by_key(|id| {
+        let face = &db.faces()[id.0];
+        let family = family_key(&face.family_name);
+        let class = if *id == primary {
+            0
+        } else if face.embedded {
+            1
+        } else if family.starts_with("noto") {
+            2
+        } else if matches!(
+            family.as_str(),
+            "carlito" | "caladea" | "liberation sans" | "liberation serif" | "liberation mono"
+        ) {
+            3
+        } else {
+            4
+        };
+        (
+            class,
+            u8::from(face.italic != italic),
+            face.weight.abs_diff(weight),
+            id.0,
+        )
+    });
+    ids
+}
+
 struct Pick {
     face: FaceId,
     synthetic_italic: bool,

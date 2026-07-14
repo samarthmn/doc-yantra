@@ -41,6 +41,14 @@ export function page_count(pdf: Uint8Array): number;
 export function redact_pdf(pdf: Uint8Array, areas_json: string): Uint8Array;
 
 /**
+ * Permanently redacts service-compatible percentage areas and returns the
+ * complete core report, including conservative whole-object removal notices.
+ * This additive export preserves `redact_pdf` compatibility for callers that
+ * only consume rewritten PDF bytes.
+ */
+export function redact_pdf_with_report(pdf: Uint8Array, areas_json: string): any;
+
+/**
  * Adds an embeddable font to the process-global registry. The generated JS
  * glue applies the same limit before copying `bytes` into wasm linear memory;
  * this Rust check is defense in depth for direct wasm callers.

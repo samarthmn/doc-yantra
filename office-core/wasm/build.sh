@@ -59,6 +59,11 @@ node ./postprocess-glue.mjs \
   pkg/office_core_wasm.js \
   pkg/web/office_core_wasm.js
 
+# Server worker API. Runtime is single-source at repo root; only engine op
+# tables and public facades are package-specific.
+cp ../../wasm-worker/worker-client.cjs ../../wasm-worker/worker-entry.cjs pkg/
+cp worker.js worker.d.ts worker-ops.cjs pkg/
+
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \
 node -e '
   const fs = require("fs"), p = "pkg/package.json";
@@ -67,7 +72,7 @@ node -e '
   j.repository = { type: "git", url: process.env.REPO_URL };
   j.license = "UNLICENSED";
   j.publishConfig = { registry: "https://npm.pkg.github.com" };
-  j.files = Array.from(new Set([...(j.files || []), "web"]));
+  j.files = Array.from(new Set([...(j.files || []), "web", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json"]));
   j.exports = {
     ".": {
       types: "./office_core_wasm.d.ts",
@@ -80,11 +85,16 @@ node -e '
       default: "./web/office_core_wasm.js",
     },
     "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
+    "./worker": { types: "./worker.d.ts", require: "./worker.js", default: "./worker.js" },
     "./package.json": "./package.json",
   };
   fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
   console.log("stamped", j.name, j.version, "->", j.publishConfig.registry);
 '
+
+# Stamp the source fingerprint so consumers can detect a stale pkg/ build
+# (doc-kosha tests/unit/package-freshness.test.ts recomputes and compares).
+node ../../scripts/source-fingerprint.mjs office --out pkg/build-fingerprint.json
 
 WASM_BYTES=$(wc -c < pkg/office_core_wasm_bg.wasm)
 WASM_MB=$(( WASM_BYTES / 1024 / 1024 ))

@@ -3,7 +3,7 @@
 //! PPTX `a:schemeClr`.
 
 use super::{A, Node, Rgb, Rgba, attr, child, children, parse_f64};
-use crate::{OfficeError, Result};
+use crate::Result;
 use std::collections::HashMap;
 
 /// A theme: its named color slots and the major/minor Latin typefaces.
@@ -20,8 +20,7 @@ impl Theme {
     /// Parses `word/theme/theme1.xml` (or a slide theme). An absent part yields
     /// an empty theme (color lookups miss; fonts fall back to Calibri).
     pub fn parse(xml: &str) -> Result<Theme> {
-        let doc = roxmltree::Document::parse(xml)
-            .map_err(|e| OfficeError::Invalid(format!("theme XML: {e}")))?;
+        let doc = super::parse_xml(xml, "theme")?;
         let root = doc.root_element();
         let mut theme = Theme::default();
 
@@ -48,6 +47,17 @@ impl Theme {
     /// scheme-map names.
     pub fn color(&self, slot: &str) -> Option<Rgb> {
         self.colors.get(&canonical_slot(slot)).copied()
+    }
+
+    /// Returns a theme with DrawingML color-map aliases applied.
+    pub fn with_color_map(&self, mapping: &HashMap<String, String>) -> Theme {
+        let mut mapped = self.clone();
+        for (logical, source) in mapping {
+            if let Some(color) = self.color(source) {
+                mapped.colors.insert(canonical_slot(logical), color);
+            }
+        }
+        mapped
     }
 }
 
@@ -338,5 +348,18 @@ mod tests {
         let theme = theme_with("lt1", Rgb::new(255, 255, 255));
         assert_eq!(theme.color("window"), Some(Rgb::new(255, 255, 255)));
         assert_eq!(theme.color("bg1"), Some(Rgb::new(255, 255, 255)));
+    }
+
+    #[test]
+    fn color_map_redirects_logical_slots() {
+        let mut theme = theme_with("accent2", Rgb::new(10, 20, 30));
+        theme
+            .colors
+            .insert("accent1".to_string(), Rgb::new(1, 2, 3));
+        let mapped = theme.with_color_map(&HashMap::from([(
+            "accent1".to_string(),
+            "accent2".to_string(),
+        )]));
+        assert_eq!(mapped.color("accent1"), Some(Rgb::new(10, 20, 30)));
     }
 }

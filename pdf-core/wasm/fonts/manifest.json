@@ -1,0 +1,92 @@
+{
+  "fonts": [
+    {
+      "file": "LiberationSans-Regular.ttf",
+      "family": "Liberation Sans",
+      "version": "2.1",
+      "sha256": "76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8",
+      "license": "LICENSE-liberation.txt",
+      "coverageClass": "latin-greek-cyrillic"
+    },
+    {
+      "file": "LiberationSans-Bold.ttf",
+      "family": "Liberation Sans",
+      "version": "2.1",
+      "sha256": "788abee4c806d660e8aee46689dd8540cd4bb98da03dcc9d171ce3efd99a9173",
+      "license": "LICENSE-liberation.txt",
+      "coverageClass": "latin-greek-cyrillic"
+    },
+    {
+      "file": "LiberationMono-Regular.ttf",
+      "family": "Liberation Mono",
+      "version": "2.1",
+      "sha256": "f2b83c763e8afd21709333370bed4774337fae82267937e2b5aea7e2fbd922c1",
+      "license": "LICENSE-liberation.txt",
+      "coverageClass": "latin-greek-cyrillic"
+    },
+    {
+      "file": "NotoSansCJKsc-Regular.otf",
+      "family": "Noto Sans CJK SC",
+      "version": "2.004",
+      "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-sc"
+    },
+    {
+      "file": "NotoSansCJKtc-Regular.otf",
+      "family": "Noto Sans CJK TC",
+      "version": "2.004",
+      "sha256": "dce08bd4fd91aa8aa76ed8fea4b694c2dfb8550f67871e326843212ddbeb88b4",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-tc"
+    },
+    {
+      "file": "NotoSansCJKjp-Regular.otf",
+      "family": "Noto Sans CJK JP",
+      "version": "2.004",
+      "sha256": "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-jp"
+    },
+    {
+      "file": "NotoSansCJKkr-Regular.otf",
+      "family": "Noto Sans CJK KR",
+      "version": "2.004",
+      "sha256": "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-kr"
+    },
+    {
+      "file": "NotoSansArabic-Variable.ttf",
+      "family": "Noto Sans Arabic",
+      "version": "2.014 (variable)",
+      "sha256": "63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e",
+      "license": "LICENSE-noto-sans-scripts.txt",
+      "coverageClass": "arabic"
+    },
+    {
+      "file": "NotoSansDevanagari-Variable.ttf",
+      "family": "Noto Sans Devanagari",
+      "version": "2.006 (variable)",
+      "sha256": "9ce7b04f60e363d8870e5997744cf85cf69d38a4d7d129d364d92a3b14b461d7",
+      "license": "LICENSE-noto-sans-scripts.txt",
+      "coverageClass": "devanagari"
+    },
+    {
+      "file": "NotoSansThai-Variable.ttf",
+      "family": "Noto Sans Thai",
+      "version": "2.002 (variable)",
+      "sha256": "5a1c559bb539583c8a1fd99d1c5b9491e5e14478c9cd2bd0970d5c3096cc9ef8",
+      "license": "LICENSE-noto-sans-scripts.txt",
+      "coverageClass": "thai"
+    },
+    {
+      "file": "NotoEmoji-Variable.ttf",
+      "family": "Noto Emoji",
+      "version": "3.002",
+      "sha256": "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551",
+      "license": "LICENSE-noto-emoji.txt",
+      "coverageClass": "emoji-mono"
+    }
+  ]
+}

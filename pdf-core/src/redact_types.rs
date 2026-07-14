@@ -59,7 +59,92 @@ pub struct RedactOutput {
     /// Number of pages in the rewritten PDF.
     pub page_count: u32,
     /// Notices for whole-object removals that exceeded requested rectangles.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<RedactionWarning>,
+}
+
+/// Closed machine-readable warning codes emitted by redaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RedactionWarningCode {
+    /// A whole PDF object exceeded the requested rectangle and was removed.
+    OverRedaction,
+}
+
+impl RedactionWarningCode {
+    /// Stable snake_case code for API consumers.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OverRedaction => "over_redaction",
+        }
+    }
+}
+
+/// Stable object kinds carried by redaction warnings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RedactionObjectKind {
+    /// Text content inside one `BT..ET` object.
+    Text,
+    /// An inline image (`BI..EI`).
+    InlineImage,
+    /// An image XObject and any attached masks.
+    ImageXObject,
+    /// A Form XObject.
+    FormXObject,
+    /// A painted vector path.
+    VectorPath,
+    /// A shading operation and resource.
+    Shading,
+    /// A non-widget annotation.
+    Annotation,
+    /// A widget annotation and its field subtree.
+    Widget,
+}
+
+impl RedactionObjectKind {
+    /// Stable snake_case kind for API consumers.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::InlineImage => "inline_image",
+            Self::ImageXObject => "image_xobject",
+            Self::FormXObject => "form_xobject",
+            Self::VectorPath => "vector_path",
+            Self::Shading => "shading",
+            Self::Annotation => "annotation",
+            Self::Widget => "widget",
+        }
+    }
+
+    pub(crate) const fn message_label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::InlineImage => "inline image",
+            Self::ImageXObject => "image XObject",
+            Self::FormXObject => "Form XObject",
+            Self::VectorPath => "vector path",
+            Self::Shading => "shading",
+            Self::Annotation => "annotation",
+            Self::Widget => "widget",
+        }
+    }
+}
+
+/// Structured notice for a conservative redaction decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionWarning {
+    /// Closed machine code; consumers branch on this field.
+    pub code: RedactionWarningCode,
+    /// Zero-based page index.
+    pub page: u32,
+    /// Stable kind of object that caused the warning.
+    pub kind: RedactionObjectKind,
+    /// Human-readable context; consumers must not branch on this prose.
+    pub message: String,
+}
+
+impl std::fmt::Display for RedactionWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 
 /// Axis-aligned box in PDF points, using a bottom-left origin.

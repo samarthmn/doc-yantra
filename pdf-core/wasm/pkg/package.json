@@ -7,7 +7,13 @@
     "pdf_core_wasm.js",
     "pdf_core_wasm.d.ts",
     "web",
-    "fonts"
+    "fonts",
+    "worker.js",
+    "worker.d.ts",
+    "worker-client.cjs",
+    "worker-entry.cjs",
+    "worker-ops.cjs",
+    "build-fingerprint.json"
   ],
   "main": "pdf_core_wasm.js",
   "types": "pdf_core_wasm.d.ts",
@@ -31,6 +37,11 @@
       "default": "./web/pdf_core_wasm.js"
     },
     "./web/pdf_core_wasm_bg.wasm": "./web/pdf_core_wasm_bg.wasm",
+    "./worker": {
+      "types": "./worker.d.ts",
+      "require": "./worker.js",
+      "default": "./worker.js"
+    },
     "./package.json": "./package.json"
   }
 }

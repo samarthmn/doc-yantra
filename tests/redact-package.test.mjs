@@ -15,9 +15,9 @@ function isPdf(bytes) {
   return Buffer.from(bytes.subarray(0, 5)).toString("latin1") === "%PDF-";
 }
 
-function isUnsupported(error) {
-  return error instanceof Error && error.message.startsWith("unsupported:");
-}
+// Direct (non-worker) glue callers receive the machine envelope the wasm
+// boundary serializes into the error message: {"dy":1,"code":…,"message":…}.
+// Identity is asserted on the code; the legacy prose lives in envelope.message.
 
 function drawnText(bytes) {
   const pdf = Buffer.from(bytes);
@@ -135,8 +135,16 @@ describe("redact_pdf", () => {
     assert.throws(() => main.redact_pdf(input, "{not-json"));
   });
 
-  test("returns unsupported prefix for a Type3 font", () => {
-    assert.throws(() => main.redact_pdf(type3Pdf(), fullPage), isUnsupported);
+  test("redacts a Type3 font page (legacy compatibility restored)", () => {
+    // Type3 metrics are modeled since the round-3 compatibility work; the
+    // page must redact successfully instead of failing typed.
+    const output = main.redact_pdf(type3Pdf(), fullPage);
+    assert.ok(output.length > 0, "redacted PDF bytes returned");
+    assert.equal(main.page_count(output), 1);
+    assert.ok(
+      !Buffer.from(output).includes("(aaa)"),
+      "redacted Type3 show operation must not survive",
+    );
   });
 
   test("rejects an oversized PDF before reading or copying its bytes", () => {

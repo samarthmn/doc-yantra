@@ -14,11 +14,15 @@
 //!    the router can decide cheaply before converting.
 #![deny(missing_docs)]
 
+use std::sync::{LazyLock, RwLock};
+
+pub mod drawing;
 pub mod emit;
 pub mod error;
 pub mod fonts;
 pub mod layout;
 pub mod opc;
+pub mod output_limit;
 pub mod oxml;
 pub mod pptx;
 pub mod profile;
@@ -30,6 +34,42 @@ pub mod testkit;
 
 pub use error::{OfficeError, Result, UnsupportedCode};
 pub use profile::DocProfile;
+
+static RUNTIME_FONTS: LazyLock<RwLock<Vec<Vec<u8>>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// Output and layout work grows at least linearly per emitted page.
+const MAX_EMITTED_PAGES: usize = 2_000;
+
+fn guard_page_count(count: usize) -> Result<()> {
+    if count > MAX_EMITTED_PAGES {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::DecompressionLimit,
+            format!("page emission count {count} exceeds limit {MAX_EMITTED_PAGES}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Registers every face in an sfnt or collection for subsequent conversions
+/// and profiles in this process. Registration validates all bytes before the
+/// process-global registry is changed.
+pub fn register_font(bytes: &[u8]) -> Result<()> {
+    let mut validation = fonts::FontDb::new();
+    validation.register(bytes.to_vec())?;
+    RUNTIME_FONTS
+        .write()
+        .map_err(|_| OfficeError::Internal("font registry lock is poisoned".into()))?
+        .push(bytes.to_vec());
+    Ok(())
+}
+
+fn effective_options(opts: &ConvertOptions) -> ConvertOptions {
+    let mut effective = opts.clone();
+    if let Ok(fonts) = RUNTIME_FONTS.read() {
+        effective.font_bytes.extend(fonts.iter().cloned());
+    }
+    effective
+}
 
 /// The Office document formats the engine understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,16 +126,17 @@ pub struct ConvertOutput {
 /// [`OfficeError::Unsupported`] (the same verdict [`profile`] predicts). `format`
 /// is the caller's declared format; the container is still validated.
 pub fn convert(bytes: &[u8], format: OfficeFormat, opts: &ConvertOptions) -> Result<ConvertOutput> {
+    let effective = effective_options(opts);
     match format {
-        OfficeFormat::Docx => convert_docx(bytes, opts),
-        OfficeFormat::Pptx => convert_pptx(bytes, opts),
-        OfficeFormat::Xlsx => convert_xlsx(bytes, opts),
+        OfficeFormat::Docx => convert_docx(bytes, &effective),
+        OfficeFormat::Pptx => convert_pptx(bytes, &effective),
+        OfficeFormat::Xlsx => convert_xlsx(bytes, &effective),
     }
 }
 
 /// Converts a `.xlsx`/`.xlsm`: enforce the envelope, then render + emit.
 fn convert_xlsx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
-    let prof = profile::run(bytes, OfficeFormat::Xlsx)?;
+    let prof = profile::run_with_options(bytes, OfficeFormat::Xlsx, opts)?;
     if !prof.supported {
         let (code, detail) = prof
             .reasons
@@ -108,7 +149,8 @@ fn convert_xlsx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         return Err(OfficeError::unsupported(code, detail));
     }
     let doc = xlsx::XlsxDoc::open(bytes, opts)?;
-    let (laid, mut warnings) = xlsx::render_xlsx(&doc);
+    let (laid, mut warnings) = xlsx::render_xlsx(&doc)?;
+    guard_page_count(laid.pages.len())?;
     let page_count = laid.pages.len() as u32;
     let pdf = emit::pdf::emit(&laid, &doc.fonts, document_id(bytes), &mut warnings)?;
     Ok(ConvertOutput {
@@ -120,7 +162,7 @@ fn convert_xlsx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
 
 /// Converts a `.pptx`: enforce the envelope, then render + emit.
 fn convert_pptx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
-    let prof = profile::run(bytes, OfficeFormat::Pptx)?;
+    let prof = profile::run_with_options(bytes, OfficeFormat::Pptx, opts)?;
     if !prof.supported {
         let (code, detail) = prof
             .reasons
@@ -133,7 +175,8 @@ fn convert_pptx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         return Err(OfficeError::unsupported(code, detail));
     }
     let doc = pptx::PptxDoc::open(bytes, opts)?;
-    let (laid, mut warnings) = pptx::render_pptx(&doc);
+    let (laid, mut warnings) = pptx::render_pptx(&doc)?;
+    guard_page_count(laid.pages.len())?;
     let page_count = laid.pages.len() as u32;
     let pdf = emit::pdf::emit(&laid, &doc.fonts, document_id(bytes), &mut warnings)?;
     Ok(ConvertOutput {
@@ -146,7 +189,7 @@ fn convert_pptx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
 /// Converts a `.docx`: enforce the envelope (via [`profile`]), then layout + emit.
 fn convert_docx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
     // Fail closed: the profile is the single source of the envelope verdict.
-    let prof = profile::run(bytes, OfficeFormat::Docx)?;
+    let prof = profile::run_with_options(bytes, OfficeFormat::Docx, opts)?;
     if !prof.supported {
         let (code, detail) = prof
             .reasons
@@ -160,7 +203,8 @@ fn convert_docx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
     }
 
     let doc = layout::WordDoc::open(bytes, opts)?;
-    let (laid, mut warnings) = layout::layout_docx(&doc);
+    let (laid, mut warnings) = layout::layout_docx(&doc)?;
+    guard_page_count(laid.pages.len())?;
     let page_count = laid.pages.len() as u32;
     let pdf = emit::pdf::emit(&laid, &doc.fonts, document_id(bytes), &mut warnings)?;
     Ok(ConvertOutput {
@@ -189,5 +233,20 @@ fn document_id(bytes: &[u8]) -> [u8; 16] {
 /// container-level failures (invalid/encrypted/legacy), which the wasm boundary
 /// maps to JSON via [`DocProfile::from_error`].
 pub fn profile(bytes: &[u8], format: OfficeFormat) -> Result<DocProfile> {
-    profile::run(bytes, format)
+    let opts = effective_options(&ConvertOptions::default());
+    profile::run_with_options(bytes, format, &opts)
+}
+
+#[cfg(test)]
+mod runtime_font_tests {
+    use super::*;
+
+    #[test]
+    fn public_runtime_font_registration_validates_bytes() {
+        assert!(register_font(b"not a font").is_err());
+        register_font(include_bytes!(
+            "../fonts/liberation/LiberationSans-Regular.ttf"
+        ))
+        .expect("register a valid runtime face");
+    }
 }

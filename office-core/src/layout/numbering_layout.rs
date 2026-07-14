@@ -2,11 +2,12 @@
 //! text construction from `lvlText`, and shaping the label into a positioned
 //! run placed in the paragraph's hanging indent.
 
+use super::GlyphRun;
 use super::assemble::WordDoc;
-use super::{GlyphRun, PlacedGlyph};
+use crate::Result;
 use crate::fonts::matching;
 use crate::fonts::metrics::FaceMetrics;
-use crate::oxml::numbering::{LevelDef, NumFmt, format_number};
+use crate::oxml::numbering::{LabelJustification, LevelDef, NumFmt, format_number};
 use crate::oxml::wml::{NumRef, ParaProps, Paragraph};
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
@@ -16,8 +17,8 @@ use std::collections::HashMap;
 /// A shaped, positioned list label.
 #[derive(Debug, Clone)]
 pub struct PlacedLabel {
-    /// The label glyph run.
-    pub run: GlyphRun,
+    /// Ordered label glyph runs, split where the selected fallback face changes.
+    pub runs: Vec<GlyphRun>,
     /// Line height contributed by the label.
     pub line_height_pt: f64,
     /// Ascent of the label.
@@ -26,6 +27,8 @@ pub struct PlacedLabel {
     pub left_pt: Option<f64>,
     /// The level's hanging indent, if any.
     pub hanging_pt: Option<f64>,
+    /// Label justification inside the hanging area.
+    pub justification: LabelJustification,
 }
 
 /// Stateful list counters. `advance` increments the referenced level and resets
@@ -74,7 +77,12 @@ impl ListCounters {
                     .get(&(num_ref.num_id, lvl_idx))
                     .copied()
                     .unwrap_or(lvl_def.start);
-                if let Ok(s) = format_number(&lvl_def.num_fmt, value) {
+                let format = if level.legal {
+                    &NumFmt::Decimal
+                } else {
+                    &lvl_def.num_fmt
+                };
+                if let Ok(s) = format_number(format, value) {
                     out.push_str(&s);
                 }
                 i += 2;
@@ -95,7 +103,7 @@ pub fn build_label(
     para: &Paragraph,
     label_text: &str,
     level: &LevelDef,
-) -> Option<PlacedLabel> {
+) -> Result<Option<PlacedLabel>> {
     // Effective run props: level rPr overlaid on the paragraph's run defaults.
     let eff = doc.styles.run_props(&para.props, &level.rpr);
     let size = eff.size_pt.unwrap_or(11.0);
@@ -120,40 +128,75 @@ pub fn build_label(
             warnings.push(w);
         }
     }
-    let face = resolved.face?;
-    let parsed = doc.fonts.face(face)?.parsed()?;
-    let metrics = FaceMetrics::new(parsed);
+    let Some(face) = resolved.face else {
+        return Ok(None);
+    };
+    let fallback_ids =
+        matching::coverage_fallbacks(&doc.fonts, face, weight, eff.italic == Some(true));
+    let (fallback_ids, fallback_faces): (Vec<_>, Vec<_>) = fallback_ids
+        .into_iter()
+        .filter_map(|id| doc.fonts.face(id).map(|font| (id, font)))
+        .unzip();
     let kern = eff.kern_min_pt.is_some_and(|min| size >= min);
-    let shaped = shape::shape(&mapped, &metrics, size, 0.0, kern);
+    let shaped = shape::require_glyphs(shape::shape_with_fallback(
+        &mapped,
+        &fallback_faces,
+        size,
+        0.0,
+        kern,
+    ))?;
     if shaped.glyphs.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let chars: Vec<char> = mapped.chars().collect();
-    let glyphs: Vec<PlacedGlyph> = shaped
-        .glyphs
+    let semantic = crate::text::semantic::map_shaped_run(&mapped, &shaped);
+    let mut semantics = Some(semantic.semantic);
+    let mut runs = Vec::new();
+    for (glyph, visible) in shaped.glyphs.iter().zip(semantic.visible) {
+        let Some(&glyph_face) = fallback_ids.get(glyph.face_index) else {
+            continue;
+        };
+        if runs
+            .last()
+            .is_none_or(|run: &GlyphRun| run.face != glyph_face)
+        {
+            runs.push(GlyphRun {
+                face: glyph_face,
+                size_pt: size,
+                color,
+                base_direction: None,
+                glyphs: Vec::new(),
+                underline: None,
+                strike: None,
+            });
+        }
+        let run = runs.last_mut().expect("numbering run was just inserted");
+        run.glyphs.push(visible);
+        if let Some(semantic) = semantics.take() {
+            run.glyphs.extend(semantic);
+        }
+    }
+    if runs.is_empty() {
+        return Ok(None);
+    }
+    let (line_height_pt, ascent_pt) = runs
         .iter()
-        .enumerate()
-        .map(|(i, g)| PlacedGlyph {
-            gid: g.id.0,
-            advance_pt: g.advance_pt,
-            ch: chars.get(i).copied().unwrap_or(' '),
+        .filter_map(|run| doc.fonts.face(run.face).and_then(|font| font.parsed()))
+        .map(|font| {
+            let metrics = FaceMetrics::new(font);
+            (metrics.line_height_pt(size), metrics.ascent_pt(size))
         })
-        .collect();
+        .fold((0.0_f64, 0.0_f64), |(height, ascent), current| {
+            (height.max(current.0), ascent.max(current.1))
+        });
 
-    Some(PlacedLabel {
-        run: GlyphRun {
-            face,
-            size_pt: size,
-            color,
-            glyphs,
-            underline: None,
-            strike: None,
-        },
-        line_height_pt: metrics.line_height_pt(size),
-        ascent_pt: metrics.ascent_pt(size),
+    Ok(Some(PlacedLabel {
+        runs,
+        line_height_pt,
+        ascent_pt,
         left_pt: level.indent.left_pt,
         hanging_pt: level.indent.hanging_pt,
-    })
+        justification: level.justification,
+    }))
 }
 
 /// A paragraph's list context passed to line layout.
@@ -172,9 +215,13 @@ pub fn resolve_label(
     warnings: &mut Vec<Warning>,
     eff_para: &ParaProps,
     para: &Paragraph,
-) -> Option<PlacedLabel> {
-    let num_ref = eff_para.numbering?;
-    let level = doc.numbering.resolve(num_ref.num_id, num_ref.ilvl)?;
+) -> Result<Option<PlacedLabel>> {
+    let Some(num_ref) = eff_para.numbering else {
+        return Ok(None);
+    };
+    let Some(level) = doc.numbering.resolve(num_ref.num_id, num_ref.ilvl) else {
+        return Ok(None);
+    };
     // Standalone: assume the first item (start value) — flow overrides with real
     // counter state via [`build_label`].
     let text = if let NumFmt::Bullet = level.num_fmt {

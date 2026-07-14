@@ -2,6 +2,7 @@
 
 const DOC_YANTRA_FONT_PRECOPY_GUARD_V1 = 32 * 1024 * 1024;
 const DOC_YANTRA_PDF_PRECOPY_GUARD_V1 = 100 * 1024 * 1024;
+const DOC_YANTRA_MERGE_PRECOPY_LIMIT_V1 = 200 * 1024 * 1024;
 
 function utf8ByteLengthExceedsLimit(value, limit) {
   if (value.length > limit) return true;
@@ -28,17 +29,50 @@ function utf8ByteLengthExceedsLimit(value, limit) {
   return false;
 }
 
+function dyResourceLimitError(message) {
+    return new Error(JSON.stringify({ dy: 1, code: "resource_limit", message }));
+}
+
 function guardRegisteredFontInput(bytes) {
     if (bytes.byteLength <= DOC_YANTRA_FONT_PRECOPY_GUARD_V1) return;
-    throw new Error(`font is ${bytes.byteLength} bytes, over the 32 MiB in-process limit`);
+    throw dyResourceLimitError(`font is ${bytes.byteLength} bytes, over the 32 MiB in-process limit`);
+}
+
+function guardByteInput(bytes, label) {
+    if (bytes.byteLength <= DOC_YANTRA_PDF_PRECOPY_GUARD_V1) return;
+    throw dyResourceLimitError(`${label} is ${bytes.byteLength} bytes, over the 100 MiB in-process limit`);
+}
+
+function guardStringInput(value, label) {
+    if (!utf8ByteLengthExceedsLimit(value, DOC_YANTRA_PDF_PRECOPY_GUARD_V1)) return;
+    throw dyResourceLimitError(`${label} is over the 100 MiB in-process limit`);
+}
+
+function guardWatermarkInput(pdf, watermark_json, watermark_image) {
+    guardByteInput(pdf, "PDF");
+    guardStringInput(watermark_json, "watermark JSON");
+    if (watermark_image != null) guardByteInput(watermark_image, "watermark image");
+}
+
+function guardMergeInput(pdfs, watermark_json, watermark_image) {
+    let total = 0;
+    for (const pdf of pdfs) {
+        guardByteInput(pdf, "PDF");
+        total += pdf.byteLength;
+        if (total > DOC_YANTRA_MERGE_PRECOPY_LIMIT_V1) {
+            throw dyResourceLimitError("merge input set is over the 200 MiB in-process limit");
+        }
+    }
+    if (watermark_json != null) guardStringInput(watermark_json, "watermark JSON");
+    if (watermark_image != null) guardByteInput(watermark_image, "watermark image");
 }
 
 function guardRedactPdfInput(pdf, areas_json) {
     if (pdf.byteLength > DOC_YANTRA_PDF_PRECOPY_GUARD_V1) {
-        throw new Error(`PDF is ${pdf.byteLength} bytes, over the 100 MiB in-process limit`);
+        throw dyResourceLimitError(`PDF is ${pdf.byteLength} bytes, over the 100 MiB in-process limit`);
     }
     if (utf8ByteLengthExceedsLimit(areas_json, DOC_YANTRA_PDF_PRECOPY_GUARD_V1)) {
-        throw new Error("redaction JSON is over the 100 MiB in-process limit");
+        throw dyResourceLimitError("redaction JSON is over the 100 MiB in-process limit");
     }
 }
 
@@ -50,6 +84,7 @@ function guardRedactPdfInput(pdf, areas_json) {
  * @returns {Uint8Array}
  */
 function apply_watermark(pdf, watermark_json, watermark_image) {
+    guardWatermarkInput(pdf, watermark_json, watermark_image);
     const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(watermark_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -73,6 +108,7 @@ exports.apply_watermark = apply_watermark;
  * @returns {Uint8Array}
  */
 function csv_to_pdf(csv) {
+    guardByteInput(csv, "CSV");
     const ptr0 = passArray8ToWasm0(csv, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.csv_to_pdf(ptr0, len0);
@@ -96,6 +132,7 @@ exports.init = init;
  * @returns {Uint8Array}
  */
 function markdown_to_pdf(markdown) {
+    guardStringInput(markdown, "Markdown");
     const ptr0 = passStringToWasm0(markdown, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.markdown_to_pdf(ptr0, len0);
@@ -119,6 +156,7 @@ exports.markdown_to_pdf = markdown_to_pdf;
  * @returns {Uint8Array}
  */
 function merge_pdfs(pdfs, watermark_json, watermark_image) {
+    guardMergeInput(pdfs, watermark_json, watermark_image);
     const ptr0 = passArrayJsValueToWasm0(pdfs, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     var ptr1 = isLikeNone(watermark_json) ? 0 : passStringToWasm0(watermark_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -141,6 +179,7 @@ exports.merge_pdfs = merge_pdfs;
  * @returns {number}
  */
 function page_count(pdf) {
+    guardByteInput(pdf, "PDF");
     const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.page_count(ptr0, len0);
@@ -177,6 +216,29 @@ function redact_pdf(pdf, areas_json) {
 exports.redact_pdf = redact_pdf;
 
 /**
+ * Permanently redacts service-compatible percentage areas and returns the
+ * complete core report, including conservative whole-object removal notices.
+ * This additive export preserves `redact_pdf` compatibility for callers that
+ * only consume rewritten PDF bytes.
+ * @param {Uint8Array} pdf
+ * @param {string} areas_json
+ * @returns {any}
+ */
+function redact_pdf_with_report(pdf, areas_json) {
+    guardRedactPdfInput(pdf, areas_json);
+    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(areas_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.redact_pdf_with_report(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+exports.redact_pdf_with_report = redact_pdf_with_report;
+
+/**
  * Adds an embeddable font to the process-global registry. The generated JS
  * glue applies the same limit before copying `bytes` into wasm linear memory;
  * this Rust check is defense in depth for direct wasm callers.
@@ -199,6 +261,7 @@ exports.register_font = register_font;
  * @returns {Uint8Array}
  */
 function text_to_pdf(text) {
+    guardStringInput(text, "text");
     const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.text_to_pdf(ptr0, len0);
@@ -217,6 +280,7 @@ exports.text_to_pdf = text_to_pdf;
  * @returns {string}
  */
 function validate_pdf(pdf) {
+    guardByteInput(pdf, "PDF");
     let deferred3_0;
     let deferred3_1;
     try {
@@ -287,15 +351,45 @@ function __wbg_get_imports() {
             const ret = new Error();
             return ret;
         },
+        __wbg_new_32b398fb48b6d94a: function() {
+            const ret = new Array();
+            return ret;
+        },
+        __wbg_new_da52cf8fe3429cb2: function() {
+            const ret = new Object();
+            return ret;
+        },
+        __wbg_new_from_slice_77cdfb7977362f3c: function(arg0, arg1) {
+            const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_prototypesetcall_4770620bbe4688a0: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
+        __wbg_push_d2ae3af0c1217ae6: function(arg0, arg1) {
+            const ret = arg0.push(arg1);
+            return ret;
+        },
+        __wbg_set_8535240470bf2500: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
         __wbg_stack_3b0d974bbf31e44f: function(arg0, arg1) {
             const ret = arg1.stack;
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbindgen_cast_0000000000000001: function(arg0) {
+            // Cast intrinsic for `F64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000002: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(String) -> Externref`.
+            const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
         },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;

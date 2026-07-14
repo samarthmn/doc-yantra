@@ -7,13 +7,17 @@ const MARKER = "DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1";
 const HELPERS = `
 const ${MARKER} = 50 * 1024 * 1024;
 
+function dyEnvelopeError(code, message) {
+    return new Error(JSON.stringify({ dy: 1, code, message }));
+}
+
 function officeFormatForInputGuard(extension) {
     switch (extension.toLowerCase()) {
         case "docx": return "docx";
         case "pptx": return "pptx";
         case "xlsx":
         case "xlsm": return "xlsx";
-        default: throw new Error(\`invalid: unsupported extension \${extension}\`);
+        default: throw dyEnvelopeError("invalid_input", \`invalid: unsupported extension \${extension}\`);
     }
 }
 
@@ -43,7 +47,7 @@ function guardOfficeProfileInput(bytes, extension) {
 function guardOfficeConversionInput(bytes, extension) {
     if (bytes.byteLength <= ${MARKER}) return;
     officeFormatForInputGuard(extension);
-    throw new Error(\`invalid: input (\${bytes.byteLength} bytes) exceeds the in-process limit\`);
+    throw dyEnvelopeError("resource_limit", \`invalid: input (\${bytes.byteLength} bytes) exceeds the in-process limit\`);
 }
 `;
 

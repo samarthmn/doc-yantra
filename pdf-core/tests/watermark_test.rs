@@ -4,10 +4,89 @@
 #![cfg(feature = "pdfium")]
 
 use lopdf::{Document, Object};
+use pdf_core::PdfCoreError;
 use pdf_core::testkit::sample_pdf;
 use pdf_core::watermark::{
     Pattern, StampPosition, WatermarkImage, WatermarkSpec, apply_watermark, stamp_page_numbers,
 };
+use std::time::{Duration, Instant};
+
+#[test]
+fn hostile_watermark_line_count_returns_typed_limit_without_panic() {
+    let input = sample_pdf(&["base"]);
+    let spec = WatermarkSpec {
+        lines: vec!["x".to_string(); 10_000],
+        ..WatermarkSpec::default()
+    };
+    let result = std::panic::catch_unwind(|| apply_watermark(&input, &spec));
+    let error = result.expect("must not panic").expect_err("line limit");
+    assert_eq!(error.stable_code(), "resource_limit");
+}
+
+#[test]
+fn hostile_png_dimensions_return_typed_limit_before_decode() {
+    let mut png = tiny_png_rgba();
+    png[16..20].copy_from_slice(&100_000_u32.to_be_bytes());
+    png[20..24].copy_from_slice(&100_000_u32.to_be_bytes());
+    let checksum = crc32(&png[12..29]);
+    png[29..33].copy_from_slice(&checksum.to_be_bytes());
+    let spec = WatermarkSpec {
+        image: Some(WatermarkImage {
+            bytes: png,
+            width_pt: 100.0,
+            height_pt: 100.0,
+        }),
+        lines: Vec::new(),
+        ..WatermarkSpec::default()
+    };
+    let result = std::panic::catch_unwind(|| apply_watermark(&sample_pdf(&["base"]), &spec));
+    let error = result.expect("must not panic").expect_err("pixel limit");
+    assert_eq!(error.stable_code(), "resource_limit");
+}
+
+#[test]
+fn extreme_media_box_grid_returns_resource_limit_before_anchor_allocation() {
+    let mut doc = Document::load_mem(&sample_pdf(&["base"])).expect("load");
+    let page_id = doc.get_pages()[&1];
+    doc.get_dictionary_mut(page_id).expect("page").set(
+        "MediaBox",
+        vec![0.into(), 0.into(), 1_000_000.into(), 1_000_000.into()],
+    );
+    let mut input = Vec::new();
+    doc.save_to(&mut input).expect("save");
+    let spec = WatermarkSpec {
+        pattern: Pattern::Grid,
+        x_spacing_pt: 72.0,
+        y_spacing_pt: 72.0,
+        ..WatermarkSpec::default()
+    };
+
+    let started = Instant::now();
+    let error = match apply_watermark(&input, &spec) {
+        Err(error) => error,
+        Ok(_) => panic!("oversized watermark grid unexpectedly succeeded"),
+    };
+    assert!(
+        matches!(error, PdfCoreError::ResourceLimit(ref message) if message == "watermark grid anchor resource limit exceeded"),
+        "stable typed resource-limit message: {error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must reject before allocating anchors: {:?}",
+        started.elapsed()
+    );
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+        }
+    }
+    crc ^ u32::MAX
+}
 
 /// Decompressed, concatenated content stream text of every page, in order.
 fn page_contents(bytes: &[u8]) -> Vec<String> {

@@ -5,7 +5,9 @@
 
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 
-use crate::embed_font::{FontChoice, FontSession, encode_winansi_literal};
+use crate::embed_font::{
+    EncodedGlyph, FontChoice, FontSession, encode_winansi_literal, pdfium_actual_text,
+};
 use crate::error::{PdfCoreError, Result};
 use crate::fonts::StandardFont;
 
@@ -89,6 +91,13 @@ const PRIMARY_LINE_HEIGHT_FACTOR: f64 = 1.2;
 const PRIMARY_TO_META_GAP_FACTOR: f64 = 0.35;
 const META_TO_META_GAP_FACTOR: f64 = 0.18;
 const META_FONT_SCALE: f64 = 0.65;
+/// More lines are visually meaningless and amplify per-page content linearly.
+const MAX_WATERMARK_LINES: usize = 100;
+/// Bound decoder allocation before pixels are materialized.
+const MAX_WATERMARK_IMAGE_PIXELS: u64 = 50_000_000;
+/// Prevent hostile page geometry from growing anchor and content buffers until
+/// wasm linear memory traps. Count is checked arithmetically before allocation.
+const MAX_GRID_ANCHORS_PER_PAGE: usize = 50_000;
 
 // Base resource names added to each page's /Resources. When a name is
 // already taken (e.g. re-watermarking) the first free suffixed variant is
@@ -110,6 +119,14 @@ const IMG_RES: &str = "DKwmImg";
 /// (spec parity).
 pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
     let mut doc = Document::load_mem(pdf)?;
+    crate::meta::guard_object_count(&doc)?;
+
+    if spec.lines.len() > MAX_WATERMARK_LINES {
+        return Err(PdfCoreError::ResourceLimit(format!(
+            "watermark line count {} exceeds limit {MAX_WATERMARK_LINES}",
+            spec.lines.len()
+        )));
+    }
 
     // Clamps mirror DocYantra's parseWatermark defaults/limits.
     let x_spacing = clamp_or(spec.x_spacing_pt, 72.0, 1440.0, 320.0);
@@ -170,6 +187,8 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
     struct LineMetric {
         shown: Vec<u8>,
         embedded_font: Option<usize>,
+        positioned: Option<Vec<EncodedGlyph>>,
+        actual_text: Option<String>,
         size: f64,
         width: f64,
         line_height: f64,
@@ -189,16 +208,29 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
         };
         let choice = font_session.resolve(line)?;
         let width = choice.text_width_pt(line, StandardFont::Helvetica, size)?;
-        let (shown, embedded_font) = match choice {
-            FontChoice::Standard => (escape_pdf_text(line), None),
-            FontChoice::Embedded(face) => {
-                let encoded = font_session.encode(&face, line)?;
-                (encoded.bytes, Some(encoded.resource_index))
+        let (shown, embedded_font, positioned, actual_text) = match choice {
+            FontChoice::Standard => (escape_pdf_text(line), None, None, None),
+            FontChoice::Embedded(choice) => {
+                let encoded = font_session.encode(&choice, line)?;
+                let embedded_font = encoded.glyphs.first().map(|glyph| glyph.resource_index);
+                let actual_text = encoded.directional_actual_text().or_else(|| {
+                    line.chars()
+                        .all(|ch| u32::from(ch) <= 0xFFFF)
+                        .then(|| pdfium_actual_text(line))
+                });
+                (
+                    encoded.bytes,
+                    embedded_font,
+                    Some(encoded.glyphs),
+                    actual_text,
+                )
             }
         };
         metrics.push(LineMetric {
             shown,
             embedded_font,
+            positioned,
+            actual_text,
             size,
             width,
             line_height: size * PRIMARY_LINE_HEIGHT_FACTOR,
@@ -245,6 +277,7 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
     });
 
     let page_ids: Vec<ObjectId> = doc.get_pages().values().copied().collect();
+    let expected_pages = page_ids.len();
     for page_id in page_ids {
         let (bx, by, w, h) = page_box(&doc, page_id)?;
 
@@ -277,15 +310,27 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
                 // through millions of off-page anchors).
                 let ox = offset_x.rem_euclid(x_spacing);
                 let oy = offset_y.rem_euclid(y_spacing);
-                let mut v = Vec::new();
-                let mut x = bx - w + ox;
-                while x <= bx + w * 2.0 {
-                    let mut y = by - h + oy;
-                    while y <= by + h * 2.0 {
+                let x_start = bx - w + ox;
+                let x_count = grid_axis_anchor_count(x_start, bx + w * 2.0, x_spacing)?;
+                let y_start = by - h + oy;
+                let y_count = grid_axis_anchor_count(y_start, by + h * 2.0, y_spacing)?;
+                let anchor_count = x_count.checked_mul(y_count).ok_or_else(|| {
+                    PdfCoreError::ResourceLimit(
+                        "watermark grid anchor resource limit exceeded".to_string(),
+                    )
+                })?;
+                if anchor_count > MAX_GRID_ANCHORS_PER_PAGE {
+                    return Err(PdfCoreError::ResourceLimit(
+                        "watermark grid anchor resource limit exceeded".to_string(),
+                    ));
+                }
+                let mut v = Vec::with_capacity(anchor_count);
+                for x_index in 0..x_count {
+                    let x = x_start + x_index as f64 * x_spacing;
+                    for y_index in 0..y_count {
+                        let y = y_start + y_index as f64 * y_spacing;
                         v.push((x, y));
-                        y += y_spacing;
                     }
-                    x += x_spacing;
                 }
                 v
             }
@@ -316,6 +361,47 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
                 for m in &metrics {
                     cursor_top -= m.gap_before;
                     cursor_top -= m.line_height;
+                    if let Some(glyphs) = &m.positioned {
+                        if let Some(actual_text) = &m.actual_text {
+                            push_ops(&mut ops, "/Span << /ActualText ");
+                            push_utf16be_hex_string(&mut ops, actual_text);
+                            push_ops(&mut ops, " >> BDC\n");
+                        }
+                        push_ops(&mut ops, "BT\n");
+                        let mut cursor = 0.0;
+                        for glyph in glyphs {
+                            let font_name = &embedded_font_names[glyph.resource_index];
+                            let scale = m.size / glyph.units_per_em;
+                            let (gx, gy) = l2g(
+                                -m.width / 2.0 + cursor + f64::from(glyph.x_offset) * scale,
+                                cursor_top + f64::from(glyph.y_offset) * scale,
+                            );
+                            push_ops(
+                                &mut ops,
+                                &format!(
+                                    "/{font_name} {} Tf\n{} {} {} rg\n{} {} {} {} {} {} Tm\n",
+                                    fnum(m.size),
+                                    fnum(color[0]),
+                                    fnum(color[1]),
+                                    fnum(color[2]),
+                                    fnum(cos),
+                                    fnum(sin),
+                                    fnum(-sin),
+                                    fnum(cos),
+                                    fnum(gx),
+                                    fnum(gy),
+                                ),
+                            );
+                            push_hex_string(&mut ops, &glyph.cid.to_be_bytes());
+                            push_ops(&mut ops, " Tj\n");
+                            cursor += f64::from(glyph.x_advance) * scale;
+                        }
+                        push_ops(&mut ops, "ET\n");
+                        if m.actual_text.is_some() {
+                            push_ops(&mut ops, "EMC\n");
+                        }
+                        continue;
+                    }
                     let (ox, oy) = l2g(-m.width / 2.0, cursor_top);
                     push_ops(
                         &mut ops,
@@ -336,13 +422,9 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
                             fnum(oy),
                         ),
                     );
-                    if m.embedded_font.is_some() {
-                        push_hex_string(&mut ops, &m.shown);
-                    } else {
-                        ops.push(b'(');
-                        ops.extend_from_slice(&m.shown);
-                        ops.push(b')');
-                    }
+                    ops.push(b'(');
+                    ops.extend_from_slice(&m.shown);
+                    ops.push(b')');
                     push_ops(&mut ops, " Tj\nET\n");
                 }
             }
@@ -365,6 +447,7 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
 
     let mut out = Vec::new();
     doc.save_to(&mut out)?;
+    crate::assembly::validate_output_pdf(&out, expected_pages, "watermark")?;
     Ok(out)
 }
 
@@ -397,6 +480,7 @@ pub fn stamp_page_numbers(
     start_at: u32,
 ) -> Result<Vec<u8>> {
     let mut doc = Document::load_mem(pdf)?;
+    crate::meta::guard_object_count(&doc)?;
     let size = clamp_or(font_size_pt, 4.0, 144.0, 10.0);
     const MARGIN: f64 = 36.0;
 
@@ -473,6 +557,24 @@ fn clamp_or(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
     value
 }
 
+fn grid_axis_anchor_count(start: f64, end: f64, spacing: f64) -> Result<usize> {
+    if !start.is_finite() || !end.is_finite() || !spacing.is_finite() || spacing <= 0.0 {
+        return Err(PdfCoreError::ResourceLimit(
+            "watermark grid anchor resource limit exceeded".to_string(),
+        ));
+    }
+    if start > end {
+        return Ok(0);
+    }
+    let count = ((end - start) / spacing).floor() + 1.0;
+    if !count.is_finite() || count > usize::MAX as f64 {
+        return Err(PdfCoreError::ResourceLimit(
+            "watermark grid anchor resource limit exceeded".to_string(),
+        ));
+    }
+    Ok(count as usize)
+}
+
 /// Formats a number for a content stream: up to 5 decimals, trailing zeros
 /// trimmed ("64", "9.1", "0.86603").
 fn fnum(v: f64) -> String {
@@ -500,6 +602,16 @@ fn push_hex_string(buf: &mut Vec<u8>, bytes: &[u8]) {
         buf.push(HEX[usize::from(byte & 0x0F)]);
     }
     buf.push(b'>');
+}
+
+/// Writes a PDF Unicode text string as UTF-16BE with a byte-order mark.
+fn push_utf16be_hex_string(buf: &mut Vec<u8>, text: &str) {
+    let mut bytes = Vec::with_capacity(2 + text.len() * 2);
+    bytes.extend_from_slice(&[0xFE, 0xFF]);
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_be_bytes());
+    }
+    push_hex_string(buf, &bytes);
 }
 
 /// Encodes `text` as a PDF literal-string body: WinAnsi bytes with
@@ -683,6 +795,18 @@ fn build_image_xobject(doc: &mut Document, img: &WatermarkImage) -> Result<Objec
     // width_pt/height_pt are not validated here: the caller clamps them to
     // DocYantra's 24..=1440 range (parity), and the XObject itself only
     // carries pixel dimensions.
+    let reader = image::ImageReader::new(std::io::Cursor::new(&img.bytes)).with_guessed_format()?;
+    let (width, height) = reader.into_dimensions()?;
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| {
+            PdfCoreError::ResourceLimit("watermark image pixel count exceeds limit".to_string())
+        })?;
+    if pixels > MAX_WATERMARK_IMAGE_PIXELS {
+        return Err(PdfCoreError::ResourceLimit(format!(
+            "watermark image has {pixels} decoded pixels, over limit {MAX_WATERMARK_IMAGE_PIXELS}"
+        )));
+    }
     let format = image::guess_format(&img.bytes)?;
     if format == image::ImageFormat::Jpeg {
         // Decode to verify the JPEG is intact and learn its color model.

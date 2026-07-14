@@ -40,6 +40,7 @@ pulldown-cmark = "0.13.4"
 subsetter = "0.2"
 thiserror = "2.0.18"
 ttf-parser = "0.25"
+text-core = { path = "../text-core" }
 
 [dev-dependencies]
 serial_test = "3.5.0"

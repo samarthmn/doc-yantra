@@ -36,6 +36,7 @@ fn para_text(p: &office_core::oxml::wml::Paragraph) -> String {
                     s.push_str(&run_text(r));
                 }
             }
+            InlineContent::Math(math) => s.push_str(&math.source_text()),
         }
     }
     s

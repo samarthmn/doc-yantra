@@ -6,6 +6,7 @@
 //! between the HTTP service and this module without reshaping data.
 
 use base64::Engine;
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
@@ -15,18 +16,44 @@ use pdf_core::{PdfCoreError, redact_types::RedactArea};
 const DEFAULT_COLOR: [u8; 3] = [0x4B, 0x55, 0x63];
 const DEFAULT_ROTATION_DEG: f64 = -40.0;
 
-fn err(e: impl std::fmt::Display) -> JsError {
-    JsError::new(&e.to_string())
+/// Every recoverable failure crosses the wasm boundary as a machine-readable
+/// JSON envelope in the `JsError` message: `{"dy":1,"code":…,"message":…}`.
+/// `code` is the discriminant consumers branch on (never message prose);
+/// `message` keeps the exact legacy text so message-matching callers stay
+/// stable; `detail` carries the crate-internal sub-code when one exists.
+fn envelope(code: &str, message: &str, detail: Option<&str>) -> JsError {
+    let mut payload = serde_json::json!({ "dy": 1, "code": code, "message": message });
+    if let Some(detail) = detail {
+        payload["detail"] = serde_json::Value::from(detail);
+    }
+    JsError::new(&payload.to_string())
+}
+
+fn core_err(error: PdfCoreError) -> JsError {
+    envelope(
+        error.stable_code(),
+        &error.to_string(),
+        error.machine_detail(),
+    )
+}
+
+fn invalid(message: &str) -> JsError {
+    envelope("invalid_input", message, None)
+}
+
+fn internal_err(e: impl std::fmt::Display) -> JsError {
+    envelope("internal_error", &e.to_string(), None)
 }
 
 fn redact_err(error: PdfCoreError) -> JsError {
-    match error {
-        PdfCoreError::Unsupported(message) => JsError::new(&format!("unsupported:{message}")),
-        PdfCoreError::TextUnsupported { code, message } => {
-            JsError::new(&format!("unsupported:{code}: {message}"))
-        }
-        other => err(other),
-    }
+    let code = error.stable_code();
+    let detail = error.machine_detail();
+    // Preserve the historical redaction message shapes exactly.
+    let message = match &error {
+        PdfCoreError::Unsupported(message) => format!("unsupported:{message}"),
+        _ => error.to_string(),
+    };
+    envelope(code, &message, detail)
 }
 
 /// Hard ceilings on inputs handed to the wasm engine (Y-6). wasm32 linear
@@ -40,15 +67,32 @@ fn redact_err(error: PdfCoreError) -> JsError {
 const MAX_INPUT_BYTES: usize = 100 * 1024 * 1024; // 100 MiB per document
 const MAX_MERGE_TOTAL_BYTES: usize = 200 * 1024 * 1024; // 200 MiB per merge set
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024; // 32 MiB per registered face
+const MAX_REDACTION_AREAS: usize = 800;
 
 fn guard_input_size(len: usize, limit: usize, what: &str) -> Result<(), JsError> {
     if len > limit {
-        return Err(JsError::new(&format!(
-            "{what} is {len} bytes, over the {} MiB in-process limit",
-            limit / (1024 * 1024)
-        )));
+        return Err(envelope(
+            "resource_limit",
+            &format!(
+                "{what} is {len} bytes, over the {} MiB in-process limit",
+                limit / (1024 * 1024)
+            ),
+            None,
+        ));
     }
     Ok(())
+}
+
+/// Refuses a serialized result that exceeds the engine output budget before
+/// the bytes cross the wasm boundary (the worker layer re-checks the same cap
+/// before transferring to the main thread).
+fn guard_output(bytes: Vec<u8>) -> Result<Vec<u8>, JsError> {
+    pdf_core::output_limit::ensure_output_within_limit(
+        bytes.len(),
+        pdf_core::output_limit::MAX_OUTPUT_BYTES,
+    )
+    .map_err(core_err)?;
+    Ok(bytes)
 }
 
 #[wasm_bindgen(start)]
@@ -142,7 +186,9 @@ fn parse_data_url(data_url: &str) -> Option<Vec<u8>> {
     if payload.is_empty() {
         return None;
     }
-    base64::engine::general_purpose::STANDARD.decode(payload).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()
 }
 
 /// Builds a [WatermarkSpec] from the DocYantra payload JSON plus optional
@@ -169,11 +215,13 @@ fn spec_from_payload(
     } else {
         Pattern::Single
     };
-    let rotation_deg = payload.rotation_deg.unwrap_or(if pattern_raw == "diagonal_grid" {
-        DEFAULT_ROTATION_DEG
-    } else {
-        0.0
-    });
+    let rotation_deg = payload
+        .rotation_deg
+        .unwrap_or(if pattern_raw == "diagonal_grid" {
+            DEFAULT_ROTATION_DEG
+        } else {
+            0.0
+        });
 
     let kind = match payload.content_type.as_deref() {
         Some("image") => "image",
@@ -229,7 +277,11 @@ fn spec_from_payload(
 
     Ok(WatermarkSpec {
         pattern,
-        rotation_deg: if rotation_deg.is_finite() { rotation_deg } else { 0.0 },
+        rotation_deg: if rotation_deg.is_finite() {
+            rotation_deg
+        } else {
+            0.0
+        },
         x_spacing_pt: payload.x_spacing_pt.unwrap_or(320.0),
         y_spacing_pt: payload.y_spacing_pt.unwrap_or(320.0),
         offset_x_pt: payload.offset_x_pt.unwrap_or(0.0),
@@ -252,12 +304,16 @@ fn spec_from_payload(
 #[wasm_bindgen]
 pub fn register_font(bytes: &[u8]) -> Result<(), JsError> {
     if bytes.len() > MAX_FONT_BYTES {
-        return Err(JsError::new(&format!(
-            "font is {} bytes, over the 32 MiB in-process limit",
-            bytes.len()
-        )));
+        return Err(envelope(
+            "resource_limit",
+            &format!(
+                "font is {} bytes, over the 32 MiB in-process limit",
+                bytes.len()
+            ),
+            None,
+        ));
     }
-    pdf_core::embed_font::register_font(bytes).map_err(err)
+    pdf_core::embed_font::register_font(bytes).map_err(core_err)
 }
 
 /// Merges one or more PDFs and optionally applies a watermark — the local
@@ -271,7 +327,7 @@ pub fn merge_pdfs(
     watermark_image: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
     if pdfs.is_empty() {
-        return Err(JsError::new("At least one PDF is required"));
+        return Err(invalid("At least one PDF is required"));
     }
     // Size-check BEFORE copying into linear memory (Y-6).
     let total: usize = pdfs.iter().map(|p| p.length() as usize).sum();
@@ -288,10 +344,15 @@ pub fn merge_pdfs(
     }
     let buffers: Vec<Vec<u8>> = pdfs.iter().map(|p| p.to_vec()).collect();
     for (index, bytes) in buffers.iter().enumerate() {
-        let pages = pdf_core::meta::page_count(bytes)
-            .map_err(|e| JsError::new(&format!("PDF {} is not valid: {e}", index + 1)))?;
+        let pages = pdf_core::meta::page_count(bytes).map_err(|e| {
+            envelope(
+                e.stable_code(),
+                &format!("PDF {} is not valid: {e}", index + 1),
+                e.machine_detail(),
+            )
+        })?;
         if pages == 0 {
-            return Err(JsError::new(&format!("PDF {} is empty", index + 1)));
+            return Err(invalid(&format!("PDF {} is empty", index + 1)));
         }
     }
 
@@ -301,15 +362,17 @@ pub fn merge_pdfs(
         buffers.into_iter().next().unwrap_or_default()
     } else {
         let refs: Vec<&[u8]> = buffers.iter().map(Vec::as_slice).collect();
-        pdf_core::assembly::merge(&refs).map_err(err)?
+        pdf_core::assembly::merge(&refs).map_err(core_err)?
     };
 
     match watermark_json {
         Some(json) if !json.trim().is_empty() => {
-            let spec = spec_from_payload(&json, watermark_image).map_err(|e| JsError::new(&e))?;
-            pdf_core::watermark::apply_watermark(&merged, &spec).map_err(err)
+            let spec = spec_from_payload(&json, watermark_image).map_err(|e| invalid(&e))?;
+            pdf_core::watermark::apply_watermark(&merged, &spec)
+                .map_err(core_err)
+                .and_then(guard_output)
         }
-        _ => Ok(merged),
+        _ => guard_output(merged),
     }
 }
 
@@ -324,8 +387,10 @@ pub fn apply_watermark(
     if let Some(bytes) = watermark_image.as_ref() {
         guard_input_size(bytes.len(), MAX_INPUT_BYTES, "watermark image")?;
     }
-    let spec = spec_from_payload(watermark_json, watermark_image).map_err(|e| JsError::new(&e))?;
-    pdf_core::watermark::apply_watermark(pdf, &spec).map_err(err)
+    let spec = spec_from_payload(watermark_json, watermark_image).map_err(|e| invalid(&e))?;
+    pdf_core::watermark::apply_watermark(pdf, &spec)
+        .map_err(core_err)
+        .and_then(guard_output)
 }
 
 /// Permanently redacts service-compatible percentage areas from a PDF.
@@ -334,40 +399,102 @@ pub fn apply_watermark(
 /// `{pageIndex,left,top,width,height}` objects measured on displayed pages.
 #[wasm_bindgen]
 pub fn redact_pdf(pdf: &[u8], areas_json: &str) -> Result<Vec<u8>, JsError> {
+    let areas = parse_redact_areas(pdf, areas_json)?;
+    let output = pdf_core::redact_pure::redact_pure(pdf, &areas).map_err(redact_err)?;
+    guard_output(output.pdf)
+}
+
+/// Permanently redacts service-compatible percentage areas and returns the
+/// complete core report, including conservative whole-object removal notices.
+/// This additive export preserves `redact_pdf` compatibility for callers that
+/// only consume rewritten PDF bytes.
+#[wasm_bindgen]
+pub fn redact_pdf_with_report(pdf: &[u8], areas_json: &str) -> Result<JsValue, JsError> {
+    let areas = parse_redact_areas(pdf, areas_json)?;
+    let output = pdf_core::redact_pure::redact_pure(pdf, &areas).map_err(redact_err)?;
+    let pdf_bytes = guard_output(output.pdf)?;
+
+    let report = Object::new();
+    Reflect::set(
+        &report,
+        &JsValue::from_str("pdf"),
+        &Uint8Array::from(pdf_bytes.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("could not construct redaction report"))?;
+    Reflect::set(
+        &report,
+        &JsValue::from_str("pageCount"),
+        &JsValue::from_f64(f64::from(output.page_count)),
+    )
+    .map_err(|_| JsError::new("could not construct redaction report"))?;
+    let warnings = Array::new();
+    for warning in output.warnings {
+        let item = Object::new();
+        Reflect::set(
+            &item,
+            &JsValue::from_str("code"),
+            &JsValue::from_str(warning.code.as_str()),
+        )
+        .map_err(|_| JsError::new("could not construct redaction warning code"))?;
+        Reflect::set(
+            &item,
+            &JsValue::from_str("page"),
+            &JsValue::from_f64(f64::from(warning.page)),
+        )
+        .map_err(|_| JsError::new("could not construct redaction warning page"))?;
+        Reflect::set(
+            &item,
+            &JsValue::from_str("kind"),
+            &JsValue::from_str(warning.kind.as_str()),
+        )
+        .map_err(|_| JsError::new("could not construct redaction warning kind"))?;
+        Reflect::set(
+            &item,
+            &JsValue::from_str("message"),
+            &JsValue::from_str(&warning.message),
+        )
+        .map_err(|_| JsError::new("could not construct redaction warning message"))?;
+        warnings.push(&item);
+    }
+    Reflect::set(&report, &JsValue::from_str("warnings"), &warnings.into())
+        .map_err(|_| JsError::new("could not construct redaction report"))?;
+    Ok(report.into())
+}
+
+fn parse_redact_areas(pdf: &[u8], areas_json: &str) -> Result<Vec<RedactArea>, JsError> {
     guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
     guard_input_size(areas_json.len(), MAX_INPUT_BYTES, "redaction JSON")?;
     let payload: Vec<RedactAreaPayload> = serde_json::from_str(areas_json)
-        .map_err(|_| JsError::new("Invalid redaction payload (must be a JSON array)"))?;
+        .map_err(|_| invalid("Invalid redaction payload (must be a JSON array)"))?;
     if payload.is_empty() {
-        return Err(JsError::new("redactions must be a non-empty array"));
+        return Err(invalid("redactions must be a non-empty array"));
     }
-    if payload.len() > 800 {
-        return Err(JsError::new("redactions exceed maximum allowed (800)"));
-    }
+    guard_redact_area_count(payload.len()).map_err(core_err)?;
     for (index, area) in payload.iter().enumerate() {
         if area.left < 0.0 || area.top < 0.0 || area.width <= 0.0 || area.height <= 0.0 {
-            return Err(JsError::new(&format!(
+            return Err(invalid(&format!(
                 "redactions[{index}] must have positive size and non-negative position"
             )));
         }
-        if area.left > 100.0
-            || area.top > 100.0
-            || area.width > 100.0
-            || area.height > 100.0
-        {
-            return Err(JsError::new(&format!(
+        if area.left > 100.0 || area.top > 100.0 || area.width > 100.0 || area.height > 100.0 {
+            return Err(invalid(&format!(
                 "redactions[{index}] values must be within 0..100"
             )));
         }
         if area.left + area.width > 100.0 || area.top + area.height > 100.0 {
-            return Err(JsError::new(&format!(
-                "redactions[{index}] exceeds page bounds"
-            )));
+            return Err(invalid(&format!("redactions[{index}] exceeds page bounds")));
         }
     }
-    let areas: Vec<RedactArea> = payload.into_iter().map(Into::into).collect();
-    let output = pdf_core::redact_pure::redact_pure(pdf, &areas).map_err(redact_err)?;
-    Ok(output.pdf)
+    Ok(payload.into_iter().map(Into::into).collect())
+}
+
+fn guard_redact_area_count(count: usize) -> pdf_core::Result<()> {
+    if count > MAX_REDACTION_AREAS {
+        return Err(PdfCoreError::ResourceLimit(format!(
+            "redaction area count {count} exceeds limit {MAX_REDACTION_AREAS}"
+        )));
+    }
+    Ok(())
 }
 
 /// CSV bytes → paginated PDF table (replaces the csv→HTML→Chromium route,
@@ -379,7 +506,9 @@ pub fn csv_to_pdf(csv: &[u8]) -> Result<Vec<u8>, JsError> {
         page_size: pdf_core::generate::PageSize::LetterLandscape,
         ..pdf_core::generate::DocOptions::default()
     };
-    pdf_core::generate::csv_to_pdf(csv, &opts).map_err(err)
+    pdf_core::generate::csv_to_pdf(csv, &opts)
+        .map_err(core_err)
+        .and_then(guard_output)
 }
 
 /// Markdown → PDF (replaces the md→HTML→Chromium route).
@@ -387,32 +516,35 @@ pub fn csv_to_pdf(csv: &[u8]) -> Result<Vec<u8>, JsError> {
 pub fn markdown_to_pdf(markdown: &str) -> Result<Vec<u8>, JsError> {
     guard_input_size(markdown.len(), MAX_INPUT_BYTES, "Markdown")?;
     pdf_core::generate::markdown_to_pdf(markdown, &pdf_core::generate::DocOptions::default())
-        .map_err(err)
+        .map_err(core_err)
+        .and_then(guard_output)
 }
 
 /// Plain text → PDF.
 #[wasm_bindgen]
 pub fn text_to_pdf(text: &str) -> Result<Vec<u8>, JsError> {
     guard_input_size(text.len(), MAX_INPUT_BYTES, "text")?;
-    pdf_core::generate::text_to_pdf(text, &pdf_core::generate::DocOptions::default()).map_err(err)
+    pdf_core::generate::text_to_pdf(text, &pdf_core::generate::DocOptions::default())
+        .map_err(core_err)
+        .and_then(guard_output)
 }
 
 /// Page count of a PDF (errors on invalid/encrypted documents).
 #[wasm_bindgen]
 pub fn page_count(pdf: &[u8]) -> Result<u32, JsError> {
     guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
-    pdf_core::meta::page_count(pdf).map_err(err)
+    pdf_core::meta::page_count(pdf).map_err(core_err)
 }
 
 /// Structural validation; returns `{"pageCount":n,"version":"1.7","encrypted":false}`.
 #[wasm_bindgen]
 pub fn validate_pdf(pdf: &[u8]) -> Result<String, JsError> {
     guard_input_size(pdf.len(), MAX_INPUT_BYTES, "PDF")?;
-    let info = pdf_core::meta::validate(pdf).map_err(err)?;
+    let info = pdf_core::meta::validate(pdf).map_err(core_err)?;
     Ok(format!(
         "{{\"pageCount\":{},\"version\":{},\"encrypted\":{}}}",
         info.page_count,
-        serde_json::to_string(&info.version).map_err(err)?,
+        serde_json::to_string(&info.version).map_err(internal_err)?,
         info.encrypted
     ))
 }
@@ -456,9 +588,15 @@ mod tests {
 
     #[test]
     fn hybrid_empty_lines_falls_back_to_confidential() {
-        let spec =
-            spec_from_payload(r#"{"contentType":"hybrid"}"#, Some(vec![1, 2, 3])).unwrap();
+        let spec = spec_from_payload(r#"{"contentType":"hybrid"}"#, Some(vec![1, 2, 3])).unwrap();
         assert_eq!(spec.lines, vec!["CONFIDENTIAL".to_string()]);
         assert!(spec.image.is_some());
+    }
+
+    #[test]
+    fn redaction_area_capacity_uses_resource_limit_code() {
+        let error =
+            guard_redact_area_count(MAX_REDACTION_AREAS + 1).expect_err("redaction area capacity");
+        assert_eq!(error.stable_code(), "resource_limit");
     }
 }

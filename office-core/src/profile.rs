@@ -7,18 +7,21 @@
 //! (invalid/encrypted/legacy), which the wasm boundary maps to JSON via
 //! [`DocProfile::from_error`].
 
+use crate::drawing::diagram::DiagramStore;
 use crate::fonts::{FontDb, matching};
 use crate::opc::Package;
 use crate::oxml::numbering::{NumFmt, Numbering};
 use crate::oxml::settings::Settings;
 use crate::oxml::styles::StyleResolver;
+use crate::oxml::table_style;
 use crate::oxml::theme::Theme;
 use crate::oxml::wml::{
     self, BlockContent, DocFlags, InlineContent, ParaProps, Paragraph, RunContent, RunProps,
+    SectPr, SectType,
 };
 use crate::text::script::{ScriptScan, scan_scripts};
 use crate::{OfficeError, OfficeFormat, Result, UnsupportedCode};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// A stable, non-fatal warning about a documented-lossy conversion.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -170,144 +173,547 @@ fn format_str(format: OfficeFormat) -> &'static str {
 
 /// Implements `profile()` (see [`crate::profile`]).
 pub fn run(bytes: &[u8], format: OfficeFormat) -> Result<DocProfile> {
+    run_with_options(bytes, format, &crate::ConvertOptions::default())
+}
+
+pub(crate) fn run_with_options(
+    bytes: &[u8],
+    format: OfficeFormat,
+    opts: &crate::ConvertOptions,
+) -> Result<DocProfile> {
     match format {
-        OfficeFormat::Docx => profile_docx(bytes),
-        OfficeFormat::Pptx => profile_pptx(bytes),
-        OfficeFormat::Xlsx => profile_xlsx(bytes),
+        OfficeFormat::Docx => profile_docx(bytes, opts),
+        OfficeFormat::Pptx => profile_pptx(bytes, opts),
+        OfficeFormat::Xlsx => profile_xlsx(bytes, opts),
     }
 }
 
-fn profile_xlsx(bytes: &[u8]) -> Result<DocProfile> {
+fn profile_xlsx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile> {
     use crate::oxml::sml::CellValue;
     use crate::xlsx::XlsxDoc;
 
-    let doc = XlsxDoc::open(bytes, &crate::ConvertOptions::default())?;
+    let doc = XlsxDoc::open(bytes, opts)?;
     let mut profile = DocProfile::new("xlsx");
     let mut scripts = ScriptScan::default();
-    let fonts_used = vec!["Calibri".to_string()]; // the normal font
+    let mut coverage = Vec::new();
+    let mut fonts_used: Vec<String> = Vec::new();
 
     for sheet in &doc.sheets {
-        if sheet.sheet.has_drawing {
-            profile.add_reason_deduped(UnsupportedCode::AnchoredDrawing, "xl/drawings on sheet");
+        for reason in &sheet.sheet.visible_unsupported {
+            profile.add_reason_deduped(reason.code, reason.detail.clone());
+        }
+        for format in &sheet.sheet.conditional_formats {
+            for rule in &format.rules {
+                if matches!(
+                    rule.kind,
+                    crate::oxml::sml::ConditionalKind::Unsupported(_)
+                        | crate::oxml::sml::ConditionalKind::IconSet
+                ) {
+                    profile.add_reason_deduped(
+                        UnsupportedCode::ConditionalFormatting,
+                        format!("sheet {}: unsupported conditional-format rule", sheet.name),
+                    );
+                }
+                if let Some(dxf) = rule.dxf_id.and_then(|id| doc.styles.dxf(id)) {
+                    for detail in &dxf.unsupported {
+                        profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+                    }
+                    for edge in [
+                        dxf.borders.top.as_ref(),
+                        dxf.borders.right.as_ref(),
+                        dxf.borders.bottom.as_ref(),
+                        dxf.borders.left.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if let Some(detail) = &edge.unsupported {
+                            profile.add_reason_deduped(
+                                UnsupportedCode::UnknownElement,
+                                detail.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for reason in &sheet.drawing_reasons {
+            profile.add_reason_deduped(reason.code, reason.detail.clone());
         }
         for cell in &sheet.sheet.cells {
+            let style = doc.styles.cell(cell.style_idx);
+            for detail in &style.unsupported {
+                profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+            }
+            for edge in [
+                style.borders.top.as_ref(),
+                style.borders.right.as_ref(),
+                style.borders.bottom.as_ref(),
+                style.borders.left.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(detail) = &edge.unsupported {
+                    profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+                }
+            }
             match &cell.value {
                 CellValue::UncachedFormula => {
-                    profile.add_reason_deduped(UnsupportedCode::UnknownElement, "uncached formula")
+                    profile.add_reason_deduped(
+                        UnsupportedCode::FormulaCacheMissing,
+                        format!(
+                            "sheet {}: cell {}{} has no usable formula cache",
+                            sheet.name,
+                            xlsx_column_name(cell.col),
+                            cell.row + 1
+                        ),
+                    );
                 }
-                CellValue::Text(t) => scripts.merge(scan_scripts(t)),
+                CellValue::Text(t) => {
+                    scripts.merge(scan_scripts(t));
+                    let family = style.font_name.as_deref().unwrap_or("Calibri");
+                    if !fonts_used
+                        .iter()
+                        .any(|used| used.eq_ignore_ascii_case(family))
+                    {
+                        fonts_used.push(family.to_string());
+                    }
+                    record_coverage(
+                        &mut coverage,
+                        family,
+                        if style.bold { 700 } else { 400 },
+                        style.italic,
+                        t,
+                    );
+                }
                 _ => {}
             }
         }
+        for source in [
+            sheet.sheet.header_footer.odd_header.as_deref(),
+            sheet.sheet.header_footer.odd_footer.as_deref(),
+            sheet.sheet.header_footer.even_header.as_deref(),
+            sheet.sheet.header_footer.even_footer.as_deref(),
+            sheet.sheet.header_footer.first_header.as_deref(),
+            sheet.sheet.header_footer.first_footer.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for span in crate::xlsx::render::header_footer_coverage_spans(source, &sheet.name) {
+                scripts.merge(scan_scripts(&span.text));
+                record_coverage(
+                    &mut coverage,
+                    "Calibri",
+                    if span.bold { 700 } else { 400 },
+                    span.italic,
+                    &span.text,
+                );
+            }
+            if !fonts_used
+                .iter()
+                .any(|used| used.eq_ignore_ascii_case("Calibri"))
+            {
+                fonts_used.push("Calibri".to_string());
+            }
+        }
     }
-    if scripts.complex_script {
-        profile.add_reason_deduped(UnsupportedCode::ComplexScript, "complex script text");
+    if profile.supported
+        && doc.sheets.iter().any(|sheet| !sheet.drawings.is_empty())
+        && let Err(error) = crate::xlsx::render_xlsx(&doc)
+    {
+        match error {
+            OfficeError::Unsupported { code, detail } => profile.add_reason_deduped(code, detail),
+            OfficeError::Font(detail) => {
+                profile.add_reason_deduped(UnsupportedCode::MissingGlyph, detail)
+            }
+            other => return Err(other),
+        }
     }
-    if scripts.rtl {
-        profile.add_reason_deduped(UnsupportedCode::RtlText, "right-to-left text");
-    }
-
-    let db = FontDb::with_bundled();
-    resolve_fonts(&mut profile, &fonts_used, &db, &scripts);
+    resolve_fonts(&mut profile, &fonts_used, &doc.fonts, &scripts);
+    add_fallback_face_missing_reason(&mut profile, &doc.fonts, &coverage);
     profile.stats.sheets = doc.sheets.len() as u32;
+    profile.stats.images = doc.images.len() as u32;
+    if fonts_used.is_empty() {
+        fonts_used.push("Calibri".to_string());
+    }
     profile.stats.fonts_used = fonts_used;
     Ok(profile)
 }
 
-fn profile_pptx(bytes: &[u8]) -> Result<DocProfile> {
+fn xlsx_column_name(mut col: u32) -> String {
+    let mut chars = Vec::new();
+    loop {
+        chars.push((b'A' + (col % 26) as u8) as char);
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    chars.into_iter().rev().collect()
+}
+
+fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile> {
     use crate::oxml::pml::{ShapeElem, TextBody, TextRun};
     use crate::pptx::PptxDoc;
+    use crate::pptx::assemble::Category;
+    use crate::pptx::geometry::{evaluate_shape, supports_preset};
+    use crate::pptx::inherit::resolve_text_body;
 
-    let doc = PptxDoc::open(bytes, &crate::ConvertOptions::default())?;
+    let doc = PptxDoc::open(bytes, opts)?;
     let mut profile = DocProfile::new("pptx");
-    let mut scripts = ScriptScan::default();
-    let mut fonts_used: Vec<String> = Vec::new();
+    struct TextInventory {
+        scripts: ScriptScan,
+        fonts: Vec<String>,
+        coverage: Vec<CoverageRequest>,
+    }
+    let mut inventory = TextInventory {
+        scripts: ScriptScan::default(),
+        fonts: Vec::new(),
+        coverage: Vec::new(),
+    };
     let mut shape_count = 0u32;
 
-    fn add_font(fonts: &mut Vec<String>, theme_minor: &Option<String>, run: &TextRun) {
-        let f = run
-            .typeface
-            .clone()
-            .filter(|f| !f.starts_with('+'))
-            .or_else(|| theme_minor.clone())
-            .unwrap_or_else(|| "Calibri".to_string());
+    fn run_family(
+        major: &Option<String>,
+        minor: &Option<String>,
+        category: Category,
+        run: &TextRun,
+    ) -> String {
+        match run.typeface.as_deref() {
+            Some("+mj-lt") => major.clone(),
+            Some("+mn-lt") => minor.clone(),
+            Some(family) if !family.starts_with('+') => Some(family.to_string()),
+            _ if category == Category::Title => major.clone(),
+            _ => minor.clone(),
+        }
+        .unwrap_or_else(|| "Calibri".to_string())
+    }
+
+    fn add_font(
+        fonts: &mut Vec<String>,
+        major: &Option<String>,
+        minor: &Option<String>,
+        category: Category,
+        run: &TextRun,
+    ) {
+        let f = run_family(major, minor, category, run);
         if !fonts.contains(&f) {
             fonts.push(f);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_body(
         body: &TextBody,
-        scripts: &mut ScriptScan,
-        fonts: &mut Vec<String>,
+        profile: &mut DocProfile,
+        inventory: &mut TextInventory,
+        major: &Option<String>,
         minor: &Option<String>,
+        category: Category,
+        doc: &PptxDoc,
+        rels: &std::collections::HashMap<String, String>,
     ) {
+        for detail in &body.unsupported {
+            profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+        }
         for para in &body.paragraphs {
+            for detail in &para.unsupported {
+                let code = if detail.contains("fld") {
+                    UnsupportedCode::FieldUnsupported
+                } else {
+                    UnsupportedCode::UnknownElement
+                };
+                profile.add_reason_deduped(code, detail.clone());
+            }
+            if let Some((format, _)) = &para.bullet_auto_num
+                && format != "arabicPeriod"
+            {
+                profile.add_reason_deduped(
+                    UnsupportedCode::UnknownElement,
+                    format!("buAutoNum:{format}"),
+                );
+            }
+            if !para.bullet_none
+                && let Some(bullet) = &para.bullet_char
+            {
+                let mut mapped = String::new();
+                for ch in bullet.chars() {
+                    let ch = matching::map_symbol_char("Wingdings", ch as u32).unwrap_or(ch);
+                    mapped.push(ch);
+                }
+                let run = para.runs.first();
+                let fallback_run = TextRun::default();
+                let family = run_family(major, minor, category, run.unwrap_or(&fallback_run));
+                record_coverage(
+                    &mut inventory.coverage,
+                    &family,
+                    if run.is_some_and(|run| run.bold == Some(true)) {
+                        700
+                    } else {
+                        400
+                    },
+                    run.is_some_and(|run| run.italic == Some(true)),
+                    &mapped,
+                );
+            }
             for run in &para.runs {
-                scripts.merge(scan_scripts(&run.text));
-                add_font(fonts, minor, run);
+                for detail in &run.unsupported {
+                    profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+                }
+                inventory.scripts.merge(scan_scripts(&run.text));
+                add_font(&mut inventory.fonts, major, minor, category, run);
+                let family = run_family(major, minor, category, run);
+                record_coverage(
+                    &mut inventory.coverage,
+                    &family,
+                    if run.bold == Some(true) { 700 } else { 400 },
+                    run.italic == Some(true),
+                    &run.text,
+                );
+                if let Some(rel_id) = &run.hlink
+                    && doc.link_target(rels, rel_id).is_none()
+                {
+                    profile.add_reason_deduped(
+                        UnsupportedCode::Hyperlink,
+                        format!("unsupported hyperlink relationship {rel_id}"),
+                    );
+                }
             }
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "recursive PPTX profile walk carries shared inventory and relationship scope"
+    )]
     fn walk(
         elems: &[ShapeElem],
         profile: &mut DocProfile,
-        scripts: &mut ScriptScan,
-        fonts: &mut Vec<String>,
+        inventory: &mut TextInventory,
+        major: &Option<String>,
         minor: &Option<String>,
+        theme: &Theme,
+        inheritance: Option<(&crate::oxml::pml::Slide, &crate::oxml::pml::Slide)>,
         shape_count: &mut u32,
+        doc: &PptxDoc,
+        rels: &std::collections::HashMap<String, String>,
+        skip_placeholders: bool,
     ) {
         for elem in elems {
             match elem {
                 // A group is not itself a drawn shape; recurse without counting it
                 // so stats.shapes reflects leaf shapes only.
-                ShapeElem::Group { children, .. } => {
-                    walk(children, profile, scripts, fonts, minor, shape_count)
-                }
-                ShapeElem::Shape { props, text, .. } => {
+                ShapeElem::Group { children, .. } => walk(
+                    children,
+                    profile,
+                    inventory,
+                    major,
+                    minor,
+                    theme,
+                    inheritance,
+                    shape_count,
+                    doc,
+                    rels,
+                    skip_placeholders,
+                ),
+                ShapeElem::Shape { ph, props, text } => {
+                    if skip_placeholders && ph.is_some() {
+                        continue;
+                    }
                     *shape_count += 1;
-                    // v1 renders shape fills against the bounding box (the guide-
-                    // formula evaluator is deferred), so only a plain `rect` draws
-                    // correctly. Fail closed on any other geometry rather than
-                    // silently drawing an arrow/star/callout as a rectangle.
-                    if props.custom_geom {
-                        profile.add_reason_deduped(UnsupportedCode::ShapeGeometry, "custGeom");
-                    } else if let Some(preset) = &props.preset
-                        && preset != "rect"
+                    for detail in &props.unsupported {
+                        profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+                    }
+                    if let Some(preset) = &props.preset
+                        && !supports_preset(&preset.name)
                     {
                         profile.add_reason_deduped(
                             UnsupportedCode::ShapeGeometry,
-                            format!("preset:{preset}"),
+                            format!("preset:{}", preset.name),
                         );
                     }
+                    let xfrm = props.xfrm.unwrap_or(crate::oxml::pml::Xfrm {
+                        w_pt: 100.0,
+                        h_pt: 100.0,
+                        present: true,
+                        ..Default::default()
+                    });
+                    if let Err(error) = evaluate_shape(props, xfrm) {
+                        profile
+                            .add_reason_deduped(UnsupportedCode::ShapeGeometry, error.to_string());
+                    }
+                    if let Some(warp) = &props.text_warp
+                        && warp != "textNoShape"
+                        && warp != "none"
+                    {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::WordArt,
+                            format!("a:prstTxWarp:{warp}"),
+                        );
+                    }
+                    if let Some(fill) = &props.fill {
+                        profile_pptx_fill(fill, theme, profile, doc, rels);
+                    }
                     if let Some(body) = text {
-                        walk_body(body, scripts, fonts, minor);
+                        let resolved_body = inheritance.map_or_else(
+                            || body.clone(),
+                            |(layout, master)| resolve_text_body(ph.as_ref(), body, layout, master),
+                        );
+                        let category = ph
+                            .as_ref()
+                            .map(crate::pptx::inherit::category)
+                            .unwrap_or(Category::Other);
+                        walk_body(
+                            &resolved_body,
+                            profile,
+                            inventory,
+                            major,
+                            minor,
+                            category,
+                            doc,
+                            rels,
+                        );
                     }
                 }
-                ShapeElem::Picture { drawing, .. } => {
+                ShapeElem::Picture { props, drawing } => {
                     *shape_count += 1;
-                    if drawing.cropped {
-                        profile.add_reason_deduped(UnsupportedCode::ImageCrop, "a:srcRect");
+                    if let Some(error) = &drawing.unsupported {
+                        profile.add_reason_deduped(error.code, error.detail.clone());
+                    } else if let Some(rel_id) = &drawing.blip_rel_id {
+                        if let Some((code, detail)) = doc.image_error(rels, rel_id, drawing.crop) {
+                            profile.add_reason_deduped(code, detail);
+                        }
+                    } else {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::MissingRelationshipTarget,
+                            "p:pic missing a:blip",
+                        );
+                    }
+                    if let Some(preset) = &props.preset
+                        && preset.name != "rect"
+                    {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::ShapeGeometry,
+                            format!("picture frame preset:{}", preset.name),
+                        );
                     }
                 }
                 ShapeElem::Table { table, .. } => {
                     *shape_count += 1;
-                    for row in &table.rows {
+                    if let Some(fill) = &table.fill {
+                        profile_pptx_fill(fill, theme, profile, doc, rels);
+                    }
+                    for (row_index, row) in table.rows.iter().enumerate() {
+                        let mut col_index = 0usize;
                         for cell in &row.cells {
+                            match doc.table_cell_style(table, row_index, col_index) {
+                                Ok(Some(style)) => {
+                                    if let Some(fill) = &style.fill {
+                                        profile_pptx_fill(fill, theme, profile, doc, rels);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(OfficeError::Unsupported { code, detail }) => {
+                                    profile.add_reason_deduped(code, detail)
+                                }
+                                Err(error) => profile.add_reason_deduped(
+                                    UnsupportedCode::TableStyle,
+                                    error.to_string(),
+                                ),
+                            }
+                            for detail in &cell.unsupported {
+                                profile.add_reason_deduped(
+                                    UnsupportedCode::UnknownElement,
+                                    detail.clone(),
+                                );
+                            }
+                            if let Some(fill) = &cell.fill {
+                                profile_pptx_fill(fill, theme, profile, doc, rels);
+                            }
                             if let Some(b) = &cell.text {
-                                walk_body(b, scripts, fonts, minor);
+                                walk_body(
+                                    b,
+                                    profile,
+                                    inventory,
+                                    major,
+                                    minor,
+                                    Category::Other,
+                                    doc,
+                                    rels,
+                                );
+                            }
+                            col_index += cell.grid_span.max(1) as usize;
+                        }
+                    }
+                }
+                ShapeElem::Chart { xfrm, rel_id } => {
+                    *shape_count += 1;
+                    if let Some((code, detail)) = doc.chart_error(rels, rel_id) {
+                        profile.add_reason_deduped(code, detail);
+                    } else if let Some(chart) = doc.chart(rels, rel_id) {
+                        let frame = xfrm.unwrap_or(crate::oxml::pml::Xfrm {
+                            w_pt: 360.0,
+                            h_pt: 216.0,
+                            present: true,
+                            ..Default::default()
+                        });
+                        if let Err(error) = chart.render(&doc.fonts, theme, frame.w_pt, frame.h_pt)
+                        {
+                            match error {
+                                OfficeError::Unsupported { code, detail } => {
+                                    profile.add_reason_deduped(code, detail)
+                                }
+                                OfficeError::Font(detail) => profile
+                                    .add_reason_deduped(UnsupportedCode::MissingGlyph, detail),
+                                other => profile.add_reason_deduped(
+                                    UnsupportedCode::Chart,
+                                    format!("chart render validation: {other}"),
+                                ),
                             }
                         }
+                        if !inventory.fonts.iter().any(|font| font == "Calibri") {
+                            inventory.fonts.push("Calibri".to_string());
+                        }
+                    }
+                }
+                ShapeElem::SmartArt { data_rel_id, .. } => {
+                    if let Some((code, detail)) = doc.diagram_error(rels, data_rel_id) {
+                        *shape_count += 1;
+                        profile.add_reason_deduped(code, detail);
+                    } else if let Some(diagram) = doc.diagram(rels, data_rel_id) {
+                        walk(
+                            &diagram.shapes,
+                            profile,
+                            inventory,
+                            major,
+                            minor,
+                            theme,
+                            None,
+                            shape_count,
+                            doc,
+                            &diagram.rels,
+                            false,
+                        );
+                    }
+                }
+                ShapeElem::OlePreview { preview_rel_id, .. } => {
+                    *shape_count += 1;
+                    if let Some((code, detail)) = doc.ole_preview_error(rels, preview_rel_id) {
+                        profile.add_reason_deduped(code, detail);
                     }
                 }
                 ShapeElem::Unsupported(detail) => {
                     *shape_count += 1;
-                    let code = match detail.as_str() {
-                        "chart" => UnsupportedCode::Chart,
-                        "smartart" => UnsupportedCode::SmartArt,
-                        "ole" => UnsupportedCode::OleObject,
-                        _ => UnsupportedCode::UnknownElement,
+                    let code = if detail == "chart" {
+                        UnsupportedCode::Chart
+                    } else if detail.starts_with("smartart") {
+                        UnsupportedCode::SmartArt
+                    } else if detail.starts_with("ole") {
+                        UnsupportedCode::OleObject
+                    } else {
+                        UnsupportedCode::UnknownElement
                     };
                     profile.add_reason_deduped(code, detail.clone());
                 }
@@ -315,90 +721,263 @@ fn profile_pptx(bytes: &[u8]) -> Result<DocProfile> {
         }
     }
 
-    let minor = doc.theme.minor_latin.clone();
     for rs in &doc.slides {
+        let major = rs.theme.major_latin.clone();
+        let minor = rs.theme.minor_latin.clone();
+        if let Some(fill) = rs.slide.background.as_ref() {
+            profile_pptx_fill(fill, &rs.theme, &mut profile, &doc, &rs.rels);
+        } else if let Some(fill) = rs.layout.background.as_ref() {
+            profile_pptx_fill(fill, &rs.theme, &mut profile, &doc, &rs.layout_rels);
+        } else if let Some(fill) = rs.master.background.as_ref() {
+            profile_pptx_fill(fill, &rs.theme, &mut profile, &doc, &rs.master_rels);
+        }
+        if rs.slide.show_master_shapes != Some(false) {
+            walk(
+                &rs.master.shapes,
+                &mut profile,
+                &mut inventory,
+                &major,
+                &minor,
+                &rs.theme,
+                None,
+                &mut shape_count,
+                &doc,
+                &rs.master_rels,
+                true,
+            );
+        }
+        walk(
+            &rs.layout.shapes,
+            &mut profile,
+            &mut inventory,
+            &major,
+            &minor,
+            &rs.theme,
+            None,
+            &mut shape_count,
+            &doc,
+            &rs.layout_rels,
+            true,
+        );
         walk(
             &rs.slide.shapes,
             &mut profile,
-            &mut scripts,
-            &mut fonts_used,
+            &mut inventory,
+            &major,
             &minor,
+            &rs.theme,
+            Some((&rs.layout, &rs.master)),
             &mut shape_count,
+            &doc,
+            &rs.rels,
+            false,
         );
     }
 
-    if scripts.complex_script {
-        profile.add_reason_deduped(UnsupportedCode::ComplexScript, "complex script text");
-    }
-    if scripts.rtl {
-        profile.add_reason_deduped(UnsupportedCode::RtlText, "right-to-left text");
-    }
-
-    let db = FontDb::with_bundled();
-    resolve_fonts(&mut profile, &fonts_used, &db, &scripts);
+    resolve_fonts(
+        &mut profile,
+        &inventory.fonts,
+        &doc.fonts,
+        &inventory.scripts,
+    );
+    add_fallback_face_missing_reason(&mut profile, &doc.fonts, &inventory.coverage);
     profile.stats.slides = doc.slides.len() as u32;
     profile.stats.shapes = shape_count;
     profile.stats.images = doc.images.len() as u32;
-    profile.stats.fonts_used = fonts_used;
+    profile.stats.fonts_used = inventory.fonts;
     Ok(profile)
 }
 
-fn profile_docx(bytes: &[u8]) -> Result<DocProfile> {
+fn profile_pptx_fill(
+    fill: &crate::oxml::pml::Fill,
+    theme: &Theme,
+    profile: &mut DocProfile,
+    doc: &crate::pptx::PptxDoc,
+    rels: &HashMap<String, String>,
+) {
+    if let crate::oxml::pml::Fill::Unsupported(error) = fill {
+        profile.add_reason_deduped(error.code, error.detail.clone());
+    } else if let Some(slot) = fill.unresolved_scheme(theme) {
+        profile.add_reason_deduped(
+            UnsupportedCode::InvalidFill,
+            format!("fill references unresolved theme color {slot}"),
+        );
+    }
+    if let crate::oxml::pml::Fill::Picture(picture) = fill
+        && let Some((code, detail)) = doc.image_error(rels, &picture.rel_id, picture.crop)
+    {
+        profile.add_reason_deduped(code, detail);
+    }
+}
+
+fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile> {
     // Container-level failures propagate as Err (allowed by the contract).
     let pkg = Package::open(bytes)?;
     let main = pkg.main_part()?;
-    let document = parse_part(&pkg, &main, wml::parse_document)?;
+    let mut document = parse_part(&pkg, &main, wml::parse_document)?;
 
     let styles = optional_part(&pkg, "word/styles.xml", StyleResolver::parse)?.unwrap_or_default();
+    // The convert path resolves table styles before layout; profile must see the
+    // same resolved tree, or a style-supplied property would be reported as
+    // unsupported by one and not the other.
+    table_style::apply_table_styles(&styles, &mut document.body);
     let numbering =
         optional_part(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
     let settings = optional_part(&pkg, "word/settings.xml", Settings::parse)?.unwrap_or_default();
     let theme = find_theme(&pkg)?;
+    let diagrams = DiagramStore::load(&pkg)?;
+
+    let mut db = FontDb::with_system(&opts.font_dirs);
+    for bytes in &opts.font_bytes {
+        db.register(bytes.clone())?;
+    }
 
     let mut profile = DocProfile::new("docx");
-    let mut collector = Collector::new(&styles, &numbering, &theme);
+    let mut collector = Collector::new(&styles, &numbering, &theme, &diagrams, &db);
 
     // Body content.
-    let main_rels = rel_map(&pkg, &main);
-    collector.walk_blocks(&document.body, &pkg, &main_rels, &mut profile);
+    let main_rels: HashMap<_, _> = pkg
+        .relationships(&main)?
+        .into_iter()
+        .map(|relationship| (relationship.id, relationship.target))
+        .collect();
+    collector.walk_blocks(
+        &document.body,
+        &pkg,
+        &main_rels,
+        &mut profile,
+        StoryContext::Body,
+    );
 
     // Headers/footers. A parse failure here is not swallowed: an unsupported or
     // malformed header must surface (as it would during layout), not silently
     // pass the profile gate.
-    for part in header_footer_parts(&pkg, &document) {
-        let Some(bytes) = pkg.part(&part) else {
-            continue; // a dangling reference is skipped by layout too
+    let mut profiled_parts = Vec::new();
+    for reference in header_footer_refs(&document) {
+        let Some(part) = main_rels.get(&reference.rel_id) else {
+            profile.add_reason_deduped(
+                UnsupportedCode::MissingRelationshipTarget,
+                format!("header/footer relationship {} is missing", reference.rel_id),
+            );
+            continue;
+        };
+        if profiled_parts.contains(part) {
+            continue;
+        }
+        let Some(bytes) = pkg.part(part) else {
+            profile.add_reason_deduped(
+                UnsupportedCode::MissingRelationshipTarget,
+                format!("header/footer part {part} is missing"),
+            );
+            continue;
         };
         let text = std::str::from_utf8(bytes)
             .map_err(|e| OfficeError::Invalid(format!("header/footer {part}: {e}")))?;
-        let blocks = wml::parse_hdr_ftr(text)?;
-        let hf_rels = rel_map(&pkg, &part);
-        collector.walk_blocks(&blocks, &pkg, &hf_rels, &mut profile);
+        let (mut blocks, flags) = wml::parse_hdr_ftr_with_flags(text)
+            .map_err(|error| error.context(format_args!("header/footer {part}")))?;
+        table_style::apply_table_styles(&styles, &mut blocks);
+        add_flag_reasons(&mut profile, &flags);
+        let hf_rels = rel_map(&pkg, part);
+        collector.walk_blocks(
+            &blocks,
+            &pkg,
+            &hf_rels,
+            &mut profile,
+            StoryContext::HeaderFooter,
+        );
+        profiled_parts.push(part.clone());
+    }
+
+    let mut available_footnotes = Vec::new();
+    let mut available_endnotes = Vec::new();
+    for (part, kind) in [
+        ("word/footnotes.xml", wml::NoteKind::Footnote),
+        ("word/endnotes.xml", wml::NoteKind::Endnote),
+    ] {
+        if pkg.part(part).is_some() {
+            let mut notes = parse_part(&pkg, part, |xml| wml::parse_notes(xml, kind))?;
+            table_style::apply_notes_table_styles(&styles, &mut notes);
+            match kind {
+                wml::NoteKind::Footnote => available_footnotes.extend(notes.notes.keys().copied()),
+                wml::NoteKind::Endnote => available_endnotes.extend(notes.notes.keys().copied()),
+            }
+            add_flag_reasons(&mut profile, &notes.flags);
+            let note_rels = rel_map(&pkg, part);
+            for blocks in notes.notes.values() {
+                collector.walk_blocks(blocks, &pkg, &note_rels, &mut profile, StoryContext::Note);
+            }
+        }
+    }
+    for &(kind, id) in &collector.note_refs {
+        let (available, code, label) = match kind {
+            wml::NoteKind::Footnote => {
+                (&available_footnotes, UnsupportedCode::Footnotes, "footnote")
+            }
+            wml::NoteKind::Endnote => (&available_endnotes, UnsupportedCode::Endnotes, "endnote"),
+        };
+        if !available.contains(&id) {
+            profile.add_reason_deduped(code, format!("missing {label} {id}"));
+        }
     }
 
     // Reasons from parse-time document flags + settings.
     add_flag_reasons(&mut profile, &document.flags);
+    add_section_reasons(&mut profile, &document);
     if settings.auto_hyphenation {
         profile.add_reason_deduped(UnsupportedCode::AutoHyphenation, "w:autoHyphenation");
     }
-
-    // Script reasons.
-    if collector.scripts.complex_script {
-        profile.add_reason_deduped(UnsupportedCode::ComplexScript, "complex script text");
-    }
-    if collector.scripts.rtl {
-        profile.add_reason_deduped(UnsupportedCode::RtlText, "right-to-left text");
+    for detail in &settings.visible_unsupported {
+        if detail.starts_with("m:mathPr") && !collector.has_math {
+            continue;
+        }
+        profile.add_reason_deduped(
+            if detail.starts_with("m:mathPr") {
+                UnsupportedCode::Equation
+            } else {
+                UnsupportedCode::UnknownElement
+            },
+            detail.clone(),
+        );
     }
 
     // Font resolution: warnings + missing fonts (deterministic, bundled DB only).
     // Sets `profile.stats.fonts_missing` directly.
-    let db = FontDb::with_bundled();
     resolve_fonts(&mut profile, &collector.fonts_used, &db, &collector.scripts);
+    add_fallback_face_missing_reason(&mut profile, &db, &collector.coverage);
 
     profile.stats.paragraphs = collector.paragraphs;
     profile.stats.tables = collector.tables;
     profile.stats.images = collector.images;
     profile.stats.fonts_used = collector.fonts_used.clone();
+
+    // Cross-paragraph wrap exclusions depend on shaped line heights. For a
+    // body containing multiple floats, run the same layout preflight used by
+    // conversion so profile() cannot approve an overlap that layout rejects.
+    // Single-anchor documents retain the cheap structural profile path.
+    let body_anchor_count: usize = document
+        .body
+        .iter()
+        .filter_map(|block| match block {
+            BlockContent::Paragraph(paragraph) => Some(paragraph_anchor_count(paragraph)),
+            BlockContent::Table(_) => None,
+        })
+        .sum();
+    if profile.supported && body_anchor_count > 1 {
+        let layout_doc = crate::layout::WordDoc::open(bytes, opts)?;
+        if let Err(error) = crate::layout::layout_docx(&layout_doc) {
+            match error {
+                OfficeError::Unsupported { code, detail } => {
+                    profile.add_reason_deduped(code, detail)
+                }
+                OfficeError::Font(detail) => {
+                    profile.add_reason_deduped(UnsupportedCode::MissingGlyph, detail)
+                }
+                OfficeError::Invalid(detail) | OfficeError::Internal(detail) => {
+                    profile.add_reason_deduped(UnsupportedCode::InvalidFile, detail)
+                }
+            }
+        }
+    }
 
     Ok(profile)
 }
@@ -416,7 +995,6 @@ fn add_flag_reasons(profile: &mut DocProfile, flags: &DocFlags) {
             UnsupportedCode::Endnotes,
             "w:endnoteReference",
         ),
-        (flags.equation, UnsupportedCode::Equation, "m:oMath"),
         (flags.text_box, UnsupportedCode::TextBox, "w:framePr"),
         (
             flags.anchored_drawing,
@@ -428,30 +1006,68 @@ fn add_flag_reasons(profile: &mut DocProfile, flags: &DocFlags) {
             UnsupportedCode::FloatingTable,
             "w:tblpPr",
         ),
-        (
-            flags.multi_column,
-            UnsupportedCode::MultiColumn,
-            "multi-column section",
-        ),
         (flags.image_crop, UnsupportedCode::ImageCrop, "a:srcRect"),
         (
             flags.vml_pict,
             UnsupportedCode::UnknownElement,
             "w:pict (VML)",
         ),
-        (flags.chart, UnsupportedCode::Chart, "c:chart"),
-        (
-            flags.smart_art,
-            UnsupportedCode::SmartArt,
-            "a:graphicData diagram",
-        ),
         (flags.ole_object, UnsupportedCode::OleObject, "w:object"),
+        (
+            flags.wordart_warp,
+            UnsupportedCode::WordArt,
+            "unsupported:wordart-warp",
+        ),
     ];
     for &(present, code, detail) in mapping {
         if present {
             profile.add_reason_deduped(code, detail);
         }
     }
+    for detail in &flags.visible_unsupported {
+        profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+    }
+}
+
+fn add_section_reasons(profile: &mut DocProfile, document: &wml::Document) {
+    let mut sections: Vec<&SectPr> = document
+        .body
+        .iter()
+        .filter_map(|block| match block {
+            BlockContent::Paragraph(paragraph) => paragraph.sect_break.as_ref(),
+            BlockContent::Table(_) => None,
+        })
+        .collect();
+    sections.push(&document.final_sect);
+    for section in &sections {
+        if let NumFmt::Other(value) = NumFmt::parse(&section.page_num_fmt) {
+            profile.add_reason_deduped(
+                UnsupportedCode::UnknownElement,
+                format!("pgNumType@fmt:{value}"),
+            );
+        }
+    }
+    for pair in sections.windows(2) {
+        let current = pair[0];
+        let next = pair[1];
+        if current.sect_type == SectType::Continuous && section_geometry_differs(current, next) {
+            profile.add_reason_deduped(
+                UnsupportedCode::UnknownElement,
+                "continuous section break changes page geometry",
+            );
+        }
+    }
+}
+
+fn section_geometry_differs(left: &SectPr, right: &SectPr) -> bool {
+    left.page_w_pt != right.page_w_pt
+        || left.page_h_pt != right.page_h_pt
+        || left.orientation != right.orientation
+        || left.margins.top != right.margins.top
+        || left.margins.right != right.margins.right
+        || left.margins.bottom != right.margins.bottom
+        || left.margins.left != right.margins.left
+        || left.margins.gutter != right.margins.gutter
 }
 
 /// Resolves each requested font family, accumulating warnings + missing fonts,
@@ -491,29 +1107,181 @@ fn db_covers_cjk(db: &FontDb) -> bool {
     })
 }
 
+fn collect_codepoints(codepoints: &mut BTreeSet<char>, text: &str) {
+    codepoints.extend(text.chars().filter(|ch| !ch.is_control()));
+}
+
+struct CoverageRequest {
+    family: String,
+    weight: u16,
+    italic: bool,
+    codepoints: BTreeSet<char>,
+    texts: Vec<String>,
+}
+
+fn record_coverage(
+    requests: &mut Vec<CoverageRequest>,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    text: &str,
+) {
+    let request = requests.iter_mut().find(|request| {
+        request.family.eq_ignore_ascii_case(family)
+            && request.weight == weight
+            && request.italic == italic
+    });
+    if let Some(request) = request {
+        collect_codepoints(&mut request.codepoints, text);
+        if !request.texts.iter().any(|candidate| candidate == text) {
+            request.texts.push(text.to_string());
+        }
+    } else {
+        let mut codepoints = BTreeSet::new();
+        collect_codepoints(&mut codepoints, text);
+        requests.push(CoverageRequest {
+            family: family.to_string(),
+            weight,
+            italic,
+            codepoints,
+            texts: vec![text.to_string()],
+        });
+    }
+}
+
+fn add_fallback_face_missing_reason(
+    profile: &mut DocProfile,
+    db: &FontDb,
+    requests: &[CoverageRequest],
+) {
+    let mut missing = BTreeSet::new();
+    for request in requests {
+        let Some(primary) =
+            matching::resolve(db, &request.family, request.weight, request.italic).face
+        else {
+            continue;
+        };
+        let ids = matching::coverage_fallbacks(db, primary, request.weight, request.italic);
+        let faces: Vec<_> = ids
+            .iter()
+            .filter_map(|id| db.face(*id))
+            .filter_map(|face| text_core::Face::new(&face.data, face.index).ok())
+            .collect();
+        for text in &request.texts {
+            match text_core::shape_text_with_features(
+                text,
+                &faces,
+                text_core::FeatureConfig::default().kern(false).liga(false),
+            ) {
+                Ok(_) => {}
+                Err(text_core::ShapeError::MissingGlyphs(chars)) => missing.extend(chars),
+                Err(_) => missing.extend(text.chars().filter(|ch| !ch.is_control())),
+            }
+        }
+    }
+    let detail = missing
+        .iter()
+        .take(4)
+        .map(|ch| format!("U+{:04X}", *ch as u32))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !detail.is_empty() {
+        profile.add_reason_deduped(
+            UnsupportedCode::MissingGlyph,
+            format!("no registered font covers {detail}"),
+        );
+    }
+}
+
+fn paragraph_anchor_count(paragraph: &Paragraph) -> usize {
+    fn run_count(run: &wml::Run) -> usize {
+        run.content
+            .iter()
+            .filter(|content| {
+                matches!(content, RunContent::Drawing(drawing) if drawing.anchor.is_some())
+                    || matches!(content, RunContent::VmlShape(_))
+            })
+            .count()
+    }
+
+    paragraph
+        .runs
+        .iter()
+        .map(|inline| match inline {
+            InlineContent::Run(run) => run_count(run),
+            InlineContent::Hyperlink { runs, .. } => runs.iter().map(run_count).sum(),
+            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                field.cached_runs.iter().map(run_count).sum()
+            }
+            InlineContent::Math(_) => 0,
+        })
+        .sum()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoryContext {
+    Body,
+    HeaderFooter,
+    TableCell,
+    TextBox,
+    Note,
+}
+
+impl StoryContext {
+    fn anchor_detail(self) -> Option<&'static str> {
+        match self {
+            StoryContext::Body => None,
+            StoryContext::HeaderFooter => Some("anchored drawing in a header or footer"),
+            StoryContext::TableCell => Some("anchored drawing in a table cell"),
+            StoryContext::TextBox => Some("anchored drawing in a text box"),
+            StoryContext::Note => Some("anchored drawing in a footnote or endnote"),
+        }
+    }
+}
+
 /// A walker accumulating stats, fonts, scripts, and content-derived reasons.
 struct Collector<'a> {
     styles: &'a StyleResolver,
     numbering: &'a Numbering,
     theme: &'a Theme,
+    diagrams: &'a DiagramStore,
+    font_db: &'a FontDb,
     fonts_used: Vec<String>,
     scripts: ScriptScan,
+    coverage: Vec<CoverageRequest>,
     paragraphs: u32,
     tables: u32,
     images: u32,
+    validated_images: BTreeSet<String>,
+    total_image_pixels: u64,
+    has_math: bool,
+    note_refs: Vec<(wml::NoteKind, i64)>,
 }
 
 impl<'a> Collector<'a> {
-    fn new(styles: &'a StyleResolver, numbering: &'a Numbering, theme: &'a Theme) -> Self {
+    fn new(
+        styles: &'a StyleResolver,
+        numbering: &'a Numbering,
+        theme: &'a Theme,
+        diagrams: &'a DiagramStore,
+        font_db: &'a FontDb,
+    ) -> Self {
         Collector {
             styles,
             numbering,
             theme,
+            diagrams,
+            font_db,
             fonts_used: Vec::new(),
             scripts: ScriptScan::default(),
+            coverage: Vec::new(),
             paragraphs: 0,
             tables: 0,
             images: 0,
+            validated_images: BTreeSet::new(),
+            total_image_pixels: 0,
+            has_math: false,
+            note_refs: Vec::new(),
         }
     }
 
@@ -523,15 +1291,40 @@ impl<'a> Collector<'a> {
         pkg: &Package,
         rels: &HashMap<String, String>,
         profile: &mut DocProfile,
+        context: StoryContext,
     ) {
         for block in blocks {
             match block {
-                BlockContent::Paragraph(p) => self.paragraph(p, pkg, rels, profile),
+                BlockContent::Paragraph(p) => self.paragraph(p, pkg, rels, profile, context),
                 BlockContent::Table(t) => {
                     self.tables += 1;
+                    for detail in &t.props.visible_unsupported {
+                        profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+                    }
                     for row in &t.rows {
+                        if row.props.hidden {
+                            continue;
+                        }
+                        for detail in &row.props.visible_unsupported {
+                            profile.add_reason_deduped(
+                                UnsupportedCode::UnknownElement,
+                                detail.clone(),
+                            );
+                        }
                         for cell in &row.cells {
-                            self.walk_blocks(&cell.content, pkg, rels, profile);
+                            for detail in &cell.props.visible_unsupported {
+                                profile.add_reason_deduped(
+                                    UnsupportedCode::UnknownElement,
+                                    detail.clone(),
+                                );
+                            }
+                            self.walk_blocks(
+                                &cell.content,
+                                pkg,
+                                rels,
+                                profile,
+                                StoryContext::TableCell,
+                            );
                         }
                     }
                 }
@@ -545,28 +1338,94 @@ impl<'a> Collector<'a> {
         pkg: &Package,
         rels: &HashMap<String, String>,
         profile: &mut DocProfile,
+        context: StoryContext,
     ) {
         self.paragraphs += 1;
         let eff_para = self.styles.para_props(&p.props);
+        for detail in &eff_para.visible_unsupported {
+            profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+        }
+        if let Some(detail) = eff_para.borders.unsupported_detail(self.theme) {
+            profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail);
+        }
+        if let Some(detail) = eff_para.frame.and_then(|frame| frame.unsupported) {
+            profile.add_reason_deduped(UnsupportedCode::TextBox, detail);
+        }
         if let Some(numref) = eff_para.numbering
             && let Some(level) = self.numbering.resolve(numref.num_id, numref.ilvl)
-            && let NumFmt::Other(v) = &level.num_fmt
         {
-            profile.add_reason_deduped(UnsupportedCode::UnknownElement, format!("numFmt:{v}"));
+            if let NumFmt::Other(v) = &level.num_fmt {
+                profile.add_reason_deduped(UnsupportedCode::UnknownElement, format!("numFmt:{v}"));
+            }
+            let chars: Vec<_> = level.lvl_text.chars().collect();
+            for window in chars.windows(2) {
+                if window[0] == '%'
+                    && let Some(index) = window[1].to_digit(10)
+                    && index > 0
+                    && let Some(referenced) = self.numbering.resolve(numref.num_id, index - 1)
+                    && let NumFmt::Other(value) = referenced.num_fmt
+                {
+                    profile.add_reason_deduped(
+                        UnsupportedCode::UnknownElement,
+                        format!("numFmt:{value}"),
+                    );
+                }
+            }
+            if level.num_fmt == NumFmt::Bullet {
+                let eff = self.styles.run_props(&p.props, &level.rpr);
+                let family = eff
+                    .fonts
+                    .ascii
+                    .or(eff.fonts.h_ansi)
+                    .or_else(|| self.theme.minor_latin.clone())
+                    .unwrap_or_else(|| "Calibri".to_string());
+                let mapped: String = level
+                    .lvl_text
+                    .chars()
+                    .map(|ch| matching::map_symbol_char(&family, ch as u32).unwrap_or(ch))
+                    .collect();
+                record_coverage(
+                    &mut self.coverage,
+                    &family,
+                    if eff.bold == Some(true) { 700 } else { 400 },
+                    eff.italic == Some(true),
+                    &mapped,
+                );
+            }
+        }
+        let anchor_count = paragraph_anchor_count(p);
+        if anchor_count > 1 {
+            profile.add_reason_deduped(
+                UnsupportedCode::AnchoredDrawing,
+                "multiple anchored drawings in one paragraph",
+            );
+        }
+        if anchor_count > 0 && eff_para.frame.is_some() {
+            profile.add_reason_deduped(
+                UnsupportedCode::AnchoredDrawing,
+                "anchored drawing in a framed paragraph",
+            );
         }
         for inline in &p.runs {
             match inline {
-                InlineContent::Run(r) => self.run(&p.props, r, pkg, rels, profile),
+                InlineContent::Run(r) => self.run(&p.props, r, pkg, rels, profile, context),
                 InlineContent::Hyperlink { runs, .. } => {
                     for r in runs {
-                        self.run(&p.props, r, pkg, rels, profile);
+                        self.run(&p.props, r, pkg, rels, profile, context);
                     }
                 }
                 InlineContent::SimpleField(f) | InlineContent::ComplexFieldRegion(f) => {
+                    if f.cached_runs.is_empty() && !f.instruction.trim().is_empty() {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::FieldUnsupported,
+                            format!("field without cached result: {}", f.instruction.trim()),
+                        );
+                    }
                     for r in &f.cached_runs {
-                        self.run(&p.props, r, pkg, rels, profile);
+                        self.run(&p.props, r, pkg, rels, profile, context);
                     }
                 }
+                InlineContent::Math(math) => self.math(math, profile),
             }
         }
     }
@@ -578,23 +1437,234 @@ impl<'a> Collector<'a> {
         pkg: &Package,
         rels: &HashMap<String, String>,
         profile: &mut DocProfile,
+        context: StoryContext,
     ) {
+        let effective = self.styles.run_props(para, &run.props);
         let family = self.run_font(para, &run.props);
+        for detail in &effective.visible_unsupported {
+            profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+        }
         if !self.fonts_used.contains(&family) {
-            self.fonts_used.push(family);
+            self.fonts_used.push(family.clone());
         }
         let mut text = String::new();
         for content in &run.content {
             match content {
                 RunContent::Text(t) => text.push_str(t),
                 RunContent::Drawing(d) => {
-                    self.images += 1;
-                    if let Some(rel_id) = &d.blip_rel_id {
+                    for detail in &d.anchor_violations {
+                        profile
+                            .add_reason_deduped(UnsupportedCode::AnchoredDrawing, detail.clone());
+                    }
+                    if d.anchor.is_some()
+                        && let Some(detail) = context.anchor_detail()
+                    {
+                        profile.add_reason_deduped(UnsupportedCode::AnchoredDrawing, detail);
+                    }
+                    if let Some(text_box) = &d.text_box {
+                        self.walk_blocks(
+                            &text_box.content,
+                            pkg,
+                            rels,
+                            profile,
+                            StoryContext::TextBox,
+                        );
+                    }
+                    if let Some(crop) = d.crop
+                        && let Err(OfficeError::Unsupported { code, detail }) =
+                            crate::drawing::image::validate_crop_fractions(crop)
+                    {
+                        profile.add_reason_deduped(code, detail);
+                    }
+                    if d.drawing.graphic_uri.as_deref() == Some(crate::oxml::dml::URI_PICTURE)
+                        && !d
+                            .drawing
+                            .extent_pt
+                            .is_some_and(|(width, height)| width > 0.0 && height > 0.0)
+                    {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::MissingRelationshipTarget,
+                            "picture drawing has no positive extent",
+                        );
+                    }
+                    if let Some(rel_id) = &d.drawing.blip_rel_id {
+                        self.images += 1;
                         self.check_image(rel_id, pkg, rels, profile);
+                    }
+                    if d.drawing.graphic_uri.as_deref() == Some(crate::oxml::dml::URI_CHART) {
+                        if d.drawing.extent_pt.is_none() {
+                            profile.add_reason_deduped(
+                                UnsupportedCode::Chart,
+                                "chart drawing has no extent",
+                            );
+                        }
+                        let result = d
+                            .drawing
+                            .graphic_rel_id
+                            .as_ref()
+                            .and_then(|rel_id| rels.get(rel_id))
+                            .and_then(|part| pkg.part(part))
+                            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                            .map(crate::drawing::chart::Chart::parse);
+                        match result {
+                            Some(Ok(chart)) => {
+                                if let Some((width, height)) = d.drawing.extent_pt
+                                    && let Err(error) =
+                                        chart.render(self.font_db, self.theme, width, height)
+                                {
+                                    match error {
+                                        OfficeError::Unsupported { code, detail } => {
+                                            profile.add_reason_deduped(code, detail)
+                                        }
+                                        OfficeError::Font(detail) => profile.add_reason_deduped(
+                                            UnsupportedCode::MissingGlyph,
+                                            detail,
+                                        ),
+                                        other => profile.add_reason_deduped(
+                                            UnsupportedCode::Chart,
+                                            format!("chart render validation: {other}"),
+                                        ),
+                                    }
+                                }
+                                let mut chart_text = chart.title.clone().unwrap_or_default();
+                                chart_text.push_str(
+                                    chart.category_axis_title.as_deref().unwrap_or_default(),
+                                );
+                                chart_text.push_str(
+                                    chart.value_axis_title.as_deref().unwrap_or_default(),
+                                );
+                                for series in &chart.series {
+                                    chart_text.push_str(&series.name);
+                                    for category in &series.categories {
+                                        chart_text.push_str(category);
+                                    }
+                                }
+                                record_coverage(
+                                    &mut self.coverage,
+                                    "Calibri",
+                                    400,
+                                    false,
+                                    &chart_text,
+                                );
+                            }
+                            Some(Err(OfficeError::Unsupported { code, detail })) => {
+                                profile.add_reason_deduped(code, detail);
+                            }
+                            _ => profile.add_reason_deduped(
+                                UnsupportedCode::Chart,
+                                "missing chart relationship or cache",
+                            ),
+                        }
+                    }
+                    if d.drawing.graphic_uri.as_deref() == Some(crate::oxml::dml::URI_DIAGRAM) {
+                        let Some((width, height)) = d.drawing.extent_pt else {
+                            profile.add_reason_deduped(
+                                UnsupportedCode::SmartArt,
+                                "SmartArt drawing has no extent",
+                            );
+                            continue;
+                        };
+                        let Some(rel_id) = &d.drawing.graphic_rel_id else {
+                            profile.add_reason_deduped(
+                                UnsupportedCode::SmartArt,
+                                "SmartArt drawing has no data relationship",
+                            );
+                            continue;
+                        };
+                        if let Some((code, detail)) = self.diagrams.error(rels, rel_id) {
+                            profile.add_reason_deduped(code, detail);
+                            continue;
+                        }
+                        let Some(diagram) = self.diagrams.drawing(rels, rel_id) else {
+                            profile.add_reason_deduped(
+                                UnsupportedCode::SmartArt,
+                                "SmartArt drawing fallback is unavailable",
+                            );
+                            continue;
+                        };
+                        if let Err(error) = diagram.render(self.font_db, self.theme, width, height)
+                        {
+                            match error {
+                                OfficeError::Unsupported { code, detail } => {
+                                    profile.add_reason_deduped(code, detail)
+                                }
+                                other => profile.add_reason_deduped(
+                                    UnsupportedCode::SmartArt,
+                                    format!("SmartArt drawing fallback: {other}"),
+                                ),
+                            }
+                        }
+                    }
+                }
+                RunContent::VmlShape(shape) => {
+                    if let Some(detail) = context.anchor_detail() {
+                        profile.add_reason_deduped(UnsupportedCode::AnchoredDrawing, detail);
+                    }
+                    if let Some(rel_id) = &shape.image_rel_id {
+                        self.images += 1;
+                        self.check_image(rel_id, pkg, rels, profile);
+                    }
+                    for block in &shape.text_box {
+                        self.walk_blocks(
+                            std::slice::from_ref(block),
+                            pkg,
+                            rels,
+                            profile,
+                            StoryContext::TextBox,
+                        );
+                    }
+                }
+                RunContent::OlePreview(shape) => {
+                    let Some(rel_id) = &shape.image_rel_id else {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::OleObject,
+                            "OLE object has no preview relationship",
+                        );
+                        continue;
+                    };
+                    let Some(target) = rels.get(rel_id) else {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::MissingRelationshipTarget,
+                            format!("OLE preview relationship {rel_id} is missing"),
+                        );
+                        continue;
+                    };
+                    match pkg.content_type(target) {
+                        Some("image/png" | "image/jpeg" | "image/jpg") => {
+                            self.images += 1;
+                            self.check_image(rel_id, pkg, rels, profile);
+                        }
+                        Some("image/x-emf" | "image/emf") => profile.add_reason_deduped(
+                            UnsupportedCode::OlePreviewEmf,
+                            format!("OLE preview {target} is EMF"),
+                        ),
+                        Some("image/x-wmf" | "image/wmf" | "image/x-wmf+xml") => {
+                            profile.add_reason_deduped(
+                                UnsupportedCode::OlePreviewWmf,
+                                format!("OLE preview {target} is WMF"),
+                            );
+                        }
+                        Some(content_type) => profile.add_reason_deduped(
+                            UnsupportedCode::OleObject,
+                            format!("unsupported OLE preview content type {content_type}"),
+                        ),
+                        None => profile.add_reason_deduped(
+                            UnsupportedCode::ImageContentTypeMissing,
+                            format!("OLE preview {target} has no content type"),
+                        ),
+                    }
+                }
+                RunContent::Math(math) => self.math(math, profile),
+                RunContent::NoteReference { kind, id } => {
+                    text.push_str(&id.to_string());
+                    if !self.note_refs.contains(&(*kind, *id)) {
+                        self.note_refs.push((*kind, *id));
                     }
                 }
                 RunContent::Symbol { font, char_code } => {
-                    if matching::map_symbol_char(font, *char_code).is_none() {
+                    if let Some(ch) = matching::map_symbol_char(font, *char_code) {
+                        text.push(ch);
+                    } else {
                         profile.add_reason_deduped(
                             UnsupportedCode::UnknownElement,
                             format!("symbol char {char_code:04X}"),
@@ -606,6 +1676,17 @@ impl<'a> Collector<'a> {
         }
         if !text.is_empty() {
             self.scripts.merge(scan_scripts(&text));
+            record_coverage(
+                &mut self.coverage,
+                &family,
+                if effective.bold == Some(true) {
+                    700
+                } else {
+                    400
+                },
+                effective.italic == Some(true),
+                &text,
+            );
         }
     }
 
@@ -620,7 +1701,31 @@ impl<'a> Collector<'a> {
             .unwrap_or_else(|| "Calibri".to_string())
     }
 
-    /// Flags unsupported image container types (GIF/EMF/WMF/TIFF).
+    fn math(&mut self, math: &crate::oxml::omml::MathContent, profile: &mut DocProfile) {
+        self.has_math = true;
+        if let Some(detail) = math.unsupported() {
+            profile.add_reason_deduped(UnsupportedCode::Equation, detail.to_string());
+            return;
+        }
+        let source = math.source_text();
+        if source.is_empty() {
+            profile.add_reason_deduped(UnsupportedCode::Equation, "empty equation");
+            return;
+        }
+        record_coverage(
+            &mut self.coverage,
+            "Cambria Math",
+            400,
+            source.chars().any(char::is_alphabetic),
+            &source,
+        );
+        if !self.fonts_used.iter().any(|font| font == "Cambria Math") {
+            self.fonts_used.push("Cambria Math".to_string());
+        }
+        self.scripts.merge(scan_scripts(&source));
+    }
+
+    /// Validates a required visible image without relying on renderer lookup.
     fn check_image(
         &mut self,
         rel_id: &str,
@@ -629,23 +1734,51 @@ impl<'a> Collector<'a> {
         profile: &mut DocProfile,
     ) {
         let Some(target) = rels.get(rel_id) else {
+            profile.add_reason_deduped(
+                UnsupportedCode::MissingRelationshipTarget,
+                format!("image relationship {rel_id} is missing"),
+            );
             return;
         };
-        if let Some(ct) = pkg.content_type(target) {
-            let unsupported = matches!(
-                ct,
-                "image/gif"
-                    | "image/tiff"
-                    | "image/x-emf"
-                    | "image/emf"
-                    | "image/x-wmf"
-                    | "image/wmf"
-                    | "image/x-wmf+xml"
+        if self.validated_images.contains(target) {
+            return;
+        }
+        let Some(bytes) = pkg.part(target) else {
+            profile.add_reason_deduped(
+                UnsupportedCode::MissingRelationshipTarget,
+                format!("image relationship target {target} is missing"),
             );
-            if unsupported {
-                let kind = ct.rsplit('/').next().unwrap_or("unknown");
-                profile
-                    .add_reason_deduped(UnsupportedCode::UnknownElement, format!("image/{kind}"));
+            return;
+        };
+        let Some(content_type) = pkg.content_type(target) else {
+            profile.add_reason_deduped(
+                UnsupportedCode::ImageContentTypeMissing,
+                format!("image relationship target {target} has no content type"),
+            );
+            return;
+        };
+        match crate::drawing::image::decode_required(content_type, bytes) {
+            Ok((_, pixels)) => {
+                if let Err(OfficeError::Unsupported { code, detail }) =
+                    crate::drawing::image::add_to_budget(
+                        self.validated_images.len(),
+                        &mut self.total_image_pixels,
+                        pixels,
+                    )
+                {
+                    profile.add_reason_deduped(code, detail);
+                    return;
+                }
+                self.validated_images.insert(target.clone());
+            }
+            Err(OfficeError::Unsupported { code, detail }) => {
+                profile.add_reason_deduped(code, format!("image {target}: {detail}"));
+            }
+            Err(error) => {
+                profile.add_reason_deduped(
+                    UnsupportedCode::ImageDecodeFailure,
+                    format!("image {target}: {error}"),
+                );
             }
         }
     }
@@ -689,12 +1822,8 @@ fn rel_map(pkg: &Package, source_part: &str) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// The header/footer part names referenced by any section (deduped).
-fn header_footer_parts(pkg: &Package, document: &wml::Document) -> Vec<String> {
-    let Ok(main) = pkg.main_part() else {
-        return Vec::new();
-    };
-    let rels = rel_map(pkg, &main);
+/// Header/footer references from every section, including mid-document breaks.
+fn header_footer_refs(document: &wml::Document) -> Vec<&wml::HdrFtrRef> {
     // Union across every section, not just the final one: a mid-document section
     // break (a paragraph's `sect_break`) carries its own headers/footers, whose
     // content (a chart, complex script, a missing font) must still be profiled.
@@ -708,17 +1837,18 @@ fn header_footer_parts(pkg: &Package, document: &wml::Document) -> Vec<String> {
         .collect();
     sects.push(&document.final_sect);
 
-    let mut parts = Vec::new();
+    let mut references = Vec::new();
     for sect in sects {
         for hf in sect.header_refs.iter().chain(sect.footer_refs.iter()) {
-            if let Some(target) = rels.get(&hf.rel_id)
-                && !parts.contains(target)
+            if !references
+                .iter()
+                .any(|reference: &&wml::HdrFtrRef| reference.rel_id == hf.rel_id)
             {
-                parts.push(target.clone());
+                references.push(hf);
             }
         }
     }
-    parts
+    references
 }
 
 #[cfg(test)]
@@ -766,32 +1896,27 @@ mod tests {
     }
 
     #[test]
-    fn multicolumn_section_is_unsupported() {
+    fn multicolumn_section_is_supported() {
         let body = r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>
             <w:sectPr><w:cols w:num="2"/></w:sectPr>"#;
         let p = profile_body(body);
-        assert!(
-            p.reasons
-                .iter()
-                .any(|r| r.code == UnsupportedCode::MultiColumn)
-        );
+        assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
     }
 
     #[test]
-    fn arabic_text_is_complex_and_rtl() {
+    fn arabic_text_uses_available_coverage_fallback() {
         let p = profile_body(r#"<w:p><w:r><w:t>مرحبا بالعالم</w:t></w:r></w:p>"#);
-        assert!(
-            p.reasons
-                .iter()
-                .any(|r| r.code == UnsupportedCode::ComplexScript)
-        );
-        assert!(p.reasons.iter().any(|r| r.code == UnsupportedCode::RtlText));
+        assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
+        assert!(!p.reasons.iter().any(|r| matches!(
+            r.code,
+            UnsupportedCode::ComplexScript | UnsupportedCode::RtlText
+        )));
     }
 
     #[test]
-    fn textbox_frame_is_unsupported() {
+    fn unsupported_drop_cap_frame_is_typed() {
         let p = profile_body(
-            r#"<w:p><w:pPr><w:framePr w:w="2000"/></w:pPr><w:r><w:t>tb</w:t></w:r></w:p>"#,
+            r#"<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3"/></w:pPr><w:r><w:t>tb</w:t></w:r></w:p>"#,
         );
         assert!(p.reasons.iter().any(|r| r.code == UnsupportedCode::TextBox));
     }

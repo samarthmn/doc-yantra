@@ -1,0 +1,181 @@
+{
+  "schema_version": 2,
+  "allowlisted": [
+    {
+      "fixture_id": "office/fidelity-docx/hyperlinks",
+      "reason_code": "OFFICE_LINK_URI_SERIALIZATION",
+      "justification": "The frozen LibreOffice PDF serializes `https://example.com/`; the source and local engine serialize `https://example.com`. URI normalization proves both navigate to the exact `https://example.com` origin target.",
+      "user_visible_effect": "The link reaches the same origin, but its serialized PDF URI differs from the legacy output."
+    }
+  ],
+  "known_failures": [
+    {
+      "fixture_id": "office/docx/file1.docx",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "The 144-DPI raster and golden-derived position/color probes show that the current DOCX layout does not match the frozen LibreOffice rendering.",
+      "user_visible_effect": "Text blocks appear at different positions from the legacy PDF.",
+      "tracking_note": "Route measured raster, position, and color-probe gaps to the office engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/docx/file2.docx",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "The 144-DPI raster and golden-derived position/color probes show that the current DOCX layout does not match the frozen LibreOffice rendering.",
+      "user_visible_effect": "Text blocks appear at different positions from the legacy PDF.",
+      "tracking_note": "Route measured raster, position, and color-probe gaps to the office engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/pptx/file1.pptx",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Both global and regional raster error exceed the fixed visual limits, and text/color probes miss their golden positions.",
+      "user_visible_effect": "Slide blocks, fills, colors, or text placement visibly differ from the legacy slide PDF.",
+      "tracking_note": "Route slide rendering metrics to the PPTX engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/pptx/file2.pptx",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Both global and regional raster error exceed the fixed visual limits, and text/color probes miss their golden positions.",
+      "user_visible_effect": "Slide blocks, fills, colors, or text placement visibly differ from the legacy slide PDF.",
+      "tracking_note": "Route slide rendering metrics to the PPTX engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/xlsx/file1.xlsx",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Regional raster error and golden-derived text/color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Spreadsheet cell placement, rules, or colors visibly differ from the legacy PDF.",
+      "tracking_note": "Route sheet rendering metrics to the XLSX engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/xlsx/file2.xlsx",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Golden-derived text and color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Spreadsheet cell text is visibly displaced from the legacy PDF.",
+      "tracking_note": "Route sheet rendering metrics to the XLSX engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/xlsm/file1.xlsm",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Regional raster error and golden-derived text/color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Macro-enabled spreadsheet cell placement, rules, or colors visibly differ from the legacy PDF.",
+      "tracking_note": "Route sheet rendering metrics to the XLSX engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/xlsm/file2.xlsm",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Golden-derived text and color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Macro-enabled spreadsheet cell text is visibly displaced from the legacy PDF.",
+      "tracking_note": "Route sheet rendering metrics to the XLSX engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/fonts-substitution",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Font-run positions and golden-derived color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Substituted font runs occupy different positions from the legacy PDF.",
+      "tracking_note": "Route font metrics to the DOCX text-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/headers-footers",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Header/footer text positions and golden-derived color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Body or running-footer placement differs from the legacy PDF.",
+      "tracking_note": "Route header/footer layout metrics to the DOCX engine owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/hyperlinks",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Hyperlink text positions and golden-derived color probes exceed the fixed comparison limits; URI serialization is handled separately by the typed allowlist.",
+      "user_visible_effect": "The clickable text is visibly displaced even though its normalized navigation target is unchanged.",
+      "tracking_note": "Route hyperlink text-layout metrics to the DOCX engine owner; retain the separate URI serialization allowlist only while normalized targets match."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/justify-long-text",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Justified text positions and golden-derived color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Justification, line placement, or block position visibly differs from the legacy PDF.",
+      "tracking_note": "Route justification metrics to the DOCX paragraph-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/lists-multilevel",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "List text positions and golden-derived color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "List markers or item indentation visibly differs from the legacy PDF.",
+      "tracking_note": "Route list indentation metrics to the DOCX numbering-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/long-doc-pagination",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Multiple pages exceed global/regional raster limits and golden-derived position/color limits despite equal page count and per-page words.",
+      "user_visible_effect": "Long-document text blocks visibly shift within their legacy pages.",
+      "tracking_note": "Route multi-page flow metrics to the DOCX pagination owner; remove only after every page passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/page-fields",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "All pages exceed one or more fixed raster, position, regional, or color-probe limits despite equal page count and per-page words.",
+      "user_visible_effect": "Body text and PAGE/NUMPAGES footer placement visibly differ from the legacy PDF.",
+      "tracking_note": "Route page-field and multi-page flow metrics to the DOCX pagination owner; remove only after every page passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/plain-paragraphs",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Paragraph positions and golden-derived color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Plain paragraph blocks visibly differ in placement from the legacy PDF.",
+      "tracking_note": "Route paragraph-flow metrics to the DOCX layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/run-formatting-matrix",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Formatted-run positions and golden-derived color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Bold, italic, underline, strike, color, or size runs appear at different positions or colors from the legacy PDF.",
+      "tracking_note": "Route formatted-run metrics to the DOCX text emitter owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/spacing-exact-atleast",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Line positions and golden-derived color probes exceed the fixed comparison limits.",
+      "user_visible_effect": "Line spacing and wrapped-text placement visibly differ from the legacy PDF.",
+      "tracking_note": "Route line-spacing metrics to the DOCX paragraph-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/table-fixed",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Regional raster error, text positions, and golden-derived border/color probes exceed the fixed limits.",
+      "user_visible_effect": "Table cell text or borders visibly differ from the legacy PDF.",
+      "tracking_note": "Route table geometry metrics to the DOCX table-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/table-merges",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Merged-cell text positions and golden-derived border/color probes exceed the fixed limits.",
+      "user_visible_effect": "Merged-cell geometry or text placement visibly differs from the legacy PDF.",
+      "tracking_note": "Route merged-table metrics to the DOCX table-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/table-nested",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Nested-cell text positions and golden-derived border/color probes exceed the fixed limits.",
+      "user_visible_effect": "Nested table geometry or text placement visibly differs from the legacy PDF.",
+      "tracking_note": "Route nested-table metrics to the DOCX table-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "office/fidelity-docx/tabs-leaders",
+      "reason_code": "OFFICE_VISUAL_PARITY",
+      "justification": "Tab-stop text positions and golden-derived color probes exceed the fixed limits.",
+      "user_visible_effect": "Tab-aligned text or leaders visibly differ from the legacy PDF.",
+      "tracking_note": "Route tab-stop metrics to the DOCX paragraph-layout owner; remove only after this exact comparison passes."
+    },
+    {
+      "fixture_id": "markdown/unicode-mixed",
+      "reason_code": "MDCSV_PAGE_WORD_ORDER",
+      "justification": "The normalized ordered words extracted from each current page do not equal those on the corresponding Chromium page.",
+      "user_visible_effect": "Unicode content is segmented or distributed across pages differently from the legacy PDF.",
+      "tracking_note": "Route per-page Unicode extraction/layout differences to the Markdown engine owner; global logical-order probes are insufficient."
+    },
+    {
+      "fixture_id": "markdown/gfm-constructs",
+      "reason_code": "MDCSV_PAGE_WORD_ORDER",
+      "justification": "The normalized ordered words extracted from each current page do not equal those on the corresponding Chromium page.",
+      "user_visible_effect": "GFM list, footnote, or wrapped content is distributed across pages differently from the legacy PDF.",
+      "tracking_note": "Route per-page GFM layout differences to the Markdown engine owner; global word-run coverage is insufficient."
+    }
+  ]
+}

@@ -8,10 +8,11 @@
 use super::dml::{self, Drawing};
 use super::{
     M, MC, Node, R, Rgb, TblWidth, VML, W, alternate_content_fallback, attr, child, children,
-    eighth_point_to_pt, half_point_to_pt, is, on_off, parse_i64, twip_to_pt, unknown_child,
-    wml_ignorable,
+    eighth_point_to_pt, emu_to_pt, half_point_to_pt, is, on_off, parse_i64, twip_to_pt,
+    unknown_child, wml_ignorable,
 };
 use crate::{OfficeError, Result};
+use std::collections::BTreeMap;
 
 /// A fully-parsed word document (main body + final section + profile flags).
 #[derive(Debug, Clone)]
@@ -52,10 +53,42 @@ pub struct DocFlags {
     pub smart_art: bool,
     /// An embedded OLE object (`w:object`).
     pub ole_object: bool,
+    /// A real (non-`none`) WordArt text warp.
+    pub wordart_warp: bool,
+    /// Visible constructs deliberately kept fail-closed.
+    pub visible_unsupported: Vec<String>,
+}
+
+impl DocFlags {
+    /// Merges flags from a related visible part (header/footer/note).
+    pub fn merge(&mut self, other: &DocFlags) {
+        self.footnotes |= other.footnotes;
+        self.endnotes |= other.endnotes;
+        self.equation |= other.equation;
+        self.text_box |= other.text_box;
+        self.anchored_drawing |= other.anchored_drawing;
+        self.floating_table |= other.floating_table;
+        self.multi_column |= other.multi_column;
+        self.image_crop |= other.image_crop;
+        self.vml_pict |= other.vml_pict;
+        self.chart |= other.chart;
+        self.smart_art |= other.smart_art;
+        self.ole_object |= other.ole_object;
+        self.wordart_warp |= other.wordart_warp;
+        for value in &other.visible_unsupported {
+            if !self.visible_unsupported.contains(value) {
+                self.visible_unsupported.push(value.clone());
+            }
+        }
+    }
 }
 
 /// A block-level item in a body or table cell.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing Paragraph would churn every hot layout match; blocks are already heap-owned in Vec"
+)]
 pub enum BlockContent {
     /// A paragraph.
     Paragraph(Paragraph),
@@ -81,6 +114,8 @@ pub struct ParaProps {
     pub style_id: Option<String>,
     /// Justification.
     pub alignment: Option<Jc>,
+    /// Right-to-left paragraph base direction (`w:bidi`).
+    pub bidi: Option<bool>,
     /// Spacing before/after and line spacing.
     pub spacing: Spacing,
     /// Indentation.
@@ -105,6 +140,76 @@ pub struct ParaProps {
     pub contextual_spacing: bool,
     /// Outline level 0–8 (Heading 1 = 0); drives PDF bookmarks.
     pub outline_lvl: Option<u8>,
+    /// Floating paragraph frame (`w:framePr`) in the supported common subset.
+    pub frame: Option<FrameProps>,
+    /// The table style's contribution to this paragraph's cascade, for
+    /// paragraphs inside a table cell. Not parsed from `w:pPr`: it is resolved
+    /// from the enclosing table's style by [`super::table_style`] and consumed
+    /// by [`super::styles::StyleResolver`], which slots it in below the
+    /// paragraph style (ECMA-376 §17.7.2).
+    pub tbl_style: Option<std::rc::Rc<TblStyleText>>,
+    /// Parsed visible properties not yet rendered.
+    pub visible_unsupported: Vec<String>,
+}
+
+/// The paragraph- and run-level formatting a table style contributes to the
+/// text inside one cell (whole-table plus every conditional slot that cell
+/// falls into, already flattened).
+#[derive(Debug, Clone, Default)]
+pub struct TblStyleText {
+    /// Paragraph properties from the table style.
+    pub ppr: ParaProps,
+    /// Run properties from the table style.
+    pub rpr: RunProps,
+}
+
+/// Position, extent, and conservative wrapping for a `w:framePr` paragraph.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameProps {
+    /// Explicit horizontal offset from the selected anchor.
+    pub x_pt: Option<f64>,
+    /// Explicit vertical offset from the selected anchor.
+    pub y_pt: Option<f64>,
+    /// Alignment used when no explicit horizontal offset is supplied.
+    pub x_align: FrameAlign,
+    /// Alignment used when no explicit vertical offset is supplied.
+    pub y_align: FrameAlign,
+    /// Horizontal anchor origin.
+    pub horizontal: AnchorOrigin,
+    /// Vertical anchor origin.
+    pub vertical: AnchorOrigin,
+    /// Explicit frame width; absent means the available text width.
+    pub width_pt: Option<f64>,
+    /// Explicit frame height.
+    pub height_pt: Option<f64>,
+    /// How the explicit height interacts with laid-out content.
+    pub height_rule: FrameHeightRule,
+    /// Conservative exclusion behavior for following body text.
+    pub wrap: WrapMode,
+    /// Unsupported visible frame attribute/value, if any.
+    pub unsupported: Option<&'static str>,
+}
+
+/// Axis alignment for a framed paragraph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameAlign {
+    /// Start/top edge of the anchor area.
+    Start,
+    /// Center of the anchor area.
+    Center,
+    /// End/bottom edge of the anchor area.
+    End,
+}
+
+/// Height rule for a framed paragraph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameHeightRule {
+    /// Grow to the content, treating `h` as a minimum when present.
+    Auto,
+    /// Use at least the declared height.
+    AtLeast,
+    /// Use exactly the declared height.
+    Exact,
 }
 
 /// Paragraph justification.
@@ -238,6 +343,8 @@ pub enum InlineContent {
     SimpleField(Field),
     /// An assembled complex field region (`w:fldChar` begin/separate/end).
     ComplexFieldRegion(Field),
+    /// Inline or display Office Math expression.
+    Math(super::omml::MathContent),
 }
 
 /// A field: its instruction text plus the cached result runs Word last rendered.
@@ -268,7 +375,20 @@ pub enum RunContent {
     /// A break.
     Break(BreakKind),
     /// An (inline) drawing/image.
-    Drawing(Drawing),
+    Drawing(WmlDrawing),
+    /// Legacy VML shape carried by `w:pict`.
+    VmlShape(VmlShape),
+    /// Raster preview shape belonging to an embedded OLE object.
+    OlePreview(VmlShape),
+    /// Office Math expression nested in a run.
+    Math(super::omml::MathContent),
+    /// A footnote or endnote reference marker.
+    NoteReference {
+        /// Which note part owns the referenced content.
+        kind: NoteKind,
+        /// `w:id` in that part.
+        id: i64,
+    },
     /// A symbol glyph from a specific font (`w:sym`).
     Symbol {
         /// The symbol font family.
@@ -276,6 +396,134 @@ pub enum RunContent {
         /// The character code (often in the F0xx PUA range).
         char_code: u32,
     },
+}
+
+/// WML-specific drawing data layered over shared DrawingML picture parsing.
+#[derive(Debug, Clone)]
+pub struct WmlDrawing {
+    /// Shared picture fields.
+    pub drawing: Drawing,
+    /// Anchor positioning/wrap fields for `wp:anchor`.
+    pub anchor: Option<AnchorProps>,
+    /// Stable reasons why an authored anchor is outside the rendered subset.
+    pub anchor_violations: Vec<String>,
+    /// Source crop fractions in `[0, 1]` (`left, top, right, bottom`).
+    pub crop: Option<[f64; 4]>,
+    /// Text-box content carried by a word-processing shape.
+    pub text_box: Option<TextBox>,
+    /// Non-`none` preset text warp, when present.
+    pub wordart_warp: Option<String>,
+}
+
+/// Positioning and wrapping for an anchored drawing.
+#[derive(Debug, Clone, Copy)]
+pub struct AnchorProps {
+    /// X offset in points from selected horizontal origin.
+    pub x_pt: f64,
+    /// Horizontal alignment when the anchor uses `wp:align` instead of an offset.
+    pub x_align: Option<FrameAlign>,
+    /// Y offset in points from selected vertical origin.
+    pub y_pt: f64,
+    /// Vertical alignment when the anchor uses `wp:align` instead of an offset.
+    pub y_align: Option<FrameAlign>,
+    /// Horizontal reference (`page`, `margin`, `column`, `character`).
+    pub relative_from_h: AnchorOrigin,
+    /// Vertical reference (`page`, `margin`, `paragraph`, `line`).
+    pub relative_from_v: AnchorOrigin,
+    /// Text wrapping mode.
+    pub wrap: WrapMode,
+    /// Text clearance above, below, left, and right of the object.
+    pub distances_pt: [f64; 4],
+    /// Paint behind document text.
+    pub behind_doc: bool,
+    /// Drawing-layer ordering key.
+    pub relative_height: u32,
+}
+
+/// Drawing/table anchor origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorOrigin {
+    /// Physical page edge.
+    Page,
+    /// Page margin/content edge.
+    Margin,
+    /// Current paragraph/line/column.
+    Paragraph,
+}
+
+/// Supported floating-object wrap modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrapMode {
+    /// Object does not exclude body text.
+    None,
+    /// Body text stays above or below the object.
+    TopAndBottom,
+    /// Body text flows around its rectangular bounds.
+    Square,
+    /// Body text follows a tight rectangular exclusion.
+    Tight,
+}
+
+/// Text box geometry and content.
+#[derive(Debug, Clone)]
+pub struct TextBox {
+    /// Box width.
+    pub width_pt: f64,
+    /// Box height.
+    pub height_pt: f64,
+    /// Fill color; `None` means transparent.
+    pub fill: Option<Rgb>,
+    /// Outline color; `None` means no outline.
+    pub outline: Option<Rgb>,
+    /// Paragraph/table content inside the box.
+    pub content: Vec<BlockContent>,
+}
+
+/// Supported legacy VML shape.
+#[derive(Debug, Clone)]
+pub struct VmlShape {
+    /// VML local element name.
+    pub kind: String,
+    /// Left offset parsed from `style`.
+    pub x_pt: f64,
+    /// Top offset parsed from `style`.
+    pub y_pt: f64,
+    /// Width parsed from `style`.
+    pub width_pt: f64,
+    /// Height parsed from `style`.
+    pub height_pt: f64,
+    /// Fill color.
+    pub fill: Option<Rgb>,
+    /// Stroke color.
+    pub outline: Option<Rgb>,
+    /// Optional raster relationship from `v:imagedata`.
+    pub image_rel_id: Option<String>,
+    /// Optional textbox content.
+    pub text_box: Vec<BlockContent>,
+    /// Simple VML path string for `v:shape`.
+    pub path: Option<String>,
+}
+
+/// Note family used by inline references and note parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteKind {
+    /// `word/footnotes.xml`.
+    Footnote,
+    /// `word/endnotes.xml`.
+    Endnote,
+}
+
+/// Parsed footnote/endnote part.
+#[derive(Debug, Clone, Default)]
+pub struct NotesPart {
+    /// User notes keyed by `w:id`; negative ids are reserved separators.
+    pub notes: BTreeMap<i64, Vec<BlockContent>>,
+    /// Explicit separator content (`w:id=-1`), when supplied.
+    pub separator: Vec<BlockContent>,
+    /// Continuation separator content (`w:id=-2`), when supplied.
+    pub continuation_separator: Vec<BlockContent>,
+    /// Visible/unsupported constructs found inside the part.
+    pub flags: DocFlags,
 }
 
 /// The kind of an explicit break.
@@ -330,6 +578,8 @@ pub struct RunProps {
     pub kern_min_pt: Option<f64>,
     /// Right-to-left run.
     pub rtl: Option<bool>,
+    /// Parsed visible properties not yet rendered.
+    pub visible_unsupported: Vec<String>,
 }
 
 /// A text color: an explicit sRGB or `auto`.
@@ -437,6 +687,10 @@ impl RunProps {
             spacing_pt: self.spacing_pt.or(base.spacing_pt),
             kern_min_pt: self.kern_min_pt.or(base.kern_min_pt),
             rtl: self.rtl.or(base.rtl),
+            visible_unsupported: merge_reason_lists(
+                &base.visible_unsupported,
+                &self.visible_unsupported,
+            ),
         }
     }
 }
@@ -449,6 +703,7 @@ impl ParaProps {
         ParaProps {
             style_id: self.style_id.clone().or_else(|| base.style_id.clone()),
             alignment: self.alignment.or(base.alignment),
+            bidi: self.bidi.or(base.bidi),
             spacing: Spacing {
                 before_pt: self.spacing.before_pt.or(base.spacing.before_pt),
                 after_pt: self.spacing.after_pt.or(base.spacing.after_pt),
@@ -500,8 +755,24 @@ impl ParaProps {
             shading: self.shading.or(base.shading),
             contextual_spacing: self.contextual_spacing || base.contextual_spacing,
             outline_lvl: self.outline_lvl.or(base.outline_lvl),
+            frame: self.frame.or(base.frame),
+            tbl_style: self.tbl_style.clone().or_else(|| base.tbl_style.clone()),
+            visible_unsupported: merge_reason_lists(
+                &base.visible_unsupported,
+                &self.visible_unsupported,
+            ),
         }
     }
+}
+
+fn merge_reason_lists(base: &[String], overlay: &[String]) -> Vec<String> {
+    let mut merged = base.to_vec();
+    for reason in overlay {
+        if !merged.contains(reason) {
+            merged.push(reason.clone());
+        }
+    }
+    merged
 }
 
 /// A single border edge specification.
@@ -513,8 +784,22 @@ pub struct Border {
     pub size_pt: f64,
     /// Border color.
     pub color: Option<Rgb>,
+    /// Theme color slot, preferred over the explicit fallback color.
+    pub theme_color: Option<String>,
     /// Space from the text in points.
     pub space_pt: f64,
+    /// Parse-time violation for the faithfully rendered border subset.
+    pub(crate) unsupported: Option<&'static str>,
+}
+
+impl Border {
+    /// Resolves the authored theme color, falling back to the explicit color.
+    pub fn resolved_color(&self, theme: &super::theme::Theme) -> Option<Rgb> {
+        self.theme_color
+            .as_deref()
+            .and_then(|slot| theme.color(slot))
+            .or(self.color)
+    }
 }
 
 /// Paragraph border set.
@@ -530,6 +815,43 @@ pub struct ParaBorders {
     pub right: Option<Border>,
     /// Between consecutive bordered paragraphs.
     pub between: Option<Border>,
+}
+
+impl ParaBorders {
+    /// Returns the stable reason when paragraph borders exceed the faithfully
+    /// rendered bottom-single subset. Non-visible `nil`/`none` edges are safe.
+    pub fn unsupported_detail(&self, theme: &super::theme::Theme) -> Option<&'static str> {
+        let visible = |border: &Option<Border>| {
+            border
+                .as_ref()
+                .is_some_and(|border| !matches!(border.val.as_str(), "nil" | "none"))
+        };
+        if visible(&self.top)
+            || visible(&self.left)
+            || visible(&self.right)
+            || visible(&self.between)
+        {
+            return Some("paragraph border edge outside bottom-single subset");
+        }
+        let bottom = self.bottom.as_ref()?;
+        if !matches!(bottom.val.as_str(), "nil" | "none" | "single") {
+            return Some("paragraph bottom border style outside single subset");
+        }
+        if matches!(bottom.val.as_str(), "nil" | "none") {
+            return None;
+        }
+        if let Some(detail) = bottom.unsupported {
+            return Some(detail);
+        }
+        if bottom
+            .theme_color
+            .as_deref()
+            .is_some_and(|slot| theme.color(slot).is_none())
+        {
+            return Some("paragraph bottom border references an unresolved theme color");
+        }
+        None
+    }
 }
 
 /// A table.
@@ -560,6 +882,177 @@ pub struct TblProps {
     pub style_id: Option<String>,
     /// Table indent from the left margin, points.
     pub indent_pt: Option<f64>,
+    /// Floating-table positioning from `w:tblpPr`.
+    pub floating: Option<FloatingTableProps>,
+    /// Which conditional slots of the table style apply (`w:tblLook`).
+    pub look: TblLook,
+    /// Rows per horizontal band (`w:tblStyleRowBandSize`, default 1).
+    pub row_band_size: Option<u32>,
+    /// Columns per vertical band (`w:tblStyleColBandSize`, default 1).
+    pub col_band_size: Option<u32>,
+    /// Parsed visible properties not yet rendered.
+    pub visible_unsupported: Vec<String>,
+}
+
+/// `w:tblLook`: which conditional-formatting slots of the referenced table
+/// style this table opts into. The all-false default is the spec default
+/// (`w:val="0000"`): no first/last emphasis, banding enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TblLook {
+    /// Apply the `firstRow` slot.
+    pub first_row: bool,
+    /// Apply the `lastRow` slot.
+    pub last_row: bool,
+    /// Apply the `firstCol` slot.
+    pub first_col: bool,
+    /// Apply the `lastCol` slot.
+    pub last_col: bool,
+    /// Suppress horizontal (row) banding.
+    pub no_h_band: bool,
+    /// Suppress vertical (column) banding.
+    pub no_v_band: bool,
+}
+
+impl TblLook {
+    /// Parses `w:tblLook`. Word writes both the modern boolean attributes and
+    /// the legacy `w:val` bitmask; the explicit attributes win where present.
+    fn parse(node: Node) -> TblLook {
+        let bits = attr(node, W, "val")
+            .and_then(|value| u32::from_str_radix(value.trim(), 16).ok())
+            .unwrap_or(0);
+        let flag = |name: &str, mask: u32| match attr(node, W, name) {
+            Some(value) => on_off(Some(value)),
+            None => bits & mask != 0,
+        };
+        TblLook {
+            first_row: flag("firstRow", 0x0020),
+            last_row: flag("lastRow", 0x0040),
+            first_col: flag("firstColumn", 0x0080),
+            last_col: flag("lastColumn", 0x0100),
+            no_h_band: flag("noHBand", 0x0200),
+            no_v_band: flag("noVBand", 0x0400),
+        }
+    }
+}
+
+impl TblBorders {
+    /// Overlays `self` (higher priority) over `base`, edge by edge.
+    pub fn merge_over(&self, base: &TblBorders) -> TblBorders {
+        let edge = |mine: &Option<Border>, theirs: &Option<Border>| {
+            mine.clone().or_else(|| theirs.clone())
+        };
+        TblBorders {
+            top: edge(&self.top, &base.top),
+            bottom: edge(&self.bottom, &base.bottom),
+            left: edge(&self.left, &base.left),
+            right: edge(&self.right, &base.right),
+            inside_h: edge(&self.inside_h, &base.inside_h),
+            inside_v: edge(&self.inside_v, &base.inside_v),
+        }
+    }
+}
+
+impl CellMargins {
+    /// Overlays `self` (higher priority) over `base`, edge by edge.
+    pub fn merge_over(&self, base: &CellMargins) -> CellMargins {
+        CellMargins {
+            top: self.top.or(base.top),
+            right: self.right.or(base.right),
+            bottom: self.bottom.or(base.bottom),
+            left: self.left.or(base.left),
+        }
+    }
+}
+
+impl TblProps {
+    /// Overlays `self` (higher priority) over `base` — used to lay the table's
+    /// direct `w:tblPr` over the properties its table style supplies.
+    pub fn merge_over(&self, base: &TblProps) -> TblProps {
+        TblProps {
+            width: self.width.or(base.width),
+            alignment: self.alignment.or(base.alignment),
+            borders: self.borders.merge_over(&base.borders),
+            cell_margins: self.cell_margins.merge_over(&base.cell_margins),
+            layout_fixed: self.layout_fixed || base.layout_fixed,
+            style_id: self.style_id.clone().or_else(|| base.style_id.clone()),
+            indent_pt: self.indent_pt.or(base.indent_pt),
+            floating: self.floating.or(base.floating),
+            // `w:tblLook` is a property of the table instance, never of the style.
+            look: self.look,
+            row_band_size: self.row_band_size.or(base.row_band_size),
+            col_band_size: self.col_band_size.or(base.col_band_size),
+            visible_unsupported: merge_reason_lists(
+                &base.visible_unsupported,
+                &self.visible_unsupported,
+            ),
+        }
+    }
+}
+
+impl RowProps {
+    /// Overlays `self` (higher priority) over `base`.
+    pub fn merge_over(&self, base: &RowProps) -> RowProps {
+        RowProps {
+            grid_before: if self.grid_before > 0 {
+                self.grid_before
+            } else {
+                base.grid_before
+            },
+            grid_after: if self.grid_after > 0 {
+                self.grid_after
+            } else {
+                base.grid_after
+            },
+            width_before: self.width_before.or(base.width_before),
+            width_after: self.width_after.or(base.width_after),
+            height: self.height.or(base.height),
+            hidden: self.hidden || base.hidden,
+            header: self.header || base.header,
+            cant_split: self.cant_split || base.cant_split,
+            visible_unsupported: merge_reason_lists(
+                &base.visible_unsupported,
+                &self.visible_unsupported,
+            ),
+        }
+    }
+}
+
+impl CellProps {
+    /// Overlays `self` (higher priority) over `base`.
+    pub fn merge_over(&self, base: &CellProps) -> CellProps {
+        CellProps {
+            width: self.width.or(base.width),
+            grid_span: self.grid_span.max(1),
+            v_merge: self.v_merge.or(base.v_merge),
+            borders: self.borders.merge_over(&base.borders),
+            shading: self.shading.or(base.shading),
+            margins: self.margins.merge_over(&base.margins),
+            v_align: if self.v_align == VAlign::default() {
+                base.v_align
+            } else {
+                self.v_align
+            },
+            visible_unsupported: merge_reason_lists(
+                &base.visible_unsupported,
+                &self.visible_unsupported,
+            ),
+        }
+    }
+}
+
+/// Positioning for a floating table.
+#[derive(Debug, Clone, Copy)]
+pub struct FloatingTableProps {
+    /// Horizontal offset in points.
+    pub x_pt: f64,
+    /// Vertical offset in points.
+    pub y_pt: f64,
+    /// Horizontal anchor origin.
+    pub horizontal: AnchorOrigin,
+    /// Vertical anchor origin.
+    pub vertical: AnchorOrigin,
+    /// Text distance on the left/right, used as wrap padding.
+    pub wrap_padding_pt: f64,
 }
 
 /// A table row.
@@ -574,12 +1067,24 @@ pub struct Row {
 /// Row-level properties.
 #[derive(Debug, Clone, Default)]
 pub struct RowProps {
+    /// Shared table-grid columns omitted before this row's first cell.
+    pub grid_before: u32,
+    /// Shared table-grid columns omitted after this row's last cell.
+    pub grid_after: u32,
+    /// Preferred aggregate width of the omitted leading columns.
+    pub width_before: Option<TblWidth>,
+    /// Preferred aggregate width of the omitted trailing columns.
+    pub width_after: Option<TblWidth>,
     /// Row height rule.
     pub height: Option<RowHeight>,
+    /// Hidden rows do not paint or consume height.
+    pub hidden: bool,
     /// This is a repeatable header row.
     pub header: bool,
     /// The row may not split across pages.
     pub cant_split: bool,
+    /// Parsed visible properties not yet rendered.
+    pub visible_unsupported: Vec<String>,
 }
 
 /// Row height rule.
@@ -617,6 +1122,8 @@ pub struct CellProps {
     pub margins: CellMargins,
     /// Vertical content alignment.
     pub v_align: VAlign,
+    /// Parsed visible properties not yet rendered.
+    pub visible_unsupported: Vec<String>,
 }
 
 /// Vertical-merge state of a cell.
@@ -691,8 +1198,14 @@ pub struct SectPr {
     pub title_pg: bool,
     /// Restart page numbering at this value.
     pub page_num_start: Option<u32>,
+    /// Page-number format used by PAGE fields.
+    pub page_num_fmt: String,
     /// Section start type.
     pub sect_type: SectType,
+    /// Visible page borders.
+    pub page_borders: ParaBorders,
+    /// Vertical body alignment within page content area.
+    pub vertical_align: PageVAlign,
 }
 
 impl Default for SectPr {
@@ -716,9 +1229,24 @@ impl Default for SectPr {
             footer_refs: Vec::new(),
             title_pg: false,
             page_num_start: None,
+            page_num_fmt: "decimal".to_string(),
             sect_type: SectType::NextPage,
+            page_borders: ParaBorders::default(),
+            vertical_align: PageVAlign::Top,
         }
     }
+}
+
+/// Vertical section alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PageVAlign {
+    /// Begin at top margin.
+    #[default]
+    Top,
+    /// Center body vertically.
+    Center,
+    /// Align body bottom with bottom margin.
+    Bottom,
 }
 
 /// Page orientation.
@@ -758,6 +1286,8 @@ pub struct ColumnSpec {
     pub cols: Vec<f64>,
     /// Default spacing between columns, points.
     pub space_pt: Option<f64>,
+    /// Per-column trailing spacing for custom columns.
+    pub spaces: Vec<f64>,
 }
 
 impl ColumnSpec {
@@ -804,8 +1334,7 @@ pub enum SectType {
 
 /// Parses `word/document.xml` into a [`Document`].
 pub fn parse_document(xml: &str) -> Result<Document> {
-    let doc = roxmltree::Document::parse(xml)
-        .map_err(|e| OfficeError::Invalid(format!("document.xml XML: {e}")))?;
+    let doc = super::parse_xml(xml, "document.xml")?;
     let root = doc.root_element();
     let body = child(root, W, "body")
         .ok_or_else(|| OfficeError::Invalid("document.xml has no w:body".into()))?;
@@ -828,11 +1357,53 @@ pub fn parse_document(xml: &str) -> Result<Document> {
 
 /// Parses a header/footer part body into block content (same engine as the body).
 pub fn parse_hdr_ftr(xml: &str) -> Result<Vec<BlockContent>> {
-    let doc = roxmltree::Document::parse(xml)
-        .map_err(|e| OfficeError::Invalid(format!("header/footer XML: {e}")))?;
+    Ok(parse_hdr_ftr_with_flags(xml)?.0)
+}
+
+/// Parses header/footer content and returns its profile flags.
+pub fn parse_hdr_ftr_with_flags(xml: &str) -> Result<(Vec<BlockContent>, DocFlags)> {
+    let doc = super::parse_xml(xml, "header/footer")?;
     let root = doc.root_element(); // w:hdr or w:ftr
     let mut p = WmlParser::default();
-    p.block_level(root, "w:hdr/ftr")
+    let blocks = p.block_level(root, "w:hdr/ftr")?;
+    Ok((blocks, p.flags))
+}
+
+/// Parses `word/footnotes.xml` or `word/endnotes.xml`.
+pub fn parse_notes(xml: &str, kind: NoteKind) -> Result<NotesPart> {
+    let label = match kind {
+        NoteKind::Footnote => "footnotes.xml",
+        NoteKind::Endnote => "endnotes.xml",
+    };
+    let element = match kind {
+        NoteKind::Footnote => "footnote",
+        NoteKind::Endnote => "endnote",
+    };
+    let doc = super::parse_xml(xml, label)?;
+    let mut parser = WmlParser::default();
+    let mut part = NotesPart::default();
+    for node in children(doc.root_element()) {
+        if !is(node, W, element) {
+            if !wml_ignorable(node) {
+                return Err(unknown_child(label, node));
+            }
+            continue;
+        }
+        let Some(id) = parse_i64(attr(node, W, "id")) else {
+            continue;
+        };
+        let blocks = parser.block_level(node, element)?;
+        match id {
+            -1 => part.separator = blocks,
+            -2 => part.continuation_separator = blocks,
+            _ if id >= 0 => {
+                part.notes.insert(id, blocks);
+            }
+            _ => {}
+        }
+    }
+    part.flags = parser.flags;
+    Ok(part)
 }
 
 #[derive(Default)]
@@ -861,6 +1432,17 @@ impl WmlParser {
     ) -> Result<bool> {
         if is(node, W, "p") {
             out.push(BlockContent::Paragraph(self.paragraph(node)?));
+        } else if is(node, M, "oMathPara") {
+            out.push(BlockContent::Paragraph(Paragraph {
+                props: ParaProps {
+                    alignment: Some(Jc::Center),
+                    ..ParaProps::default()
+                },
+                runs: vec![InlineContent::Math(super::omml::MathContent::parse(
+                    node, true,
+                ))],
+                sect_break: None,
+            }));
         } else if is(node, W, "tbl") {
             out.push(BlockContent::Table(self.table(node)?));
         } else if is(node, W, "sdt") {
@@ -897,11 +1479,12 @@ impl WmlParser {
         let props = parse_para_props(ppr);
         let mut sect = None;
         for c in children(ppr) {
-            match c.tag_name().name() {
-                "framePr" => self.flags.text_box = true,
-                "sectPr" => sect = Some(self.sect_pr(c)?),
-                _ => {}
+            if c.tag_name().name() == "sectPr" {
+                sect = Some(self.sect_pr(c)?);
             }
+        }
+        if props.frame.is_some_and(|frame| frame.unsupported.is_some()) {
+            self.flags.text_box = true;
         }
         Ok((props, sect))
     }
@@ -943,6 +1526,11 @@ impl WmlParser {
                     instruction,
                     cached_runs,
                 }));
+            } else if is(node, M, "oMath") || is(node, M, "oMathPara") {
+                out.push(InlineContent::Math(super::omml::MathContent::parse(
+                    node,
+                    is(node, M, "oMathPara"),
+                )));
             } else if is(node, W, "ins") {
                 // Inserted tracked text: unwrap, render runs normally.
                 for r in children(node) {
@@ -958,6 +1546,8 @@ impl WmlParser {
                 for fb in alternate_content_fallback(node)? {
                     if is(fb, W, "r") {
                         self.run_into_field(fb, &mut field, &mut out)?;
+                    } else {
+                        return Err(unknown_child("mc:Fallback in w:p", fb));
                     }
                 }
             } else {
@@ -1028,53 +1618,209 @@ impl WmlParser {
                     "noBreakHyphen" => run.content.push(RunContent::Text("\u{2011}".into())),
                     "softHyphen" => {}
                     "drawing" => {
-                        let d = Drawing::parse_w_drawing(c);
-                        self.note_drawing(&d);
-                        run.content.push(RunContent::Drawing(d));
+                        let drawing = self.wml_drawing(c)?;
+                        self.note_drawing(&drawing);
+                        run.content.push(RunContent::Drawing(drawing));
                     }
                     "sym" => {
                         if let Some(sym) = parse_sym(c) {
                             run.content.push(sym);
                         }
                     }
-                    "footnoteReference" => self.flags.footnotes = true,
-                    "endnoteReference" => self.flags.endnotes = true,
-                    "object" => self.flags.ole_object = true,
-                    "pict" => self.flags.vml_pict = true,
-                    "ptab" | "lastRenderedPageBreak" | "fldChar" | "instrText" => {}
+                    "footnoteReference" => {
+                        if let Some(id) = parse_i64(attr(c, W, "id")) {
+                            run.content.push(RunContent::NoteReference {
+                                kind: NoteKind::Footnote,
+                                id,
+                            });
+                        }
+                    }
+                    "endnoteReference" => {
+                        if let Some(id) = parse_i64(attr(c, W, "id")) {
+                            run.content.push(RunContent::NoteReference {
+                                kind: NoteKind::Endnote,
+                                id,
+                            });
+                        }
+                    }
+                    // Marker inside the note body; flow emits a marker from the
+                    // owning note id so it always matches the in-text reference.
+                    "footnoteRef"
+                    | "endnoteRef"
+                    | "separator"
+                    | "continuationSeparator"
+                    | "continuationNotice" => {}
+                    "object" => {
+                        let previews = self.vml_shapes(c)?;
+                        let mut found_preview = false;
+                        for preview in previews {
+                            if preview.image_rel_id.is_some() {
+                                found_preview = true;
+                                run.content.push(RunContent::OlePreview(preview));
+                            }
+                        }
+                        if !found_preview {
+                            self.flags.ole_object = true;
+                        }
+                    }
+                    "pict" => {
+                        for shape in self.vml_shapes(c)? {
+                            run.content.push(RunContent::VmlShape(shape));
+                        }
+                    }
+                    "ptab" => {
+                        return Err(OfficeError::unsupported(
+                            crate::UnsupportedCode::UnknownElement,
+                            "w:ptab",
+                        ));
+                    }
+                    "lastRenderedPageBreak" | "fldChar" | "instrText" => {}
                     _ if wml_ignorable(c) => {}
                     _ => return Err(unknown_child("w:r", c)),
                 }
             } else if ns == Some(M) && (name == "oMath" || name == "oMathPara") {
-                self.flags.equation = true;
+                run.content
+                    .push(RunContent::Math(super::omml::MathContent::parse(
+                        c,
+                        name == "oMathPara",
+                    )));
             } else if ns == Some(VML) {
                 self.flags.vml_pict = true;
             } else if ns == Some(MC) && name == "AlternateContent" {
                 for fb in alternate_content_fallback(c)? {
                     if is(fb, W, "drawing") {
-                        let d = Drawing::parse_w_drawing(fb);
-                        self.note_drawing(&d);
-                        run.content.push(RunContent::Drawing(d));
+                        let drawing = self.wml_drawing(fb)?;
+                        self.note_drawing(&drawing);
+                        run.content.push(RunContent::Drawing(drawing));
+                    } else if is(fb, W, "pict") {
+                        for shape in self.vml_shapes(fb)? {
+                            run.content.push(RunContent::VmlShape(shape));
+                        }
+                    } else {
+                        return Err(unknown_child("mc:Fallback", fb));
                     }
                 }
+            } else if !wml_ignorable(c) {
+                return Err(unknown_child("w:r", c));
             }
-            // Unknown non-W run children are tolerated (extension content).
         }
         Ok(run)
     }
 
-    fn note_drawing(&mut self, d: &Drawing) {
-        if d.kind == dml::DrawingKind::Anchor {
-            self.flags.anchored_drawing = true;
+    fn note_drawing(&mut self, d: &WmlDrawing) {
+        if d.wordart_warp.is_some() {
+            self.flags.wordart_warp = true;
         }
-        if d.cropped {
-            self.flags.image_crop = true;
-        }
-        match d.graphic_uri.as_deref() {
+        match d.drawing.graphic_uri.as_deref() {
             Some(dml::URI_CHART) => self.flags.chart = true,
             Some(dml::URI_DIAGRAM) => self.flags.smart_art = true,
             _ => {}
         }
+    }
+
+    fn wml_drawing(&mut self, node: Node) -> Result<WmlDrawing> {
+        let drawing = Drawing::parse_w_drawing(node);
+        let container = node.descendants().find(|candidate| {
+            candidate.tag_name().namespace() == Some(super::WP)
+                && matches!(candidate.tag_name().name(), "inline" | "anchor")
+        });
+        let parsed_anchor = container
+            .filter(|candidate| candidate.tag_name().name() == "anchor")
+            .map(parse_anchor);
+        let anchor = parsed_anchor.as_ref().map(|parsed| parsed.props);
+        let anchor_violations = parsed_anchor
+            .map(|parsed| parsed.violations)
+            .unwrap_or_default();
+        let crop = node
+            .descendants()
+            .find(|candidate| is(*candidate, super::A, "srcRect"))
+            .map(parse_crop);
+        let text_box = node
+            .descendants()
+            .find(|candidate| is(*candidate, W, "txbxContent"))
+            .map(|content| {
+                let blocks = self.block_level(content, "w:txbxContent")?;
+                let (width_pt, height_pt) = drawing.extent_pt.unwrap_or((144.0, 72.0));
+                Ok(TextBox {
+                    width_pt,
+                    height_pt,
+                    fill: drawing_fill(node),
+                    outline: drawing_outline(node),
+                    content: blocks,
+                })
+            })
+            .transpose()?;
+        let wordart_warp = node
+            .descendants()
+            .find(|candidate| is(*candidate, super::A, "prstTxWarp"))
+            .and_then(|warp| attr(warp, super::A, "prst"))
+            .filter(|preset| *preset != "none")
+            .map(str::to_string);
+        if text_box.is_none()
+            && drawing.blip_rel_id.is_none()
+            && !matches!(
+                drawing.graphic_uri.as_deref(),
+                Some(dml::URI_CHART | dml::URI_DIAGRAM)
+            )
+        {
+            self.flags.visible_unsupported.push(format!(
+                "a:graphicData:{}",
+                drawing.graphic_uri.as_deref().unwrap_or("missing-uri")
+            ));
+        }
+        Ok(WmlDrawing {
+            drawing,
+            anchor,
+            anchor_violations,
+            crop,
+            text_box,
+            wordart_warp,
+        })
+    }
+
+    fn vml_shapes(&mut self, pict: Node) -> Result<Vec<VmlShape>> {
+        let mut shapes = Vec::new();
+        for node in children(pict).filter(|node| node.tag_name().namespace() == Some(VML)) {
+            let kind = node.tag_name().name();
+            if !matches!(kind, "rect" | "oval" | "line" | "shape") {
+                return Err(OfficeError::unsupported(
+                    crate::UnsupportedCode::UnknownElement,
+                    format!("v:{kind}"),
+                ));
+            }
+            let style = attr(node, VML, "style")
+                .or_else(|| node.attribute("style"))
+                .unwrap_or_default();
+            let get = |name: &str| vml_style_pt(style, name).unwrap_or(0.0);
+            let text_box = node
+                .descendants()
+                .find(|candidate| is(*candidate, W, "txbxContent"))
+                .map(|content| self.block_level(content, "w:txbxContent"))
+                .transpose()?
+                .unwrap_or_default();
+            let image_rel_id = node
+                .descendants()
+                .find(|candidate| is(*candidate, VML, "imagedata"))
+                .and_then(|image| attr(image, R, "id"))
+                .map(str::to_string);
+            shapes.push(VmlShape {
+                kind: kind.to_string(),
+                x_pt: get("left"),
+                y_pt: get("top"),
+                width_pt: get("width").max(1.0),
+                height_pt: get("height").max(1.0),
+                fill: node
+                    .attribute("fillcolor")
+                    .and_then(|value| Rgb::from_hex(value.trim_start_matches('#'))),
+                outline: node
+                    .attribute("strokecolor")
+                    .and_then(|value| Rgb::from_hex(value.trim_start_matches('#'))),
+                image_rel_id,
+                text_box,
+                path: node.attribute("path").map(str::to_string),
+            });
+        }
+        Ok(shapes)
     }
 
     fn table(&mut self, node: Node) -> Result<Table> {
@@ -1082,7 +1828,7 @@ impl WmlParser {
         for c in children(node) {
             let name = c.tag_name().name();
             match name {
-                "tblPr" => table.props = self.tbl_props(c),
+                "tblPr" => table.props = parse_tbl_props(c),
                 "tblGrid" => {
                     for gc in children(c) {
                         if is(gc, W, "gridCol") {
@@ -1102,33 +1848,13 @@ impl WmlParser {
                     }
                 }
                 _ if wml_ignorable(c) => {}
-                _ => {}
+                _ => self
+                    .flags
+                    .visible_unsupported
+                    .push(format!("w:{} in w:tbl", c.tag_name().name())),
             }
         }
         Ok(table)
-    }
-
-    fn tbl_props(&mut self, node: Node) -> TblProps {
-        let mut props = TblProps::default();
-        for c in children(node) {
-            match c.tag_name().name() {
-                "tblW" => props.width = Some(TblWidth::parse(attr(c, W, "w"), attr(c, W, "type"))),
-                "jc" => props.alignment = attr(c, W, "val").and_then(Jc::parse),
-                "tblBorders" => props.borders = parse_tbl_borders(c),
-                "tblCellMar" => props.cell_margins = parse_cell_margins(c),
-                "tblLayout" => props.layout_fixed = attr(c, W, "type") == Some("fixed"),
-                "tblStyle" => props.style_id = attr(c, W, "val").map(str::to_string),
-                "tblInd" => {
-                    props.indent_pt = match TblWidth::parse(attr(c, W, "w"), attr(c, W, "type")) {
-                        TblWidth::Pt(v) => Some(v),
-                        _ => None,
-                    }
-                }
-                "tblpPr" => self.flags.floating_table = true,
-                _ => {}
-            }
-        }
-        props
     }
 
     fn row(&mut self, node: Node) -> Result<Row> {
@@ -1147,9 +1873,12 @@ impl WmlParser {
                         }
                     }
                 }
-                "tblPrEx" => {} // row-level table property exceptions — tolerated v1
+                "tblPrEx" => self.flags.visible_unsupported.push("w:tblPrEx".to_string()),
                 _ if wml_ignorable(c) => {}
-                _ => {}
+                _ => self
+                    .flags
+                    .visible_unsupported
+                    .push(format!("w:{} in w:tr", c.tag_name().name())),
             }
         }
         Ok(row)
@@ -1179,39 +1908,124 @@ impl WmlParser {
                     if let Some(h) = parse_i64(attr(c, W, "h")) {
                         sect.page_h_pt = twip_to_pt(h);
                     }
-                    if attr(c, W, "orient") == Some("landscape") {
-                        sect.orientation = Orientation::Landscape;
+                    match attr(c, W, "orient") {
+                        None | Some("portrait") => {}
+                        Some("landscape") => sect.orientation = Orientation::Landscape,
+                        Some(value) => self
+                            .flags
+                            .visible_unsupported
+                            .push(format!("w:pgSz@orient:{value}")),
                     }
                 }
                 "pgMar" => sect.margins = parse_margins(c),
-                "cols" => sect.cols = parse_cols(c),
+                "cols" => {
+                    if attr(c, W, "sep").is_some_and(|value| on_off(Some(value))) {
+                        self.flags
+                            .visible_unsupported
+                            .push("w:cols@sep".to_string());
+                    }
+                    sect.cols = parse_cols(c);
+                }
                 "headerReference" => {
+                    if !matches!(
+                        attr(c, W, "type"),
+                        None | Some("default" | "first" | "even")
+                    ) {
+                        self.flags.visible_unsupported.push(format!(
+                            "w:headerReference@type:{}",
+                            attr(c, W, "type").unwrap_or_default()
+                        ));
+                    }
                     if let Some(hr) = parse_hdr_ftr_ref(c) {
                         sect.header_refs.push(hr);
+                    } else {
+                        self.flags
+                            .visible_unsupported
+                            .push("w:headerReference missing r:id".to_string());
                     }
                 }
                 "footerReference" => {
+                    if !matches!(
+                        attr(c, W, "type"),
+                        None | Some("default" | "first" | "even")
+                    ) {
+                        self.flags.visible_unsupported.push(format!(
+                            "w:footerReference@type:{}",
+                            attr(c, W, "type").unwrap_or_default()
+                        ));
+                    }
                     if let Some(fr) = parse_hdr_ftr_ref(c) {
                         sect.footer_refs.push(fr);
+                    } else {
+                        self.flags
+                            .visible_unsupported
+                            .push("w:footerReference missing r:id".to_string());
                     }
                 }
                 "titlePg" => sect.title_pg = toggle_child(c),
                 "pgNumType" => {
-                    sect.page_num_start = parse_i64(attr(c, W, "start")).map(|v| v.max(0) as u32)
+                    sect.page_num_start = parse_i64(attr(c, W, "start")).map(|v| v.max(0) as u32);
+                    if let Some(format) = attr(c, W, "fmt") {
+                        sect.page_num_fmt = format.to_string();
+                    }
+                    if attr(c, W, "chapStyle").is_some() || attr(c, W, "chapSep").is_some() {
+                        self.flags
+                            .visible_unsupported
+                            .push("w:pgNumType chapter numbering".to_string());
+                    }
                 }
                 "type" => {
                     sect.sect_type = match attr(c, W, "val") {
+                        None | Some("nextPage") => SectType::NextPage,
                         Some("continuous") => SectType::Continuous,
                         Some("oddPage") => SectType::OddPage,
                         Some("evenPage") => SectType::EvenPage,
-                        _ => SectType::NextPage,
+                        Some(value) => {
+                            self.flags
+                                .visible_unsupported
+                                .push(format!("w:type@val:{value} in w:sectPr"));
+                            SectType::NextPage
+                        }
                     }
                 }
-                _ => {}
+                "pgBorders" => sect.page_borders = parse_para_borders(c),
+                "vAlign" => {
+                    sect.vertical_align = match attr(c, W, "val") {
+                        None | Some("top") => PageVAlign::Top,
+                        Some("center") => PageVAlign::Center,
+                        Some("bottom") => PageVAlign::Bottom,
+                        Some(value) => {
+                            self.flags
+                                .visible_unsupported
+                                .push(format!("w:vAlign@val:{value} in w:sectPr"));
+                            PageVAlign::Top
+                        }
+                    }
+                }
+                // A document grid only constrains layout when a grid type is
+                // selected. `w:type` defaults to `default` — no grid — which is
+                // what Word stamps on nearly every section, so the East-Asian
+                // grid types are the only ones that change the painted view.
+                "docGrid" => match attr(c, W, "type") {
+                    None | Some("default") => {}
+                    Some(value) => self
+                        .flags
+                        .visible_unsupported
+                        .push(format!("w:docGrid@type:{value}")),
+                },
+                "lnNumType" | "textDirection" | "bidi" | "rtlGutter" | "footnotePr"
+                | "endnotePr" | "noEndnote" | "footnoteColumns" => self
+                    .flags
+                    .visible_unsupported
+                    .push(format!("w:{}", c.tag_name().name())),
+                // Print-driver ids, protection metadata, and superseded
+                // revision properties have no painted effect.
+                "paperSrc" | "printerSettings" | "sectPrChange" | "formProt" => {}
+                _ => self
+                    .flags
+                    .visible_unsupported
+                    .push(format!("w:{} in w:sectPr", c.tag_name().name())),
             }
-        }
-        if sect.cols.is_multi() {
-            self.flags.multi_column = true;
         }
         Ok(sect)
     }
@@ -1238,6 +2052,343 @@ impl FieldBuild {
 
 fn toggle_child(node: Node) -> bool {
     on_off(attr(node, W, "val"))
+}
+
+struct ParsedAnchor {
+    props: AnchorProps,
+    violations: Vec<String>,
+}
+
+fn parse_anchor(node: Node) -> ParsedAnchor {
+    let mut violations = Vec::new();
+    let mut reject = |detail: &str| {
+        if !violations.iter().any(|value| value == detail) {
+            violations.push(detail.to_string());
+        }
+    };
+    let direct_children = |name: &str| {
+        children(node)
+            .filter(|child| {
+                child.tag_name().namespace() == Some(super::WP) && child.tag_name().name() == name
+            })
+            .collect::<Vec<_>>()
+    };
+    let simple_nodes = direct_children("simplePos");
+    let horizontal_nodes = direct_children("positionH");
+    let vertical_nodes = direct_children("positionV");
+    if simple_nodes.len() != 1 {
+        reject("wp:anchor must contain exactly one wp:simplePos child");
+    }
+    if horizontal_nodes.len() != 1 {
+        reject("wp:anchor must contain exactly one wp:positionH child");
+    }
+    if vertical_nodes.len() != 1 {
+        reject("wp:anchor must contain exactly one wp:positionV child");
+    }
+    let simple = simple_nodes.first().copied();
+    let horizontal = horizontal_nodes.first().copied();
+    let vertical = vertical_nodes.first().copied();
+    let strict_on_off = |value: Option<&str>| match value {
+        Some("1" | "true") => Some(true),
+        Some("0" | "false") => Some(false),
+        _ => None,
+    };
+    let use_simple_position = strict_on_off(node.attribute("simplePos")).unwrap_or_else(|| {
+        reject("wp:anchor has invalid or missing simplePos");
+        false
+    });
+    if use_simple_position {
+        reject("wp:anchor simplePos=true is outside the supported positioning subset");
+    }
+    match node
+        .attribute("allowOverlap")
+        .and_then(|value| strict_on_off(Some(value)))
+    {
+        Some(true) => {}
+        Some(false) => reject("wp:anchor allowOverlap=false is outside the supported subset"),
+        None => reject("wp:anchor has invalid or missing allowOverlap"),
+    }
+    match node.attribute("hidden") {
+        None | Some("0" | "false") => {}
+        Some("1" | "true") => reject("wp:anchor hidden=true is outside the visible subset"),
+        Some(_) => reject("wp:anchor has invalid hidden"),
+    }
+    if simple.is_none()
+        || simple.is_some_and(|value| {
+            parse_i64(value.attribute("x")).is_none() || parse_i64(value.attribute("y")).is_none()
+        })
+    {
+        reject("wp:anchor has an invalid or missing wp:simplePos child");
+    }
+
+    let parse_position =
+        |position: Option<Node>, horizontal_axis: bool, reject: &mut dyn FnMut(&str)| {
+            let axis = if horizontal_axis {
+                "horizontal"
+            } else {
+                "vertical"
+            };
+            let Some(position) = position else {
+                reject(if horizontal_axis {
+                    "wp:anchor is missing wp:positionH"
+                } else {
+                    "wp:anchor is missing wp:positionV"
+                });
+                return (0.0, None);
+            };
+            let offsets: Vec<_> = children(position)
+                .filter(|child| {
+                    child.tag_name().namespace() == Some(super::WP)
+                        && child.tag_name().name() == "posOffset"
+                })
+                .collect();
+            let aligns: Vec<_> = children(position)
+                .filter(|child| {
+                    child.tag_name().namespace() == Some(super::WP)
+                        && child.tag_name().name() == "align"
+                })
+                .collect();
+            if offsets.len() + aligns.len() != 1 {
+                reject(if horizontal_axis {
+                    "wp:positionH must contain exactly one align or posOffset"
+                } else {
+                    "wp:positionV must contain exactly one posOffset"
+                });
+            }
+            let offset = offsets
+                .first()
+                .and_then(|value| value.text())
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .map(emu_to_pt);
+            if !offsets.is_empty() && offset.is_none() {
+                reject(if horizontal_axis {
+                    "wp:positionH has an invalid posOffset"
+                } else {
+                    "wp:positionV has an invalid posOffset"
+                });
+            }
+            let align = aligns.first().and_then(|value| match value.text() {
+                Some(value) => match (horizontal_axis, value.trim()) {
+                    (true, "left") => Some(FrameAlign::Start),
+                    (true, "center") => Some(FrameAlign::Center),
+                    (true, "right") => Some(FrameAlign::End),
+                    _ => {
+                        reject(if horizontal_axis {
+                            "wp:positionH has an unsupported alignment"
+                        } else {
+                            "wp:positionV alignment is outside the supported subset"
+                        });
+                        None
+                    }
+                },
+                None => {
+                    reject(if horizontal_axis {
+                        "wp:positionH has an empty alignment"
+                    } else {
+                        "wp:positionV has an empty alignment"
+                    });
+                    None
+                }
+            });
+            if !horizontal_axis && !aligns.is_empty() {
+                reject("wp:positionV alignment is outside the supported subset");
+            }
+            let _ = axis;
+            (offset.unwrap_or(0.0), align)
+        };
+
+    let (x_pt, x_align) = parse_position(horizontal, true, &mut reject);
+    let (y_pt, y_align) = parse_position(vertical, false, &mut reject);
+    if horizontal.and_then(|value| value.attribute("relativeFrom")) != Some("margin") {
+        reject("wp:positionH relativeFrom is outside the supported margin subset");
+    }
+    if vertical.and_then(|value| value.attribute("relativeFrom")) != Some("paragraph") {
+        reject("wp:positionV relativeFrom is outside the supported paragraph subset");
+    }
+
+    let wraps: Vec<_> = children(node)
+        .filter(|child| {
+            child.tag_name().namespace() == Some(super::WP)
+                && child.tag_name().name().starts_with("wrap")
+        })
+        .collect();
+    if wraps.len() != 1 {
+        reject("wp:anchor must contain exactly one wrapping mode");
+    }
+    let wrap_node = wraps.first().copied();
+    let wrap = match wrap_node.map(|value| value.tag_name().name()) {
+        Some("wrapNone") => WrapMode::None,
+        Some("wrapTopAndBottom") => WrapMode::TopAndBottom,
+        Some("wrapSquare") => {
+            match wrap_node.and_then(|value| value.attribute("wrapText")) {
+                Some("largest") => {}
+                Some("bothSides")
+                    if matches!(x_align, Some(FrameAlign::Start | FrameAlign::End)) => {}
+                _ => reject("wp:wrapSquare wrapText/position is outside the rendered subset"),
+            }
+            WrapMode::Square
+        }
+        Some("wrapTight") => {
+            match wrap_node.and_then(|value| value.attribute("wrapText")) {
+                Some("largest") => {}
+                Some("bothSides")
+                    if matches!(x_align, Some(FrameAlign::Start | FrameAlign::End)) => {}
+                _ => reject("wp:wrapTight wrapText/position is outside the rendered subset"),
+            }
+            if !wrap_node.is_some_and(tight_polygon_is_full_rectangle) {
+                reject("wp:wrapTight requires one canonical full-image rectangular wrapPolygon");
+            }
+            WrapMode::Tight
+        }
+        Some("wrapThrough") => {
+            reject("wp:wrapThrough is outside the supported wrapping subset");
+            WrapMode::None
+        }
+        Some(_) | None => {
+            reject("wp:anchor has an unsupported wrapping mode");
+            WrapMode::None
+        }
+    };
+
+    let distances_pt =
+        ["distT", "distB", "distL", "distR"].map(|name| match node.attribute(name) {
+            None => 0.0,
+            Some(value) => match value.trim().parse::<u64>() {
+                Ok(value) if value <= i64::MAX as u64 => emu_to_pt(value as i64),
+                _ => {
+                    reject("wp:anchor has an invalid wrap distance");
+                    0.0
+                }
+            },
+        });
+    let behind_doc = strict_on_off(node.attribute("behindDoc")).unwrap_or_else(|| {
+        reject("wp:anchor has invalid or missing behindDoc");
+        false
+    });
+    let relative_height = node
+        .attribute("relativeHeight")
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or_else(|| {
+            reject("wp:anchor has invalid or missing relativeHeight");
+            0
+        });
+    for value in node
+        .descendants()
+        .filter(|child| matches!(child.tag_name().name(), "pctWidth" | "pctHeight"))
+    {
+        if value
+            .text()
+            .and_then(|text| text.trim().parse::<i64>().ok())
+            != Some(0)
+        {
+            reject("relative-size wp14 anchor extensions are outside the supported subset");
+        }
+    }
+
+    ParsedAnchor {
+        props: AnchorProps {
+            x_pt,
+            x_align,
+            y_pt,
+            y_align,
+            relative_from_h: AnchorOrigin::Margin,
+            relative_from_v: AnchorOrigin::Paragraph,
+            wrap,
+            distances_pt,
+            behind_doc,
+            relative_height,
+        },
+        violations,
+    }
+}
+
+fn tight_polygon_is_full_rectangle(node: Node) -> bool {
+    let polygons: Vec<_> = children(node)
+        .filter(|child| {
+            child.tag_name().namespace() == Some(super::WP)
+                && child.tag_name().name() == "wrapPolygon"
+        })
+        .collect();
+    let [polygon] = polygons.as_slice() else {
+        return false;
+    };
+    let point_nodes: Vec<_> = children(*polygon)
+        .filter(|child| matches!(child.tag_name().name(), "start" | "lineTo"))
+        .collect();
+    if point_nodes.len() != 5 {
+        return false;
+    }
+    let Some(points) = point_nodes
+        .into_iter()
+        .map(|child| {
+            Some((
+                parse_i64(child.attribute("x"))?,
+                parse_i64(child.attribute("y"))?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if points.first() != points.last() {
+        return false;
+    }
+    let corners = [(0, 0), (0, 21_600), (21_600, 0), (21_600, 21_600)];
+    corners.iter().all(|corner| points[..4].contains(corner))
+        && points[..4].iter().all(|point| corners.contains(point))
+        && points
+            .windows(2)
+            .all(|edge| edge[0].0 == edge[1].0 || edge[0].1 == edge[1].1)
+}
+
+fn parse_crop(node: Node) -> [f64; 4] {
+    let side = |name: &str| match node.attribute(name) {
+        Some(value) => value
+            .parse::<f64>()
+            .map(|value| value / 100_000.0)
+            .unwrap_or(f64::NAN),
+        None => 0.0,
+    };
+    [side("l"), side("t"), side("r"), side("b")]
+}
+
+fn drawing_fill(node: Node) -> Option<Rgb> {
+    node.descendants()
+        .find(|candidate| is(*candidate, super::A, "solidFill"))
+        .and_then(|fill| {
+            fill.descendants()
+                .find(|candidate| is(*candidate, super::A, "srgbClr"))
+        })
+        .and_then(|color| color.attribute("val"))
+        .and_then(Rgb::from_hex)
+}
+
+fn drawing_outline(node: Node) -> Option<Rgb> {
+    node.descendants()
+        .find(|candidate| is(*candidate, super::A, "ln"))
+        .and_then(|line| {
+            line.descendants()
+                .find(|candidate| is(*candidate, super::A, "srgbClr"))
+        })
+        .and_then(|color| color.attribute("val"))
+        .and_then(Rgb::from_hex)
+}
+
+fn vml_style_pt(style: &str, name: &str) -> Option<f64> {
+    let value = style.split(';').find_map(|entry| {
+        let (key, value) = entry.split_once(':')?;
+        (key.trim() == name).then_some(value.trim())
+    })?;
+    for (suffix, scale) in [("pt", 1.0), ("in", 72.0), ("cm", 72.0 / 2.54)] {
+        if let Some(number) = value.strip_suffix(suffix) {
+            return number
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|number| number * scale);
+        }
+    }
+    value.parse().ok()
 }
 
 fn parse_break(node: Node) -> BreakKind {
@@ -1332,15 +2483,41 @@ fn parse_shd_fill(node: Node) -> Option<Rgb> {
 }
 
 fn parse_border(node: Node) -> Border {
+    let val = attr(node, W, "val");
+    let size = attr(node, W, "sz").and_then(|value| value.parse::<i64>().ok());
+    let space = attr(node, W, "space").and_then(|value| value.parse::<i64>().ok());
+    let color_attr = attr(node, W, "color");
+    let color = color_attr.and_then(|value| match value {
+        "auto" => Some(Rgb::new(0, 0, 0)),
+        value => Rgb::from_hex(value),
+    });
+    let theme_color = attr(node, W, "themeColor").map(str::to_string);
+    let unsupported = if matches!(val, Some("nil" | "none")) {
+        None
+    } else if val.is_none() {
+        Some("paragraph border is missing w:val")
+    } else if !size.is_some_and(|value| (2..=96).contains(&value)) {
+        Some("paragraph border has invalid or missing w:sz")
+    } else if !space.is_some_and(|value| (0..=31).contains(&value)) {
+        Some("paragraph border has invalid or missing w:space")
+    } else if color.is_none() && theme_color.is_none() {
+        Some("paragraph border has invalid or missing color")
+    } else if attr(node, W, "themeTint").is_some() || attr(node, W, "themeShade").is_some() {
+        Some("paragraph border theme tint/shade is outside the rendered subset")
+    } else if attr(node, W, "shadow").is_some_and(|value| !matches!(value, "0" | "false")) {
+        Some("paragraph border shadow is outside the rendered subset")
+    } else if attr(node, W, "frame").is_some_and(|value| !matches!(value, "0" | "false")) {
+        Some("paragraph border frame is outside the rendered subset")
+    } else {
+        None
+    };
     Border {
-        val: attr(node, W, "val").unwrap_or("single").to_string(),
-        size_pt: parse_i64(attr(node, W, "sz"))
-            .map(eighth_point_to_pt)
-            .unwrap_or(0.5),
-        color: attr(node, W, "color").and_then(Rgb::from_hex),
-        space_pt: parse_i64(attr(node, W, "space"))
-            .map(|v| v as f64)
-            .unwrap_or(0.0),
+        val: val.unwrap_or_default().to_string(),
+        size_pt: size.map(eighth_point_to_pt).unwrap_or(0.0),
+        color,
+        theme_color,
+        space_pt: space.map(|value| value as f64).unwrap_or(0.0),
+        unsupported,
     }
 }
 
@@ -1395,27 +2572,153 @@ fn parse_cell_margins(node: Node) -> CellMargins {
     m
 }
 
-fn parse_row_props(node: Node) -> RowProps {
-    let mut props = RowProps::default();
+/// Parses `w:tblPr` — both the table's direct properties and the `w:tblPr` of a
+/// table style in `word/styles.xml`.
+pub fn parse_tbl_props(node: Node) -> TblProps {
+    let mut props = TblProps::default();
     for c in children(node) {
         match c.tag_name().name() {
-            "trHeight" => {
-                if let Some(h) = parse_i64(attr(c, W, "val")).map(twip_to_pt) {
-                    props.height = Some(match attr(c, W, "hRule") {
-                        Some("exact") => RowHeight::Exact(h),
-                        _ => RowHeight::AtLeast(h),
-                    });
+            "tblW" => props.width = Some(TblWidth::parse(attr(c, W, "w"), attr(c, W, "type"))),
+            "jc" => match attr(c, W, "val").and_then(Jc::parse) {
+                Some(alignment @ (Jc::Start | Jc::Center | Jc::End)) => {
+                    props.alignment = Some(alignment)
+                }
+                _ => props.visible_unsupported.push(format!(
+                    "w:jc@val:{} in w:tblPr",
+                    attr(c, W, "val").unwrap_or("missing")
+                )),
+            },
+            "tblBorders" => {
+                if children(c).any(|edge| matches!(edge.tag_name().name(), "tl2br" | "tr2bl")) {
+                    props
+                        .visible_unsupported
+                        .push("diagonal table border".to_string());
+                }
+                props.borders = parse_tbl_borders(c);
+            }
+            "tblCellMar" => props.cell_margins = parse_cell_margins(c),
+            "tblLayout" => match attr(c, W, "type") {
+                None | Some("auto") => props.layout_fixed = false,
+                Some("fixed") => props.layout_fixed = true,
+                Some(value) => props
+                    .visible_unsupported
+                    .push(format!("w:tblLayout@type:{value}")),
+            },
+            "tblStyle" => props.style_id = attr(c, W, "val").map(str::to_string),
+            "tblLook" => props.look = TblLook::parse(c),
+            "tblStyleRowBandSize" => {
+                props.row_band_size = parse_i64(attr(c, W, "val")).map(|v| v.max(1) as u32)
+            }
+            "tblStyleColBandSize" => {
+                props.col_band_size = parse_i64(attr(c, W, "val")).map(|v| v.max(1) as u32)
+            }
+            "tblInd" => {
+                props.indent_pt = match TblWidth::parse(attr(c, W, "w"), attr(c, W, "type")) {
+                    TblWidth::Pt(v) => Some(v),
+                    _ => {
+                        props
+                            .visible_unsupported
+                            .push("w:tblInd without dxa width".to_string());
+                        None
+                    }
                 }
             }
-            "tblHeader" => props.header = toggle_child(c),
-            "cantSplit" => props.cant_split = toggle_child(c),
-            _ => {}
+            "tblpPr" => {
+                let origin = |value: Option<&str>| match value {
+                    Some("page") => AnchorOrigin::Page,
+                    Some("margin") => AnchorOrigin::Margin,
+                    _ => AnchorOrigin::Paragraph,
+                };
+                props.floating = Some(FloatingTableProps {
+                    x_pt: parse_i64(attr(c, W, "tblpX"))
+                        .map(twip_to_pt)
+                        .unwrap_or(0.0),
+                    y_pt: parse_i64(attr(c, W, "tblpY"))
+                        .map(twip_to_pt)
+                        .unwrap_or(0.0),
+                    horizontal: origin(attr(c, W, "horzAnchor")),
+                    vertical: origin(attr(c, W, "vertAnchor")),
+                    wrap_padding_pt: parse_i64(attr(c, W, "leftFromText"))
+                        .map(twip_to_pt)
+                        .unwrap_or(0.0)
+                        .max(
+                            parse_i64(attr(c, W, "rightFromText"))
+                                .map(twip_to_pt)
+                                .unwrap_or(0.0),
+                        ),
+                });
+            }
+            "shd" | "bidiVisual" | "tblOverlap" | "tblCellSpacing" => props
+                .visible_unsupported
+                .push(format!("w:{}", c.tag_name().name())),
+            // Accessibility/description metadata has no painted effect.
+            "tblCaption" | "tblDescription" => {}
+            // Revision history stores superseded properties; current
+            // properties already describe the painted final view.
+            "tblPrChange" => {}
+            _ => props
+                .visible_unsupported
+                .push(format!("w:{} in w:tblPr", c.tag_name().name())),
         }
     }
     props
 }
 
-fn parse_cell_props(node: Node) -> CellProps {
+/// Parses `w:trPr` — a row's direct properties or a table style's row block.
+pub fn parse_row_props(node: Node) -> RowProps {
+    let mut props = RowProps::default();
+    for c in children(node) {
+        match c.tag_name().name() {
+            "gridBefore" => {
+                props.grid_before = parse_i64(attr(c, W, "val")).unwrap_or(0).max(0) as u32
+            }
+            "gridAfter" => {
+                props.grid_after = parse_i64(attr(c, W, "val")).unwrap_or(0).max(0) as u32
+            }
+            "wBefore" => {
+                props.width_before = Some(TblWidth::parse(attr(c, W, "w"), attr(c, W, "type")))
+            }
+            "wAfter" => {
+                props.width_after = Some(TblWidth::parse(attr(c, W, "w"), attr(c, W, "type")))
+            }
+            "trHeight" => {
+                let height = parse_i64(attr(c, W, "val")).map(twip_to_pt);
+                match (attr(c, W, "hRule"), height) {
+                    (Some("auto"), _) => props.height = None,
+                    (None | Some("atLeast"), Some(height)) => {
+                        props.height = Some(RowHeight::AtLeast(height))
+                    }
+                    (Some("exact"), Some(height)) => props.height = Some(RowHeight::Exact(height)),
+                    (_, None) => props
+                        .visible_unsupported
+                        .push("w:trHeight missing valid w:val".to_string()),
+                    (Some(value), Some(_)) => props
+                        .visible_unsupported
+                        .push(format!("w:trHeight@hRule:{value}")),
+                }
+            }
+            "tblHeader" => props.header = toggle_child(c),
+            "cantSplit" => props.cant_split = toggle_child(c),
+            "hidden" => props.hidden = toggle_child(c),
+            "tblCellSpacing" | "jc" | "ins" | "del" => props
+                .visible_unsupported
+                .push(format!("w:{} in w:trPr", c.tag_name().name())),
+            // `divId` is a content-structure id. `trPrChange` stores superseded
+            // row properties. `cnfStyle` caches which conditional slots of the
+            // table style Word decided this row falls into — the same decision
+            // `super::table_style` recomputes from the table's position grid,
+            // and it carries no formatting of its own. None paint independently.
+            "divId" | "trPrChange" | "cnfStyle" => {}
+            _ => props
+                .visible_unsupported
+                .push(format!("w:{} in w:trPr", c.tag_name().name())),
+        }
+    }
+    props
+}
+
+/// Parses `w:tcPr` — a cell's direct properties or a table style's cell block.
+pub fn parse_cell_props(node: Node) -> CellProps {
     let mut props = CellProps {
         grid_span: 1,
         ..Default::default()
@@ -1430,17 +2733,35 @@ fn parse_cell_props(node: Node) -> CellProps {
                     _ => VMerge::Continue,
                 })
             }
-            "tcBorders" => props.borders = parse_tbl_borders(c),
+            "tcBorders" => {
+                if children(c).any(|edge| matches!(edge.tag_name().name(), "tl2br" | "tr2bl")) {
+                    props
+                        .visible_unsupported
+                        .push("diagonal cell border".to_string());
+                }
+                props.borders = parse_tbl_borders(c);
+            }
             "shd" => props.shading = parse_shd_fill(c),
             "tcMar" => props.margins = parse_cell_margins(c),
-            "vAlign" => {
-                props.v_align = match attr(c, W, "val") {
-                    Some("center") => VAlign::Center,
-                    Some("bottom") => VAlign::Bottom,
-                    _ => VAlign::Top,
-                }
-            }
-            _ => {}
+            "vAlign" => match attr(c, W, "val") {
+                None | Some("top") => props.v_align = VAlign::Top,
+                Some("center") => props.v_align = VAlign::Center,
+                Some("bottom") => props.v_align = VAlign::Bottom,
+                Some(value) => props
+                    .visible_unsupported
+                    .push(format!("w:vAlign@val:{value} in w:tcPr")),
+            },
+            "hMerge" | "textDirection" | "noWrap" | "tcFitText" | "hideMark" | "cellIns"
+            | "cellDel" | "cellMerge" => props
+                .visible_unsupported
+                .push(format!("w:{} in w:tcPr", c.tag_name().name())),
+            // Revision history stores superseded properties; current `tcPr`
+            // already describes the painted final view. `cnfStyle` only caches
+            // the conditional slots `super::table_style` recomputes positionally.
+            "tcPrChange" | "cnfStyle" => {}
+            _ => props
+                .visible_unsupported
+                .push(format!("w:{} in w:tcPr", c.tag_name().name())),
         }
     }
     props
@@ -1463,17 +2784,25 @@ fn parse_cols(node: Node) -> ColumnSpec {
     let num = parse_i64(attr(node, W, "num")).unwrap_or(1).max(0) as u32;
     let space_pt = parse_i64(attr(node, W, "space")).map(twip_to_pt);
     let mut cols = Vec::new();
+    let mut spaces = Vec::new();
     for c in children(node) {
         if is(c, W, "col")
             && let Some(w) = parse_i64(attr(c, W, "w"))
         {
             cols.push(twip_to_pt(w));
+            spaces.push(
+                parse_i64(attr(c, W, "space"))
+                    .map(twip_to_pt)
+                    .or(space_pt)
+                    .unwrap_or(36.0),
+            );
         }
     }
     ColumnSpec {
         num,
         cols,
         space_pt,
+        spaces,
     }
 }
 
@@ -1496,7 +2825,14 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
     for c in children(ppr) {
         match c.tag_name().name() {
             "pStyle" => props.style_id = attr(c, W, "val").map(str::to_string),
-            "jc" => props.alignment = attr(c, W, "val").and_then(Jc::parse),
+            "jc" => match attr(c, W, "val").and_then(Jc::parse) {
+                Some(alignment) => props.alignment = Some(alignment),
+                None => props.visible_unsupported.push(format!(
+                    "w:jc@val:{} in w:pPr",
+                    attr(c, W, "val").unwrap_or("missing")
+                )),
+            },
+            "bidi" => props.bidi = Some(toggle_child(c)),
             "spacing" => props.spacing = parse_spacing(c),
             "ind" => props.indent = parse_indent(c),
             "tabs" => props.tabs = parse_tabs(c),
@@ -1505,26 +2841,155 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
             "keepLines" => props.keep_lines = toggle_child(c),
             "pageBreakBefore" => props.page_break_before = toggle_child(c),
             "widowControl" => props.widow_control = Some(toggle_child(c)),
-            "pBdr" => props.borders = parse_para_borders(c),
+            "pBdr" => {
+                if children(c).any(|edge| edge.tag_name().name() == "bar") {
+                    props
+                        .visible_unsupported
+                        .push("w:bar paragraph border".to_string());
+                }
+                props.borders = parse_para_borders(c);
+            }
             "shd" => props.shading = parse_shd_fill(c),
             "contextualSpacing" => props.contextual_spacing = toggle_child(c),
             "outlineLvl" => {
                 props.outline_lvl = parse_i64(attr(c, W, "val")).map(|v| v.clamp(0, 8) as u8)
             }
-            _ => {}
+            "framePr" => props.frame = Some(parse_frame_props(c)),
+            "suppressLineNumbers"
+            | "suppressAutoHyphens"
+            | "kinsoku"
+            | "wordWrap"
+            | "overflowPunct"
+            | "topLinePunct"
+            | "autoSpaceDE"
+            | "autoSpaceDN"
+            | "adjustRightInd"
+            | "snapToGrid"
+            | "mirrorIndents"
+            | "suppressOverlap"
+            | "textDirection"
+            | "textAlignment"
+            | "textboxTightWrap"
+            | "rPr" => props
+                .visible_unsupported
+                .push(format!("w:{} in w:pPr", c.tag_name().name())),
+            // Section properties are parsed by the section walker. `divId` is
+            // structural metadata and `pPrChange` stores superseded properties.
+            // `cnfStyle` caches the conditional table-style slots that
+            // `super::table_style` recomputes positionally. None paint
+            // independently.
+            "sectPr" | "divId" | "pPrChange" | "cnfStyle" => {}
+            _ => props
+                .visible_unsupported
+                .push(format!("w:{} in w:pPr", c.tag_name().name())),
         }
     }
     props
 }
 
+fn parse_frame_props(node: Node) -> FrameProps {
+    let twips = |name| {
+        attr(node, W, name)
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(twip_to_pt)
+    };
+    let mut unsupported = None;
+    let x_pt = twips("x");
+    let y_pt = twips("y");
+    if attr(node, W, "x").is_some() && x_pt.is_none()
+        || attr(node, W, "y").is_some() && y_pt.is_none()
+    {
+        unsupported = Some("invalid frame offset");
+    }
+    let width_pt = twips("w");
+    let height_pt = twips("h");
+    if attr(node, W, "w").is_some_and(|_| width_pt.is_none_or(|value| value <= 0.0))
+        || attr(node, W, "h").is_some_and(|_| height_pt.is_none_or(|value| value < 0.0))
+    {
+        unsupported = Some("invalid frame size");
+    }
+    let mut align = |value: Option<&str>, axis: &'static str| match value {
+        None | Some("left" | "top") => FrameAlign::Start,
+        Some("center") => FrameAlign::Center,
+        Some("right" | "bottom") => FrameAlign::End,
+        Some(_) => {
+            unsupported = Some(axis);
+            FrameAlign::Start
+        }
+    };
+    let x_align = align(attr(node, W, "xAlign"), "unsupported frame xAlign");
+    let y_align = align(attr(node, W, "yAlign"), "unsupported frame yAlign");
+    let mut anchor = |value: Option<&str>, axis: &'static str| match value {
+        None | Some("text") => AnchorOrigin::Paragraph,
+        Some("margin") => AnchorOrigin::Margin,
+        Some("page") => AnchorOrigin::Page,
+        Some(_) => {
+            unsupported = Some(axis);
+            AnchorOrigin::Paragraph
+        }
+    };
+    let horizontal = anchor(attr(node, W, "hAnchor"), "unsupported frame hAnchor");
+    let vertical = anchor(attr(node, W, "vAnchor"), "unsupported frame vAnchor");
+    let height_rule = match attr(node, W, "hRule") {
+        None | Some("auto") => FrameHeightRule::Auto,
+        Some("atLeast") => FrameHeightRule::AtLeast,
+        Some("exact") if height_pt.is_some() => FrameHeightRule::Exact,
+        Some("exact") => {
+            unsupported = Some("exact frame height is missing");
+            FrameHeightRule::Exact
+        }
+        Some(_) => {
+            unsupported = Some("unsupported frame hRule");
+            FrameHeightRule::Auto
+        }
+    };
+    let wrap = match attr(node, W, "wrap") {
+        None | Some("around" | "auto") => WrapMode::Square,
+        Some("none") => WrapMode::None,
+        Some("notBeside") => WrapMode::TopAndBottom,
+        Some(_) => {
+            unsupported = Some("unsupported frame wrap");
+            WrapMode::TopAndBottom
+        }
+    };
+    if attr(node, W, "dropCap").is_some_and(|value| value != "none") {
+        unsupported = Some("unsupported frame dropCap");
+    }
+    if attr(node, W, "lines").is_some()
+        || attr(node, W, "hSpace").is_some()
+        || attr(node, W, "vSpace").is_some()
+    {
+        unsupported = Some("unsupported frame spacing or line constraint");
+    }
+    FrameProps {
+        x_pt,
+        y_pt,
+        x_align,
+        y_align,
+        horizontal,
+        vertical,
+        width_pt,
+        height_pt,
+        height_rule,
+        wrap,
+        unsupported,
+    }
+}
+
 /// Parses a `w:rPr` element into [`RunProps`] (public: styles.rs reuses it).
 pub fn parse_run_props(rpr: Node) -> RunProps {
     let mut props = RunProps::default();
+    let mut bold_cs = None;
+    let mut italic_cs = None;
+    let mut size_cs = None;
+    let mut saw_size_cs = false;
     for c in children(rpr) {
         match c.tag_name().name() {
             "rStyle" => props.style_id = attr(c, W, "val").map(str::to_string),
             "b" => props.bold = Some(toggle_child(c)),
+            "bCs" => bold_cs = Some(toggle_child(c)),
             "i" => props.italic = Some(toggle_child(c)),
+            "iCs" => italic_cs = Some(toggle_child(c)),
             "u" => {
                 props.underline = Some(
                     attr(c, W, "val")
@@ -1548,6 +3013,10 @@ pub fn parse_run_props(rpr: Node) -> RunProps {
             "highlight" => props.highlight = attr(c, W, "val").and_then(named_highlight),
             "shd" => props.shading = parse_shd_fill(c),
             "sz" => props.size_pt = parse_i64(attr(c, W, "val")).map(half_point_to_pt),
+            "szCs" => {
+                saw_size_cs = true;
+                size_cs = parse_i64(attr(c, W, "val")).map(half_point_to_pt);
+            }
             "rFonts" => props.fonts = parse_run_fonts(c),
             "vertAlign" => {
                 props.vert_align = match attr(c, W, "val") {
@@ -1568,8 +3037,37 @@ pub fn parse_run_props(rpr: Node) -> RunProps {
                 )
             }
             "rtl" => props.rtl = Some(toggle_child(c)),
-            _ => {}
+            "outline" | "shadow" | "emboss" | "imprint" | "snapToGrid" | "w" | "position"
+            | "effect" | "bdr" | "fitText" | "cs" | "em" | "eastAsianLayout" | "specVanish"
+            | "oMath" => props
+                .visible_unsupported
+                .push(format!("w:{} in w:rPr", c.tag_name().name())),
+            // Language/proofing/revision metadata does not paint in print
+            // layout. `webHidden` applies only to web-layout display.
+            "lang" | "noProof" | "rPrChange" | "webHidden" => {}
+            _ => props
+                .visible_unsupported
+                .push(format!("w:{} in w:rPr", c.tag_name().name())),
         }
+    }
+    // Word commonly writes complex-script mirrors beside the primary property.
+    // They are provably redundant only when both values at this cascade level
+    // are identical; a distinct/missing primary value needs script-aware style
+    // splitting and therefore stays fail-closed.
+    if bold_cs.is_some() && bold_cs != props.bold {
+        props
+            .visible_unsupported
+            .push("w:bCs differs from w:b".to_string());
+    }
+    if italic_cs.is_some() && italic_cs != props.italic {
+        props
+            .visible_unsupported
+            .push("w:iCs differs from w:i".to_string());
+    }
+    if saw_size_cs && (size_cs.is_none() || size_cs != props.size_pt) {
+        props
+            .visible_unsupported
+            .push("w:szCs differs from w:sz".to_string());
     }
     props
 }

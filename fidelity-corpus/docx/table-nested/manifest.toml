@@ -4,4 +4,6 @@ ssim_threshold = 0.93
 max_page_count_delta = 0
 word_version = "Microsoft Word LTSC (exact build unavailable in PDF metadata)"
 ground_truth_exported_at = "2026-07-09"
+input_sha256 = "34d2527dcbb0bf3cd91a43fcfccfb6c2afe9d573b380f3ebcacc6a868fb0377a"
+golden_sha256 = "e400587d3db4704d81a6ffdecdc95c3fa45d4713291424b2575cf6587b6d7c0b"
 notes = "Synthetic fixture; ground-truth.pdf metadata records Microsoft Word LTSC, exported 2026-07-09."

@@ -1,11 +1,11 @@
 //! `word/settings.xml`: the handful of document-wide settings that affect
 //! layout or the profile verdict.
 
-use super::{W, attr, children, parse_i64, toggle, twip_to_pt};
-use crate::{OfficeError, Result};
+use super::{M, W, attr, children, parse_i64, toggle, twip_to_pt};
+use crate::Result;
 
 /// Document-wide settings.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Settings {
     /// Default tab-stop interval in points (Word default 36pt = 720 twips).
     pub default_tab_stop_pt: f64,
@@ -15,6 +15,8 @@ pub struct Settings {
     pub auto_hyphenation: bool,
     /// Compatibility mode (`w:compatSetting` `compatibilityMode`; default 15).
     pub compat_mode: u8,
+    /// Visible settings deliberately kept fail-closed.
+    pub visible_unsupported: Vec<String>,
 }
 
 impl Default for Settings {
@@ -24,6 +26,7 @@ impl Default for Settings {
             even_and_odd_headers: false,
             auto_hyphenation: false,
             compat_mode: 15,
+            visible_unsupported: Vec::new(),
         }
     }
 }
@@ -31,12 +34,24 @@ impl Default for Settings {
 impl Settings {
     /// Parses `word/settings.xml`. An absent part yields [`Settings::default`].
     pub fn parse(xml: &str) -> Result<Settings> {
-        let doc = roxmltree::Document::parse(xml)
-            .map_err(|e| OfficeError::Invalid(format!("settings.xml XML: {e}")))?;
+        let doc = super::parse_xml(xml, "settings.xml")?;
         let root = doc.root_element();
         let mut settings = Settings::default();
 
         for c in children(root) {
+            if c.tag_name().namespace() == Some(M) && c.tag_name().name() == "mathPr" {
+                for property in children(c) {
+                    let supported_default_font = property.tag_name().namespace() == Some(M)
+                        && property.tag_name().name() == "mathFont"
+                        && attr(property, M, "val").is_none_or(|font| font == "Cambria Math");
+                    if !supported_default_font {
+                        settings
+                            .visible_unsupported
+                            .push(format!("m:mathPr/m:{}", property.tag_name().name()));
+                    }
+                }
+                continue;
+            }
             match c.tag_name().name() {
                 "defaultTabStop" => {
                     if let Some(v) = parse_i64(attr(c, W, "val")) {
@@ -55,6 +70,10 @@ impl Settings {
                         }
                     }
                 }
+                "mirrorMargins" | "gutterAtTop" | "displayBackgroundShape" => settings
+                    .visible_unsupported
+                    .push(format!("w:{}", c.tag_name().name())),
+                // Proofing, view, revision, locale, and save metadata do not paint.
                 _ => {}
             }
         }

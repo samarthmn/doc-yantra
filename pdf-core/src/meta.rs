@@ -7,6 +7,20 @@ use lopdf::{Dictionary, Document, Object, StringFormat};
 
 use crate::error::{PdfCoreError, Result};
 
+/// Five million indirect objects already implies hundreds of MiB of parser
+/// state; valid business PDFs remain orders of magnitude below this ceiling.
+pub(crate) const MAX_PDF_OBJECTS: usize = 5_000_000;
+
+pub(crate) fn guard_object_count(doc: &Document) -> Result<()> {
+    if doc.objects.len() > MAX_PDF_OBJECTS {
+        return Err(PdfCoreError::ResourceLimit(format!(
+            "PDF object count {} exceeds limit {MAX_PDF_OBJECTS}",
+            doc.objects.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Result of structural validation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PdfInfo {
@@ -38,12 +52,12 @@ pub fn page_count(pdf: &[u8]) -> Result<u32> {
 pub fn validate(pdf: &[u8]) -> Result<PdfInfo> {
     let doc = match load_doc(pdf) {
         Ok(doc) => doc,
-        Err(err) if is_encryption_error(&err) => {
-            return Err(PdfCoreError::InvalidInput(
+        Err(PdfCoreError::Lopdf(err)) if is_encryption_error(&err) => {
+            return Err(PdfCoreError::PasswordProtected(
                 "encrypted or corrupt PDF".to_string(),
             ));
         }
-        Err(err) => return Err(err.into()),
+        Err(err) => return Err(err),
     };
 
     let encrypted = is_encrypted_doc(pdf, &doc);
@@ -52,7 +66,7 @@ pub fn validate(pdf: &[u8]) -> Result<PdfInfo> {
         // Encrypted documents whose objects could not be decrypted (missing or
         // wrong password) load with an empty object table in lopdf.
         if encrypted {
-            return Err(PdfCoreError::InvalidInput(
+            return Err(PdfCoreError::PasswordProtected(
                 "encrypted or corrupt PDF".to_string(),
             ));
         }
@@ -115,7 +129,7 @@ pub fn get_metadata(pdf: &[u8]) -> Result<PdfMetadata> {
 /// lopdf would either destroy the document or silently strip its encryption.
 pub fn set_metadata(pdf: &[u8], metadata: &PdfMetadata) -> Result<Vec<u8>> {
     let mut doc = load_doc(pdf)?;
-    ensure_not_encrypted(pdf, &doc, true)?;
+    ensure_never_encrypted(pdf, &doc, true)?;
 
     // Locate the existing Info dictionary (reference or inline) if any.
     let info_ref = match doc.trailer.get(b"Info") {
@@ -156,7 +170,7 @@ pub fn set_metadata(pdf: &[u8], metadata: &PdfMetadata) -> Result<Vec<u8>> {
 /// transparently-decrypted one would strip its encryption.
 pub fn compress(pdf: &[u8]) -> Result<Vec<u8>> {
     let mut doc = load_doc(pdf)?;
-    ensure_not_encrypted(pdf, &doc, true)?;
+    ensure_never_encrypted(pdf, &doc, true)?;
     // Flate-compress stream contents (lopdf only applies the filter when the
     // compressed form is actually smaller).
     doc.compress();
@@ -213,19 +227,22 @@ pub fn encrypt(pdf: &[u8], user_pw: &str, owner_pw: &str) -> Result<Vec<u8>> {
 /// only scans the final ~512 bytes for `startxref` and hard-fails when the
 /// junk pushes the marker out of that window, while pdfium/Acrobat tolerate
 /// at least 1024 bytes of trailing data.
-fn load_doc(pdf: &[u8]) -> std::result::Result<Document, lopdf::Error> {
-    match Document::load_mem(pdf) {
-        Ok(doc) => Ok(doc),
+fn load_doc(pdf: &[u8]) -> Result<Document> {
+    let doc = match Document::load_mem(pdf) {
+        Ok(doc) => doc,
         Err(err) => {
             if let Some(end) = find_last(pdf, b"%%EOF").map(|pos| pos + b"%%EOF".len())
                 && end < pdf.len()
                 && let Ok(doc) = Document::load_mem(&pdf[..end])
             {
+                guard_object_count(&doc)?;
                 return Ok(doc);
             }
-            Err(err)
+            return Err(err.into());
         }
-    }
+    };
+    guard_object_count(&doc)?;
+    Ok(doc)
 }
 
 /// True when the document is encrypted in any flavor. lopdf transparently
@@ -237,12 +254,29 @@ fn is_encrypted_doc(pdf: &[u8], doc: &Document) -> bool {
     doc.is_encrypted() || doc.was_encrypted() || raw_has_encrypt(pdf)
 }
 
-/// Rejects encrypted input with a uniform error. `write_op` selects the error
+/// Rejects password-protected input with a uniform error. lopdf marks a
+/// successfully empty-user-password-decrypted document as `was_encrypted`
+/// while clearing its live encryption state; that owner-locked case is safe
+/// to process and intentionally emits an unencrypted result.
+/// `write_op` selects the error
 /// flavor: [`PdfCoreError::Unsupported`] for operations that would re-save the
 /// document (and thereby corrupt it or strip its protection), otherwise
 /// [`PdfCoreError::InvalidInput`] for read-only queries whose results would be
 /// misleading (zero pages / all-`None` metadata).
 pub(crate) fn ensure_not_encrypted(pdf: &[u8], doc: &Document, write_op: bool) -> Result<()> {
+    const MSG: &str = "encrypted PDF; decrypt before processing";
+    let empty_user_password_decrypted = doc.was_encrypted() && !doc.is_encrypted();
+    if is_encrypted_doc(pdf, doc) && !empty_user_password_decrypted {
+        return Err(if write_op {
+            PdfCoreError::Unsupported(MSG.to_string())
+        } else {
+            PdfCoreError::InvalidInput(MSG.to_string())
+        });
+    }
+    Ok(())
+}
+
+fn ensure_never_encrypted(pdf: &[u8], doc: &Document, write_op: bool) -> Result<()> {
     const MSG: &str = "encrypted PDF; decrypt before processing";
     if is_encrypted_doc(pdf, doc) {
         return Err(if write_op {

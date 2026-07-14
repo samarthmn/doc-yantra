@@ -14,12 +14,94 @@
 
 use crate::{OfficeError, Result, UnsupportedCode};
 
+/// Large enough for complex Office parts; bounds roxmltree DOM allocation and walks.
+pub const MAX_XML_NODES: usize = 1_000_000;
+/// Office markup is shallow in practice; deeper input is hostile or malformed.
+pub const MAX_XML_DEPTH: usize = 256;
+
+/// Parses one size-capped OPC part and applies structural DOM budgets.
+pub fn parse_xml<'a>(xml: &'a str, label: &str) -> Result<roxmltree::Document<'a>> {
+    guard_xml_budget(xml, label)?;
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|error| OfficeError::Invalid(format!("{label} XML: {error}")))?;
+    Ok(doc)
+}
+
+/// Checks budgets without claiming malformed auxiliary XML; callers that know
+/// part context remain responsible for producing the eventual parse error.
+pub(crate) fn guard_xml_budget(xml: &str, label: &str) -> Result<()> {
+    guard_xml_depth(xml.as_bytes(), label)?;
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return Ok(());
+    };
+    let mut nodes = 0usize;
+    for _node in doc.descendants() {
+        nodes += 1;
+        if nodes > MAX_XML_NODES {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::DecompressionLimit,
+                format!("{label} XML node count exceeds limit {MAX_XML_NODES}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn guard_xml_depth(bytes: &[u8], label: &str) -> Result<()> {
+    let mut depth = 0usize;
+    let mut cursor = 0usize;
+    while let Some(relative) = bytes[cursor..].iter().position(|byte| *byte == b'<') {
+        let start = cursor + relative;
+        let mut end = start + 1;
+        let mut quote = None;
+        while end < bytes.len() {
+            let byte = bytes[end];
+            if let Some(delimiter) = quote {
+                if byte == delimiter {
+                    quote = None;
+                }
+            } else if byte == b'\'' || byte == b'"' {
+                quote = Some(byte);
+            } else if byte == b'>' {
+                break;
+            }
+            end += 1;
+        }
+        if end == bytes.len() {
+            break;
+        }
+        let body = &bytes[start + 1..end];
+        if body.starts_with(b"/") {
+            depth = depth.saturating_sub(1);
+        } else if !body.starts_with(b"!")
+            && !body.starts_with(b"?")
+            && body
+                .iter()
+                .rev()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_none_or(|byte| *byte != b'/')
+        {
+            depth += 1;
+            if depth > MAX_XML_DEPTH {
+                return Err(OfficeError::unsupported(
+                    UnsupportedCode::DecompressionLimit,
+                    format!("{label} XML depth exceeds limit {MAX_XML_DEPTH}"),
+                ));
+            }
+        }
+        cursor = end + 1;
+    }
+    Ok(())
+}
+
 pub mod dml;
 pub mod numbering;
+pub mod omml;
 pub mod pml;
 pub mod settings;
 pub mod sml;
 pub mod styles;
+pub mod table_style;
 pub mod theme;
 pub mod wml;
 
@@ -45,6 +127,43 @@ pub const PKG_REL: &str = "http://schemas.openxmlformats.org/package/2006/relati
 pub const CONTENT_TYPES: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 /// Legacy VML namespace (`w:pict` shapes — unsupported v1).
 pub const VML: &str = "urn:schemas-microsoft-com:vml";
+
+#[cfg(test)]
+mod resource_budget_tests {
+    use super::*;
+
+    #[test]
+    fn deeply_nested_xml_fails_with_typed_limit() {
+        let started = std::time::Instant::now();
+        let xml = format!("{}x{}", "<n>".repeat(5_000), "</n>".repeat(5_000));
+        let error = parse_xml(&xml, "hostile").expect_err("depth limit");
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::DecompressionLimit,
+                ..
+            }
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn hundred_nested_drawing_groups_fail_with_typed_limit() {
+        let groups = "<p:grpSp><p:grpSpPr/>".repeat(100);
+        let closes = "</p:grpSp>".repeat(100);
+        let xml = format!(
+            r#"<p:sld xmlns:p="{P}" xmlns:a="{A}"><p:cSld><p:spTree>{groups}{closes}</p:spTree></p:cSld></p:sld>"#
+        );
+        let error = pml::Slide::parse(&xml).expect_err("group limit");
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::DecompressionLimit,
+                ..
+            }
+        ));
+    }
+}
 
 // --- Unit conversions -------------------------------------------------------
 

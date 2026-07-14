@@ -7,11 +7,37 @@ use std::io::Cursor;
 
 use lopdf::{Document, Object};
 use pdf_core::PdfCoreError;
+use pdf_core::embed_font::register_font;
 use pdf_core::extract::extract_text;
 use pdf_core::generate::{
     DocOptions, PageSize, csv_to_pdf, images_to_pdf, markdown_to_pdf, text_to_pdf,
 };
 use pdf_core::raster::{RenderOptions, render_page};
+
+#[test]
+fn hostile_csv_column_count_returns_typed_limit_without_panic() {
+    let input = std::iter::repeat_n("x", 100_000)
+        .collect::<Vec<_>>()
+        .join(",");
+    let started = std::time::Instant::now();
+    let result = std::panic::catch_unwind(|| csv_to_pdf(input.as_bytes(), &DocOptions::default()));
+    let error = result.expect("must not panic").expect_err("column limit");
+    assert!(matches!(error, PdfCoreError::ResourceLimit(ref message) if
+        message.contains("limit")));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn hostile_markdown_nesting_returns_typed_limit_without_panic() {
+    let mut markdown = String::new();
+    for depth in 0..500 {
+        markdown.push_str(&"  ".repeat(depth));
+        markdown.push_str("- item\n");
+    }
+    let result = std::panic::catch_unwind(|| markdown_to_pdf(&markdown, &DocOptions::default()));
+    let error = result.expect("must not panic").expect_err("nesting limit");
+    assert!(matches!(error, PdfCoreError::InvalidInput(ref message) if message.contains("limit")));
+}
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -215,17 +241,14 @@ fn text_paginates_and_renders_title() {
 }
 
 #[test]
-fn text_maps_typography_to_ascii() {
+fn text_preserves_winansi_typography() {
     let text = "Smart \u{201C}quotes\u{201D} and an em\u{2014}dash plus caf\u{00E9}.";
     let bytes = text_to_pdf(text, &DocOptions::default()).unwrap();
-    let doc = load(&bytes);
-    let content = page_content_str(&doc, 0);
-    assert!(content.contains("\\\"quotes\\\"") || content.contains("\"quotes\""));
-    assert!(content.contains("em--dash"), "content: {content}");
-    assert!(
-        content.contains("caf?"),
-        "non-ASCII should become '?': {content}"
-    );
+    let extracted = extract_text(&bytes).expect("extract WinAnsi typography");
+
+    assert!(extracted.contains("“quotes”"), "got {extracted:?}");
+    assert!(extracted.contains("em—dash"), "got {extracted:?}");
+    assert!(extracted.contains("café"), "got {extracted:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -246,10 +269,9 @@ fn csv_fixture_renders_table() {
     let content = page_content_str(&doc, 0);
     assert!(content.contains("Region"), "header cell missing: {content}");
     assert!(content.contains("DocKosha"), "body cell missing: {content}");
-    // Header is bold and body regular — both Helvetica faces present.
+    // Legacy CSV HTML used one regular monospace face for header and body.
     let fonts = page_base_fonts(&doc, 0);
-    assert!(fonts.iter().any(|f| f == "Helvetica-Bold"), "{fonts:?}");
-    assert!(fonts.iter().any(|f| f == "Helvetica"), "{fonts:?}");
+    assert_eq!(fonts, ["Courier"], "{fonts:?}");
 }
 
 #[test]
@@ -258,7 +280,11 @@ fn csv_repeats_header_on_every_page() {
     for i in 0..150 {
         csv.push_str(&format!("row{i}a,row{i}b,row{i}c\n"));
     }
-    let bytes = csv_to_pdf(csv.as_bytes(), &DocOptions::default()).unwrap();
+    let opts = DocOptions {
+        page_size: PageSize::LetterLandscape,
+        ..DocOptions::default()
+    };
+    let bytes = csv_to_pdf(csv.as_bytes(), &opts).unwrap();
     let doc = load(&bytes);
     let n_pages = doc.get_pages().len();
     assert!(
@@ -314,57 +340,52 @@ fn csv_wide_cell_wraps_fully_without_data_loss() {
 }
 
 #[test]
-fn csv_two_thousand_char_cell_wraps_then_ellipsizes() {
-    // Regression: a 2000-char cell produces a multi-line row; the bulk of
-    // what fits in the 8-line cap renders, and the cut is marked "...".
-    let cell = "abcdefghij".repeat(200);
-    let csv = format!("Name,Description\nitem,{cell}\n");
-    let bytes = csv_to_pdf(csv.as_bytes(), &DocOptions::default()).unwrap();
+fn csv_sixty_line_cell_paginates_without_truncation() {
+    // Regression: shared CSV/Markdown table layout capped a cell at eight
+    // lines and appended an ellipsis. A row must instead continue below its
+    // first page fragment with every cell kept at its original column x.
+    let cell = (1..=60)
+        .map(|n| format!("cell-line-{n:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let csv = format!("Name,Description\nitem,\"{cell}\"\n");
+    let opts = DocOptions {
+        page_size: PageSize::LetterLandscape,
+        ..DocOptions::default()
+    };
+    let bytes = csv_to_pdf(csv.as_bytes(), &opts).unwrap();
     let doc = load(&bytes);
-    let content = page_content_str(&doc, 0);
-
-    let cell_lines: Vec<(f64, String)> = text_ops(&content)
-        .into_iter()
-        .filter(|(_, _, s)| {
-            s.len() > 20
-                && s.trim_end_matches("...")
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase())
-        })
-        .map(|(_, y, s)| (y, s))
-        .collect();
     assert!(
-        cell_lines.len() >= 5,
-        "expected a multi-line row, got {} lines",
-        cell_lines.len()
+        doc.get_pages().len() >= 2,
+        "60 lines must split one row across pages"
     );
-    // Lines sit on distinct descending baselines.
-    for pair in cell_lines.windows(2) {
+    let extracted = extract_text(&bytes).expect("extract_text");
+    for n in 1..=60 {
         assert!(
-            pair[1].0 < pair[0].0,
-            "cell lines must descend: {cell_lines:?}"
+            extracted.contains(&format!("cell-line-{n:02}")),
+            "cell line {n} missing: {extracted:?}"
         );
     }
-    let total: usize = cell_lines.iter().map(|(_, s)| s.len()).sum();
     assert!(
-        total >= 600,
-        "most of the fitting content must render, got {total} chars"
+        !extracted.contains("..."),
+        "long cell must not acquire an ellipsis: {extracted:?}"
     );
+    let line_xs: Vec<_> = (0..doc.get_pages().len())
+        .flat_map(|page| text_ops(&page_content_str(&doc, page)))
+        .filter(|(_, _, text)| text.starts_with("cell-line-"))
+        .map(|(x, _, _)| x)
+        .collect();
+    assert_eq!(line_xs.len(), 60, "all lines must have a text operation");
     assert!(
-        cell_lines.last().unwrap().1.ends_with("..."),
-        "truncated cell must end with ellipsis: {cell_lines:?}"
+        line_xs.iter().all(|x| (*x - line_xs[0]).abs() < 0.01),
+        "cell continuation must stay in its column: {line_xs:?}"
     );
-    // And the same content is recoverable via real text extraction.
-    let extracted = extract_text(&bytes).expect("extract_text");
-    let extracted_cell: usize = extracted
-        .split_whitespace()
-        .filter(|w| w.len() > 20)
-        .map(|w| w.trim_end_matches("...").len())
-        .sum();
-    assert!(
-        extracted_cell >= 600,
-        "extraction must recover the wrapped cell, got {extracted_cell} chars"
-    );
+    for page in 0..doc.get_pages().len() {
+        assert!(
+            page_content_str(&doc, page).contains(" re\n"),
+            "row fragment needs cell borders on page {page}"
+        );
+    }
 }
 
 #[test]
@@ -514,7 +535,7 @@ fn markdown_fixture_renders_document() {
 #[test]
 fn markdown_heading_sizes_strictly_decrease() {
     let md = "# Alpha\n\n## Beta\n\n### Gamma\n";
-    let opts = DocOptions::default(); // base 10pt
+    let opts = DocOptions::default(); // 14 CSS px = 10.5pt
     let bytes = markdown_to_pdf(md, &opts).unwrap();
     let doc = load(&bytes);
     let content = page_content_str(&doc, 0);
@@ -528,10 +549,10 @@ fn markdown_heading_sizes_strictly_decrease() {
         sizes[0] > sizes[1] && sizes[1] > sizes[2],
         "heading sizes must strictly decrease H1->H3: {sizes:?}"
     );
-    // Exact scales from the spec: base * 2.0 / 1.6 / 1.35.
-    assert!((sizes[0] - 20.0).abs() < 0.01, "{sizes:?}");
-    assert!((sizes[1] - 16.0).abs() < 0.01, "{sizes:?}");
-    assert!((sizes[2] - 13.5).abs() < 0.01, "{sizes:?}");
+    // Chromium user-agent scales: 2em / 1.5em / 1.17em.
+    assert!((sizes[0] - 21.0).abs() < 0.01, "{sizes:?}");
+    assert!((sizes[1] - 15.75).abs() < 0.01, "{sizes:?}");
+    assert!((sizes[2] - 12.285).abs() < 0.01, "{sizes:?}");
 }
 
 #[test]
@@ -561,7 +582,31 @@ fn markdown_styles_code_and_rule_render() {
 }
 
 #[test]
-fn markdown_paginates_and_ignores_images() {
+fn markdown_hard_breaks_force_lines_while_soft_breaks_reflow() {
+    let hard = markdown_to_pdf("line1  \nline2", &DocOptions::default()).unwrap();
+    let hard_doc = load(&hard);
+    let hard_ops = text_ops(&page_content_str(&hard_doc, 0));
+    let hard_lines: Vec<_> = hard_ops
+        .iter()
+        .filter(|(_, _, text)| text == "line1" || text == "line2")
+        .collect();
+    assert_eq!(hard_lines.len(), 2, "hard break lines: {hard_ops:?}");
+    assert!(
+        hard_lines[1].1 < hard_lines[0].1,
+        "hard break must use descending baselines: {hard_lines:?}"
+    );
+
+    let soft = markdown_to_pdf("line1\nline2", &DocOptions::default()).unwrap();
+    let soft_doc = load(&soft);
+    let soft_ops = text_ops(&page_content_str(&soft_doc, 0));
+    assert!(
+        soft_ops.iter().any(|(_, _, text)| text == "line1 line2"),
+        "soft break must reflow to one space: {soft_ops:?}"
+    );
+}
+
+#[test]
+fn markdown_paginates_and_replaces_images() {
     let mut md = String::from("# Long Doc\n\n![ignored alt](https://example.com/x.png)\n\n");
     for i in 0..250 {
         md.push_str(&format!(
@@ -578,6 +623,7 @@ fn markdown_paginates_and_ignores_images() {
         !all.contains("ignored alt"),
         "image alt text must be skipped"
     );
+    assert!(all.contains("[Image omitted for secure conversion]"));
     assert!(all.contains("Paragraph number 249"));
 }
 
@@ -608,12 +654,12 @@ fn markdown_nested_list_items_stay_on_separate_indented_lines() {
     for pair in ys.windows(2) {
         assert!(pair[1] < pair[0], "items must descend line by line: {ys:?}");
     }
-    // Per-depth indent: 18pt per level from the 54pt margin.
-    assert!((alpha.0 - 72.0).abs() < 0.5, "depth-1 x: {}", alpha.0);
-    assert!((beta.0 - 90.0).abs() < 0.5, "depth-2 x: {}", beta.0);
-    assert!((gamma.0 - 108.0).abs() < 0.5, "depth-3 x: {}", gamma.0);
-    assert!((delta.0 - 90.0).abs() < 0.5, "depth-2 x: {}", delta.0);
-    assert!((epsilon.0 - 72.0).abs() < 0.5, "depth-1 x: {}", epsilon.0);
+    // Per-depth indent: 18pt from the measured 51.75pt content inset.
+    assert!((alpha.0 - 69.75).abs() < 0.5, "depth-1 x: {}", alpha.0);
+    assert!((beta.0 - 87.75).abs() < 0.5, "depth-2 x: {}", beta.0);
+    assert!((gamma.0 - 105.75).abs() < 0.5, "depth-3 x: {}", gamma.0);
+    assert!((delta.0 - 87.75).abs() < 0.5, "depth-2 x: {}", delta.0);
+    assert!((epsilon.0 - 69.75).abs() < 0.5, "depth-1 x: {}", epsilon.0);
 
     // Markers render per level: bullets and correctly numbered items.
     let strings = show_strings(&content);
@@ -633,9 +679,7 @@ fn markdown_nested_list_items_stay_on_separate_indented_lines() {
 }
 
 #[test]
-fn markdown_html_blocks_render_their_visible_text() {
-    // Regression (MAJOR parity): raw HTML blocks were silently dropped,
-    // losing human-visible content.
+fn markdown_html_blocks_render_literal_source() {
     let md = "Intro paragraph.\n\n<div class=\"box\">\nVisible secret &amp; friends\n</div>\n\n\
               Mid <b>inline kept</b> text.\n";
     let bytes = markdown_to_pdf(md, &DocOptions::default()).unwrap();
@@ -645,19 +689,20 @@ fn markdown_html_blocks_render_their_visible_text() {
     assert!(
         strings
             .iter()
-            .any(|s| s.contains("Visible secret & friends")),
-        "HTML block inner text must render (entities decoded): {strings:?}"
+            .any(|s| s.contains("Visible secret &amp; friends")),
+        "HTML block source text must render literally: {strings:?}"
     );
     assert!(
         strings.iter().any(|s| s.contains("inline kept")),
         "inline HTML inner text must survive: {strings:?}"
     );
-    // Tags and attributes are stripped, not rendered.
     assert!(
-        strings
-            .iter()
-            .all(|s| !s.contains("<div") && !s.contains("class=") && !s.contains("</b>")),
-        "tags must be stripped: {strings:?}"
+        strings.iter().any(|s| s.contains("<div class=\"box\">")),
+        "block tag source must survive: {strings:?}"
+    );
+    assert!(
+        strings.iter().any(|s| s.contains("<b>")) && strings.iter().any(|s| s.contains("</b>")),
+        "inline tag source must survive: {strings:?}"
     );
     // Surrounding markdown still flows normally.
     assert!(strings.iter().any(|s| s.contains("Intro paragraph.")));
@@ -698,6 +743,129 @@ fn markdown_gfm_table_renders_as_table_not_raw_pipes() {
     // Surrounding paragraphs still render in order.
     assert!(strings.iter().any(|s| s.contains("Before table.")));
     assert!(strings.iter().any(|s| s.contains("After table.")));
+}
+
+#[test]
+fn winansi_text_round_trips_through_standard_font() {
+    let source = "café ü € – “quoted” \"straight\"";
+    let bytes = markdown_to_pdf(source, &DocOptions::default()).unwrap();
+    let extracted = extract_text(&bytes).expect("extract WinAnsi Markdown");
+
+    for expected in ["café", "ü", "€", "–", "“quoted”", "\"straight\""] {
+        assert!(
+            extracted.contains(expected),
+            "missing {expected:?}: {extracted:?}"
+        );
+    }
+}
+
+#[test]
+fn text_to_pdf_preserves_latin1() {
+    let bytes = text_to_pdf("café", &DocOptions::default()).unwrap();
+    let extracted = extract_text(&bytes).expect("extract Latin-1 text PDF");
+
+    assert!(extracted.contains("café"), "got {extracted:?}");
+}
+
+#[test]
+fn javascript_link_renders_without_annotation() {
+    let bytes = markdown_to_pdf("[visible](javascript:alert(1))", &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let page_id = page_ids(&doc)[0];
+    let extracted = extract_text(&bytes).expect("extract unsafe-link PDF");
+
+    assert!(
+        extracted.contains("visible"),
+        "link text missing: {extracted:?}"
+    );
+    assert!(
+        doc.get_page_annotations(page_id).unwrap().is_empty(),
+        "unsafe URI must not create an annotation"
+    );
+}
+
+#[test]
+fn multiline_link_annotation_rects_stay_inside_page() {
+    let label = "linked words ".repeat(30);
+    let markdown = format!("[{label}](https://example.com/wrapped)");
+    let opts = DocOptions {
+        margin_pt: 200.0,
+        ..DocOptions::default()
+    };
+    let bytes = markdown_to_pdf(&markdown, &opts).unwrap();
+    let doc = load(&bytes);
+    let annotations: Vec<_> = page_ids(&doc)
+        .into_iter()
+        .flat_map(|page_id| doc.get_page_annotations(page_id).unwrap())
+        .collect();
+
+    assert!(annotations.len() > 1, "expected wrapped link fragments");
+    let (page_w, page_h) = opts.page_size.dimensions_pt();
+    for annotation in annotations {
+        let rect = annotation.get(b"Rect").unwrap().as_array().unwrap();
+        let values: Vec<f64> = rect
+            .iter()
+            .map(|value| f64::from(value.as_float().unwrap()))
+            .collect();
+        assert!(
+            values[0] >= 0.0
+                && values[1] >= 0.0
+                && values[0] < values[2]
+                && values[1] < values[3]
+                && values[2] <= page_w
+                && values[3] <= page_h,
+            "invalid annotation rect: {values:?}"
+        );
+    }
+}
+
+#[test]
+fn bare_urls_emit_link_annotations() {
+    let bytes = markdown_to_pdf(
+        "Visit www.example.com or https://example.org/path.",
+        &DocOptions::default(),
+    )
+    .unwrap();
+    let doc = load(&bytes);
+    let annotations = doc.get_page_annotations(page_ids(&doc)[0]).unwrap();
+
+    assert_eq!(annotations.len(), 2);
+}
+
+#[test]
+fn task_list_markers_use_rectangles_at_bullet_indent() {
+    let bytes = markdown_to_pdf("- [x] done\n- [ ] open", &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let content = page_content_str(&doc, 0);
+    let tokens: Vec<&str> = content.split_whitespace().collect();
+    let marker_rects = tokens
+        .windows(5)
+        .filter(|window| {
+            window[4] == "re"
+                && window[0]
+                    .parse::<f64>()
+                    .is_ok_and(|x| (54.0..72.0).contains(&x))
+        })
+        .count();
+
+    assert_eq!(marker_rects, 2, "task marker rects missing: {content}");
+}
+
+#[test]
+fn markdown_footnote_definitions_render_backreference_arrow() {
+    register_font(include_bytes!("../wasm/pkg/fonts/NotoEmoji-Variable.ttf"))
+        .expect("register font covering backreference arrow");
+    let bytes = markdown_to_pdf(
+        "Reference[^note].\n\n[^note]: Definition text.",
+        &DocOptions::default(),
+    )
+    .expect("render footnote");
+    let extracted = extract_text(&bytes).expect("extract footnote");
+
+    assert!(
+        extracted.contains("1. Definition text. ↩"),
+        "footnote backreference missing: {extracted:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

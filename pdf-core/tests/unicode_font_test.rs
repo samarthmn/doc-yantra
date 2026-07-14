@@ -42,6 +42,16 @@ fn register_liberation_faces() {
     }
 }
 
+fn register_packaged_font(file: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("wasm/pkg/fonts")
+        .join(file);
+    register_font(
+        &std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .unwrap_or_else(|error| panic!("register {file}: {error}"));
+}
+
 fn with_fs_type(fs_type: u16) -> Vec<u8> {
     let mut bytes = read_liberation("LiberationSans-Regular.ttf");
     let table_offset = {
@@ -114,21 +124,154 @@ fn register_font_rejects_restricted_embedding_fs_type() {
 
 #[test]
 #[serial(unicode_fonts)]
-fn validate_text_rejects_arabic_as_complex_script() {
-    let err = validate_text("مرحبا").expect_err("Arabic needs shaping");
+fn validate_text_accepts_arabic_for_coverage_and_shaping() {
+    validate_text("مرحبا").expect("script gate is removed");
+}
+
+#[test]
+#[serial(unicode_fonts)]
+fn validate_text_accepts_hebrew_for_bidi_shaping() {
+    validate_text("שלום").expect("RTL gate is removed");
+}
+
+#[test]
+#[serial(unicode_fonts)]
+fn hebrew_csv_shapes_with_liberation() {
+    register_liberation_faces();
+    let output = csv_to_pdf("label,value\nעברית,שלום".as_bytes(), &DocOptions::default())
+        .expect("Liberation Sans covers and shapes Hebrew");
+    assert_valid_page_count(&output, 1);
+    #[cfg(feature = "pdfium")]
+    {
+        let extracted = extract_text(&output).expect("extract Hebrew CSV");
+        assert!(
+            extracted.contains("שלום"),
+            "expected logical-order Hebrew, got {extracted:?}"
+        );
+    }
+}
+
+#[cfg(feature = "pdfium")]
+fn assert_markdown_line_round_trips(line: &str, font: &str) {
+    register_liberation_faces();
+    register_packaged_font(font);
+    let output = markdown_to_pdf(line, &DocOptions::default())
+        .unwrap_or_else(|error| panic!("render {line:?}: {error}"));
+    let extracted = extract_text(&output).expect("extract shaped Markdown");
     assert!(
-        err.to_string().starts_with("unsupported:script:"),
-        "unexpected error: {err}"
+        extracted.contains(line),
+        "expected logical-order {line:?}, got {extracted:?}"
+    );
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[serial(unicode_fonts)]
+fn long_arabic_sentence_round_trips_reused_glyphs() {
+    assert_markdown_line_round_trips(
+        "هذا نص تجريبي باللغة العربية. يحتوي على أرقام عربية ٠١٢٣ وحروف متصلة.",
+        "NotoSansArabic-Variable.ttf",
+    );
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[serial(unicode_fonts)]
+fn long_devanagari_sentence_round_trips_reused_glyphs() {
+    assert_markdown_line_round_trips(
+        "यह देवनागरी में एक परीक्षण वाक्य है। संयुक्ताक्षर: क्ष त्र ज्ञ।",
+        "NotoSansDevanagari-Variable.ttf",
+    );
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[serial(unicode_fonts)]
+fn long_thai_sentence_round_trips_reused_glyphs() {
+    assert_markdown_line_round_trips(
+        "นี่คือข้อความทดสอบภาษาไทยที่ไม่มีการเว้นวรรคระหว่างคำและมีวรรณยุกต์ซ้อนกัน",
+        "NotoSansThai-Variable.ttf",
+    );
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[serial(unicode_fonts)]
+fn arabic_watermark_extracts_in_logical_order() {
+    let line = "هذا نص تجريبي باللغة العربية";
+    register_packaged_font("NotoSansArabic-Variable.ttf");
+    let source = sample_pdf(&["source"]);
+    let output =
+        apply_watermark(&source, &unicode_watermark(line)).expect("render shaped Arabic watermark");
+    let extracted = extract_text(&output).expect("extract Arabic watermark");
+    assert!(
+        extracted.contains(line),
+        "expected logical-order Arabic, got {extracted:?}"
+    );
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[serial(unicode_fonts)]
+fn mixed_ltr_rtl_line_round_trips_logical_order() {
+    register_liberation_faces();
+    register_packaged_font("NotoSansArabic-Variable.ttf");
+    for line in ["Total: 123 ريال", "ريال 123 Total"] {
+        let output = markdown_to_pdf(line, &DocOptions::default()).expect("render mixed bidi line");
+        let extracted = extract_text(&output).expect("extract mixed bidi line");
+        assert!(
+            extracted.contains(line),
+            "expected logical-order mixed line {line:?}, got {extracted:?}"
+        );
+    }
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[serial(unicode_fonts)]
+fn emoji_modifier_and_zwj_line_round_trips_original_sequences() {
+    let line = "Thumbs up 👍🏽 and a family 👨‍👩‍👧‍👦 plus a heart ❤️.";
+    register_liberation_faces();
+    register_packaged_font("NotoEmoji-Variable.ttf");
+    let output = markdown_to_pdf(line, &DocOptions::default())
+        .unwrap_or_else(|error| panic!("render emoji sequences: {error}"));
+    let extracted = extract_text(&output).expect("extract emoji sequences");
+    assert!(
+        extracted.contains(line),
+        "expected original emoji sequences, got {extracted:?}"
     );
 }
 
 #[test]
 #[serial(unicode_fonts)]
-fn validate_text_rejects_hebrew_as_rtl() {
-    let err = validate_text("שלום").expect_err("RTL text must fail");
+fn absent_pictograph_names_real_codepoint_not_replacement_character() {
+    register_packaged_font("NotoEmoji-Variable.ttf");
+    let err = markdown_to_pdf("🫩", &DocOptions::default())
+        .expect_err("Noto Emoji does not cover U+1FAE9");
+    let message = err.to_string();
     assert!(
-        err.to_string().starts_with("unsupported:script:"),
-        "unexpected error: {err}"
+        message.starts_with("unsupported:glyph-coverage:"),
+        "unexpected error: {message}"
+    );
+    assert!(message.contains("U+1FAE9"), "unexpected error: {message}");
+    assert!(!message.contains("U+FFFD"), "unexpected error: {message}");
+}
+
+#[test]
+#[serial(unicode_fonts)]
+fn astral_emoji_watermark_uses_variable_noto_face() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wasm/pkg/fonts/NotoEmoji-Variable.ttf");
+    register_font(&std::fs::read(path).expect("read Noto Emoji")).expect("register Noto Emoji");
+    let source = sample_pdf(&["source"]);
+    let output = apply_watermark(&source, &unicode_watermark("🔒"))
+        .expect("astral emoji shapes without U+FFFD folding");
+    assert_valid_page_count(&output, 1);
+    #[cfg(feature = "pdfium")]
+    assert!(
+        extract_text(&output)
+            .expect("extract astral emoji watermark")
+            .contains('🔒')
     );
 }
 
@@ -194,6 +337,25 @@ fn unicode_markdown_validates_and_extracts_greek_and_cyrillic() {
     assert!(
         extracted.contains(CYRILLIC),
         "missing Cyrillic: {extracted:?}"
+    );
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[serial(unicode_fonts)]
+fn markdown_mixed_winansi_and_cyrillic_extracts_both_runs() {
+    register_liberation_faces();
+    let output = markdown_to_pdf("café Москва", &DocOptions::default())
+        .expect("render mixed WinAnsi and Cyrillic Markdown");
+    let extracted = extract_text(&output).expect("extract mixed-script Markdown");
+
+    assert!(
+        extracted.contains("café"),
+        "missing WinAnsi run: {extracted:?}"
+    );
+    assert!(
+        extracted.contains("Москва"),
+        "missing Cyrillic run: {extracted:?}"
     );
 }
 

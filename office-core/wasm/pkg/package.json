@@ -6,7 +6,13 @@
     "office_core_wasm_bg.wasm",
     "office_core_wasm.js",
     "office_core_wasm.d.ts",
-    "web"
+    "web",
+    "worker.js",
+    "worker.d.ts",
+    "worker-client.cjs",
+    "worker-entry.cjs",
+    "worker-ops.cjs",
+    "build-fingerprint.json"
   ],
   "main": "office_core_wasm.js",
   "types": "office_core_wasm.d.ts",
@@ -30,6 +36,11 @@
       "default": "./web/office_core_wasm.js"
     },
     "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
+    "./worker": {
+      "types": "./worker.d.ts",
+      "require": "./worker.js",
+      "default": "./worker.js"
+    },
     "./package.json": "./package.json"
   }
 }

@@ -42,11 +42,14 @@ pub enum UnsupportedCode {
     SmartArt,
     /// An embedded OLE object or media.
     OleObject,
+    /// An OLE preview exists only as unsupported EMF vector content.
+    OlePreviewEmf,
+    /// An OLE preview exists only as unsupported WMF vector content.
+    OlePreviewWmf,
     /// WordArt / preset text warp.
     WordArt,
-    /// A non-rectangular shape geometry (`prstGeom` other than `rect`, or
-    /// `custGeom`). v1 renders shape fills against their bounding box, so any
-    /// non-rect geometry would draw wrong; fail closed rather than degrade.
+    /// A shape preset, custom-path command, or guide formula outside the
+    /// implemented DrawingML geometry subset.
     ShapeGeometry,
     /// An equation (`m:oMath`).
     Equation,
@@ -56,18 +59,59 @@ pub enum UnsupportedCode {
     AutoHyphenation,
     /// An image with a source crop (`a:srcRect`).
     ImageCrop,
+    /// A hyperlink target outside the allowed URL schemes or slide destinations.
+    Hyperlink,
+    /// A DrawingML fill preset this engine cannot render faithfully.
+    PatternFill,
+    /// An authored DrawingML fill is malformed or has no resolvable color.
+    InvalidFill,
+    /// A DrawingML gradient is malformed, degenerate, or uses an unsupported path mode.
+    GradientFill,
+    /// A DrawingML picture fill has an invalid tile/stretch placement contract.
+    InvalidPictureFill,
+    /// A visible image is relationship-linked to an external resource. The
+    /// in-process engine never fetches network assets.
+    ExternalImage,
     /// Conditional formatting whose rules we cannot evaluate.
     ConditionalFormatting,
+    /// A formula cell has no usable cached result. The engine never evaluates
+    /// formulas or guesses their displayed value.
+    FormulaCacheMissing,
+    /// A visible object references a relationship id or internal target part
+    /// that does not exist in the package.
+    MissingRelationshipTarget,
+    /// A required image declares or contains an encoding outside the PNG/JPEG
+    /// raster envelope.
+    UnsupportedImageEncoding,
+    /// A required PNG/JPEG part is corrupt or cannot be decoded completely.
+    ImageDecodeFailure,
+    /// A required image has no OPC content type, so its encoding cannot be
+    /// validated against the package declaration.
+    ImageContentTypeMissing,
+    /// Decoded image dimensions exceed the per-image pixel/allocation limit.
+    ImageDimensionsExceedLimit,
+    /// Aggregate image count or decoded allocation exceeds document limits.
+    ImageAllocationExceedsLimit,
+    /// DrawingML source-crop values are malformed or remove the full image.
+    InvalidImageCrop,
+    /// A visible PPTX table style is missing or uses constructs outside the
+    /// faithfully implemented table-style cascade.
+    TableStyle,
     /// Autofit text that would need Word's iterative recompute.
     NeedsAutofitRecompute,
     /// An element (or number format / symbol) outside the enumerated envelope.
     UnknownElement,
+    /// No available font face maps one or more required Unicode code points.
+    MissingGlyph,
     /// The input exceeds the in-process size guard.
     InputTooLarge,
     /// The package decompresses past the entry/part/total budgets. A local
     /// envelope miss to route to the compatibility service — legitimate large
     /// documents can trip it, so it must never read as file corruption.
     DecompressionLimit,
+    /// The serialized conversion output exceeds the engine output budget.
+    /// The input was valid; a resource refusal, never file corruption.
+    OutputLimit,
     /// The bytes are not a valid OOXML package.
     InvalidFile,
 }
@@ -102,6 +146,19 @@ impl OfficeError {
         OfficeError::Unsupported {
             code,
             detail: detail.into(),
+        }
+    }
+
+    /// Adds part/slide/sheet context without erasing the stable error class.
+    pub(crate) fn context(self, prefix: impl std::fmt::Display) -> Self {
+        match self {
+            OfficeError::Unsupported { code, detail } => OfficeError::Unsupported {
+                code,
+                detail: format!("{prefix}: {detail}"),
+            },
+            OfficeError::Invalid(detail) => OfficeError::Invalid(format!("{prefix}: {detail}")),
+            OfficeError::Font(detail) => OfficeError::Font(format!("{prefix}: {detail}")),
+            OfficeError::Internal(detail) => OfficeError::Internal(format!("{prefix}: {detail}")),
         }
     }
 }

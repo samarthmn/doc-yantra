@@ -3,16 +3,20 @@
 //! settings, theme, decoded images, and parsed headers/footers.
 
 use super::{DocDates, EncodedImage, ImageId};
+use crate::drawing::chart::Chart;
+use crate::drawing::diagram::{DiagramFallback, DiagramStore};
+use crate::drawing::image::{add_to_budget, decode_required};
 use crate::fonts::FontDb;
 use crate::fonts::odttf;
 use crate::opc::Package;
 use crate::oxml::numbering::Numbering;
 use crate::oxml::settings::Settings;
 use crate::oxml::styles::StyleResolver;
+use crate::oxml::table_style;
 use crate::oxml::theme::Theme;
-use crate::oxml::wml::{self, BlockContent};
+use crate::oxml::wml::{self, BlockContent, NoteKind, NotesPart};
 use crate::oxml::{R, W, attr, child, children};
-use crate::{ConvertOptions, OfficeError, Result};
+use crate::{ConvertOptions, OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
 
 /// A resolved word document ready for layout.
@@ -37,6 +41,10 @@ pub struct WordDoc {
     part_rels: HashMap<String, HashMap<String, String>>,
     image_by_part: HashMap<String, usize>,
     headers: HashMap<String, Vec<BlockContent>>,
+    footnotes: NotesPart,
+    endnotes: NotesPart,
+    charts_by_part: HashMap<String, Chart>,
+    diagrams: DiagramStore,
 }
 
 impl WordDoc {
@@ -44,7 +52,7 @@ impl WordDoc {
     pub fn open(bytes: &[u8], opts: &ConvertOptions) -> Result<WordDoc> {
         let pkg = Package::open(bytes)?;
         let main_part = pkg.main_part()?;
-        let document = parse_part(&pkg, &main_part, wml::parse_document)?;
+        let mut document = parse_part(&pkg, &main_part, wml::parse_document)?;
 
         let styles = optional(&pkg, "word/styles.xml", StyleResolver::parse)?.unwrap_or_default();
         let numbering = optional(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
@@ -53,7 +61,7 @@ impl WordDoc {
 
         let mut fonts = FontDb::with_system(&opts.font_dirs);
         for fb in &opts.font_bytes {
-            fonts.register(fb.clone()).ok();
+            fonts.register(fb.clone())?;
         }
         register_embedded_fonts(&pkg, &mut fonts);
 
@@ -61,28 +69,98 @@ impl WordDoc {
         let mut part_rels = HashMap::new();
         part_rels.insert(main_part.clone(), rel_map(&pkg, &main_part));
 
-        // Parse headers/footers referenced by the final section.
+        // Parse headers/footers referenced by every section.
         let mut headers = HashMap::new();
-        for hf in document
-            .final_sect
-            .header_refs
-            .iter()
-            .chain(document.final_sect.footer_refs.iter())
-        {
-            if let Some(part) = part_rels[&main_part].get(&hf.rel_id).cloned()
-                && !headers.contains_key(&part)
-                && let Some(bytes) = pkg.part(&part)
-                && let Ok(text) = std::str::from_utf8(bytes)
-                && let Ok(blocks) = wml::parse_hdr_ftr(text)
+        let mut section_refs = Vec::new();
+        for block in &document.body {
+            if let BlockContent::Paragraph(paragraph) = block
+                && let Some(section) = &paragraph.sect_break
             {
-                part_rels.insert(part.clone(), rel_map(&pkg, &part));
-                headers.insert(part, blocks);
+                section_refs.extend(section.header_refs.iter().chain(&section.footer_refs));
+            }
+        }
+        section_refs.extend(
+            document
+                .final_sect
+                .header_refs
+                .iter()
+                .chain(document.final_sect.footer_refs.iter()),
+        );
+        for hf in section_refs {
+            let part = part_rels[&main_part]
+                .get(&hf.rel_id)
+                .cloned()
+                .ok_or_else(|| {
+                    OfficeError::Invalid(format!(
+                        "header/footer relationship {} is missing",
+                        hf.rel_id
+                    ))
+                })?;
+            if headers.contains_key(&part) {
+                continue;
+            }
+            let bytes = pkg
+                .part(&part)
+                .ok_or_else(|| OfficeError::Invalid(format!("missing part {part}")))?;
+            let text = std::str::from_utf8(bytes)
+                .map_err(|error| OfficeError::Invalid(format!("header/footer {part}: {error}")))?;
+            let (blocks, flags) = wml::parse_hdr_ftr_with_flags(text)
+                .map_err(|error| error.context(format_args!("header/footer {part}")))?;
+            document.flags.merge(&flags);
+            part_rels.insert(part.clone(), rel_map(&pkg, &part));
+            headers.insert(part, blocks);
+        }
+
+        let footnotes = optional(&pkg, "word/footnotes.xml", |xml| {
+            wml::parse_notes(xml, NoteKind::Footnote)
+        })?
+        .unwrap_or_default();
+        let endnotes = optional(&pkg, "word/endnotes.xml", |xml| {
+            wml::parse_notes(xml, NoteKind::Endnote)
+        })?
+        .unwrap_or_default();
+        document.flags.merge(&footnotes.flags);
+        document.flags.merge(&endnotes.flags);
+        for part in ["word/footnotes.xml", "word/endnotes.xml"] {
+            if pkg.part(part).is_some() {
+                part_rels.insert(part.to_string(), rel_map(&pkg, part));
             }
         }
 
+        // Resolve every table's style before layout, so the layout engine only
+        // ever sees fully-resolved table/row/cell properties.
+        let mut footnotes = footnotes;
+        let mut endnotes = endnotes;
+        table_style::apply_table_styles(&styles, &mut document.body);
+        for blocks in headers.values_mut() {
+            table_style::apply_table_styles(&styles, blocks);
+        }
+        table_style::apply_notes_table_styles(&styles, &mut footnotes);
+        table_style::apply_notes_table_styles(&styles, &mut endnotes);
+
         // Decode every image part referenced anywhere.
-        let (images, image_by_part) = decode_images(&pkg, &part_rels);
+        let (images, image_by_part) = decode_images(&pkg, &part_rels)?;
         let dates = core_dates(&pkg);
+        let diagrams = DiagramStore::load(&pkg)?;
+        let mut chart_parts: Vec<_> = part_rels
+            .values()
+            .flat_map(|rels| rels.values())
+            .cloned()
+            .collect();
+        chart_parts.sort();
+        chart_parts.dedup();
+        let mut charts_by_part = HashMap::new();
+        for part in chart_parts {
+            let Some(xml) = pkg
+                .part(&part)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            else {
+                continue;
+            };
+            if let Ok(chart) = Chart::parse(xml) {
+                charts_by_part.insert(part, chart);
+            }
+        }
 
         Ok(WordDoc {
             document,
@@ -97,7 +175,29 @@ impl WordDoc {
             part_rels,
             image_by_part,
             headers,
+            footnotes,
+            endnotes,
+            charts_by_part,
+            diagrams,
         })
+    }
+
+    /// Resolves note content and relationships by family/id.
+    pub fn note_content(
+        &self,
+        kind: NoteKind,
+        id: i64,
+    ) -> Option<(&[BlockContent], &HashMap<String, String>)> {
+        let (part, notes) = match kind {
+            NoteKind::Footnote => ("word/footnotes.xml", &self.footnotes),
+            NoteKind::Endnote => ("word/endnotes.xml", &self.endnotes),
+        };
+        Some((notes.notes.get(&id)?.as_slice(), self.part_rels.get(part)?))
+    }
+
+    /// All endnotes in stable id order.
+    pub fn endnotes(&self) -> &NotesPart {
+        &self.endnotes
     }
 
     /// The rel map (`rel_id -> target part`) of the main document part.
@@ -116,15 +216,44 @@ impl WordDoc {
         self.image_by_part.get(target).map(|&i| ImageId(i))
     }
 
+    /// Resolves a chart relationship against the current document part.
+    pub fn chart(&self, rels: &HashMap<String, String>, rel_id: &str) -> Option<&Chart> {
+        self.charts_by_part.get(rels.get(rel_id)?)
+    }
+
+    /// Resolves a SmartArt data relationship to its pre-rendered drawing fallback.
+    pub fn diagram(
+        &self,
+        rels: &HashMap<String, String>,
+        rel_id: &str,
+    ) -> Option<&DiagramFallback> {
+        self.diagrams.drawing(rels, rel_id)
+    }
+
+    /// Returns a typed reason when a SmartArt drawing fallback cannot be resolved.
+    pub fn diagram_error(
+        &self,
+        rels: &HashMap<String, String>,
+        rel_id: &str,
+    ) -> Option<(UnsupportedCode, String)> {
+        self.diagrams.error(rels, rel_id)
+    }
+
     /// Resolves a hyperlink `rel_id` to its external URL (if external).
     pub fn hyperlink_url(&self, rels: &HashMap<String, String>, rel_id: &str) -> Option<String> {
         rels.get(rel_id).cloned()
     }
 
     /// The parsed blocks of a header/footer part referenced by `rel_id`.
-    pub fn header_blocks(&self, rel_id: &str) -> Option<&[BlockContent]> {
+    pub fn header_content(
+        &self,
+        rel_id: &str,
+    ) -> Option<(&[BlockContent], &HashMap<String, String>)> {
         let part = self.main_rels().get(rel_id)?;
-        self.headers.get(part).map(Vec::as_slice)
+        Some((
+            self.headers.get(part)?.as_slice(),
+            self.part_rels.get(part)?,
+        ))
     }
 }
 
@@ -190,11 +319,10 @@ fn register_embedded_fonts(pkg: &Package, fonts: &mut FontDb) {
     }
 }
 
-/// Decodes every image part referenced by any collected part's rels.
 fn decode_images(
     pkg: &Package,
     part_rels: &HashMap<String, HashMap<String, String>>,
-) -> (Vec<EncodedImage>, HashMap<String, usize>) {
+) -> Result<(Vec<EncodedImage>, HashMap<String, usize>)> {
     let mut images = Vec::new();
     let mut by_part: HashMap<String, usize> = HashMap::new();
 
@@ -204,6 +332,7 @@ fn decode_images(
         .collect();
     targets.sort();
     targets.dedup();
+    let mut total_pixels = 0u64;
 
     for target in targets {
         if by_part.contains_key(&target) {
@@ -216,46 +345,19 @@ fn decode_images(
         if !is_image {
             continue;
         }
-        if let Some(bytes) = pkg.part(&target)
-            && let Some(decoded) = decode_image(ct, bytes)
-        {
-            by_part.insert(target, images.len());
-            images.push(decoded);
-        }
+        let bytes = pkg.part(&target).ok_or_else(|| {
+            OfficeError::unsupported(
+                UnsupportedCode::MissingRelationshipTarget,
+                format!("image relationship target {target} is missing"),
+            )
+        })?;
+        let (decoded, pixels) =
+            decode_required(ct, bytes).map_err(|error| error.context(&target))?;
+        add_to_budget(images.len(), &mut total_pixels, pixels)?;
+        by_part.insert(target, images.len());
+        images.push(decoded);
     }
-    (images, by_part)
-}
-
-/// Decodes a supported image part; `None` for unsupported containers.
-fn decode_image(content_type: &str, bytes: &[u8]) -> Option<EncodedImage> {
-    let is_jpeg = content_type.contains("jpeg") || content_type.contains("jpg");
-    if is_jpeg {
-        let (width, height) = image::load_from_memory(bytes)
-            .ok()
-            .map(|img| (img.width(), img.height()))?;
-        return Some(EncodedImage::Jpeg {
-            data: bytes.to_vec(),
-            width,
-            height,
-        });
-    }
-    // PNG (and anything else `image` can decode) → RGB8/RGBA8 samples.
-    let img = image::load_from_memory(bytes).ok()?;
-    let width = img.width();
-    let height = img.height();
-    if img.color().has_alpha() {
-        Some(EncodedImage::Rgba8 {
-            width,
-            height,
-            data: img.into_rgba8().into_raw(),
-        })
-    } else {
-        Some(EncodedImage::Rgb8 {
-            width,
-            height,
-            data: img.into_rgb8().into_raw(),
-        })
-    }
+    Ok((images, by_part))
 }
 
 /// Reads `docProps/core.xml` created/modified and formats PDF date literals.

@@ -4,14 +4,17 @@
 
 use crate::fonts::subset::{SubsetFont, subset_for_pdf};
 use crate::fonts::{FaceId, FontDb};
-use crate::layout::{EncodedImage, Item, LaidOutDocument, LinkTarget, Page, Positioned};
+use crate::layout::{
+    EncodedImage, FillRule, Item, LaidOutDocument, LinkTarget, Page, PathCommand, PathPaint,
+    Positioned, Stroke,
+};
 use crate::oxml::Rgba;
 use crate::profile::Warning;
 use crate::{OfficeError, Result};
-use pdf_writer::types::{ActionType, AnnotationType, CidFontType, SystemInfo};
+use pdf_writer::types::{ActionType, AnnotationType, CidFontType, SystemInfo, TextRenderingMode};
 use pdf_writer::{Content, Date, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use std::collections::{BTreeMap, BTreeSet};
-use ttf_parser::GlyphId;
+use ttf_parser::{GlyphId, OutlineBuilder};
 
 /// Emits the laid-out document to deterministic PDF bytes.
 ///
@@ -31,19 +34,19 @@ pub fn emit(
     }
 
     // 1. Collect used glyphs per face and subset.
-    let used = collect_used_glyphs(laid);
+    let used = collect_used_glyphs(laid)?;
     let mut subsets: BTreeMap<FaceId, EmbeddedFont> = BTreeMap::new();
-    for (face_id, (gids, chars)) in &used {
+    for (face_id, usage) in &used {
         let Some(face) = fonts.face(*face_id) else {
             continue;
         };
-        let subset = subset_for_pdf(face, gids, chars)?;
+        let subset = subset_for_pdf(face, &usage.gids, &usage.chars)?;
         if let Some(w) = &subset.warning
             && !warnings.contains(w)
         {
             warnings.push(w.clone());
         }
-        subsets.insert(*face_id, EmbeddedFont::new(subset));
+        subsets.insert(*face_id, EmbeddedFont::new(subset, &usage.semantic_pairs)?);
     }
 
     let mut pdf = Pdf::new();
@@ -66,7 +69,8 @@ pub fn emit(
         f.cid = alloc();
         f.descriptor = alloc();
         f.file = alloc();
-        f.to_unicode = alloc();
+        f.to_unicode_ref = alloc();
+        f.mapping = alloc();
     }
 
     // Image object refs (+ smask for RGBA).
@@ -136,7 +140,7 @@ pub fn emit(
 
     // 5. Pages + content.
     for (i, page) in laid.pages.iter().enumerate() {
-        let content = render_page(page, &subsets, &face_order);
+        let content = render_page(page, &subsets, &face_order)?;
         let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&content, 6);
 
         let mut p = pdf.page(page_ids[i]);
@@ -232,41 +236,204 @@ struct EmbeddedFont {
     cid: Ref,
     descriptor: Ref,
     file: Ref,
-    to_unicode: Ref,
+    to_unicode_ref: Ref,
+    mapping: Ref,
+    semantic_cids: BTreeMap<SemanticKey, u16>,
+    painted_cids: BTreeMap<(u16, char), u16>,
+    cid_to_gid: BTreeMap<u16, u16>,
+    to_unicode: BTreeMap<u16, String>,
 }
 
 impl EmbeddedFont {
-    fn new(subset: SubsetFont) -> EmbeddedFont {
-        let cid_widths = subset.widths.iter().map(|&(c, w)| (c, w as f32)).collect();
-        EmbeddedFont {
+    fn new(subset: SubsetFont, semantic_pairs: &BTreeSet<SemanticKey>) -> Result<EmbeddedFont> {
+        let mut cid_widths: BTreeMap<u16, f32> =
+            subset.widths.iter().map(|&(c, w)| (c, w as f32)).collect();
+        let mut cid_to_gid: BTreeMap<u16, u16> = subset
+            .remap
+            .values()
+            .copied()
+            .map(|gid| (gid, gid))
+            .collect();
+        let mut to_unicode: BTreeMap<u16, String> = subset.to_unicode.iter().cloned().collect();
+        to_unicode.retain(|_, source| !source.is_empty());
+        let mut semantic_cids = BTreeMap::new();
+        let mut painted_cids = BTreeMap::new();
+        let mut next_cid = subset
+            .remap
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                OfficeError::unsupported(
+                    crate::UnsupportedCode::DecompressionLimit,
+                    "font needs more than 65535 CIDs",
+                )
+            })?;
+        for (gid, source, owns_advance) in semantic_pairs {
+            let subset_gid = subset.remap.get(gid).copied().unwrap_or(0);
+            semantic_cids.insert((*gid, source.clone(), *owns_advance), next_cid);
+            let mut characters = source.chars();
+            if let Some(character) = characters.next()
+                && characters.next().is_none()
+                && *owns_advance
+            {
+                painted_cids.insert((*gid, character), next_cid);
+            }
+            to_unicode.insert(next_cid, source.clone());
+            let base_width = cid_widths.get(&subset_gid).copied().unwrap_or(0.0);
+            // A combining-mark owner can legitimately have a zero font advance even
+            // when its complete shaped cluster spans visible base glyphs. Semantic CIDs
+            // are invisible, so a nonzero backing glyph from the same subset can safely
+            // supply usable viewer metrics while the CID's ToUnicode value remains the
+            // complete logical source sequence.
+            let (backing_gid, width) = if !*owns_advance {
+                (subset_gid, 0.0)
+            } else if base_width.abs() > f32::EPSILON {
+                (subset_gid, base_width)
+            } else {
+                subset
+                    .remap
+                    .values()
+                    .find_map(|candidate| {
+                        let width = cid_widths.get(candidate).copied().unwrap_or(0.0);
+                        (width.abs() > f32::EPSILON).then_some((*candidate, width))
+                    })
+                    .unwrap_or((subset_gid, 1000.0))
+            };
+            cid_to_gid.insert(next_cid, backing_gid);
+            cid_widths.insert(next_cid, width);
+            next_cid = next_cid.checked_add(1).ok_or_else(|| {
+                OfficeError::unsupported(
+                    crate::UnsupportedCode::DecompressionLimit,
+                    "font needs more than 65535 CIDs",
+                )
+            })?;
+        }
+        Ok(EmbeddedFont {
             subset,
             cid_widths,
             type0: Ref::new(1),
             cid: Ref::new(1),
             descriptor: Ref::new(1),
             file: Ref::new(1),
-            to_unicode: Ref::new(1),
-        }
+            to_unicode_ref: Ref::new(1),
+            mapping: Ref::new(1),
+            semantic_cids,
+            painted_cids,
+            cid_to_gid,
+            to_unicode,
+        })
     }
 }
 
-fn collect_used_glyphs(
-    laid: &LaidOutDocument,
-) -> BTreeMap<FaceId, (BTreeSet<GlyphId>, BTreeMap<GlyphId, char>)> {
-    let mut used: BTreeMap<FaceId, (BTreeSet<GlyphId>, BTreeMap<GlyphId, char>)> = BTreeMap::new();
+#[derive(Default)]
+struct UsedFace {
+    gids: BTreeSet<GlyphId>,
+    chars: BTreeMap<GlyphId, char>,
+    semantic_pairs: BTreeSet<SemanticKey>,
+}
+
+type SemanticKey = (u16, String, bool);
+
+type UsedGlyphs = BTreeMap<FaceId, UsedFace>;
+
+fn collect_used_glyphs(laid: &LaidOutDocument) -> Result<UsedGlyphs> {
+    const MAX_GLYPHS: usize = 10_000_000;
+    let mut used = UsedGlyphs::new();
+    let mut glyph_count = 0usize;
     for page in &laid.pages {
         for pos in &page.items {
-            if let Item::Glyphs(run) = &pos.item {
-                let entry = used.entry(run.face).or_default();
-                for g in &run.glyphs {
-                    let gid = GlyphId(g.gid);
-                    entry.0.insert(gid);
-                    entry.1.entry(gid).or_insert(g.ch);
+            collect_item_glyphs(&pos.item, &mut used, &mut glyph_count, MAX_GLYPHS)?;
+        }
+    }
+    Ok(used)
+}
+
+fn collect_item_glyphs(
+    item: &Item,
+    used: &mut UsedGlyphs,
+    glyph_count: &mut usize,
+    limit: usize,
+) -> Result<()> {
+    match item {
+        Item::Transform { item, .. } => collect_item_glyphs(item, used, glyph_count, limit)?,
+        Item::Clip { items, .. } => {
+            for positioned in items {
+                collect_item_glyphs(&positioned.item, used, glyph_count, limit)?;
+            }
+        }
+        Item::SemanticText(run) => {
+            let semantic_count = run.clusters.iter().fold(0usize, |count, cluster| {
+                count.saturating_add(cluster.source.chars().count())
+            });
+            *glyph_count = glyph_count.saturating_add(semantic_count);
+            if *glyph_count > limit {
+                return Err(OfficeError::unsupported(
+                    crate::UnsupportedCode::DecompressionLimit,
+                    format!("text glyph count exceeds limit {limit}"),
+                ));
+            }
+            let entry = used.entry(run.face).or_default();
+            let semantic: Vec<_> = run
+                .clusters
+                .iter()
+                .map(|cluster| {
+                    entry.gids.insert(GlyphId(cluster.gid));
+                    (cluster.gid, cluster.source.clone(), cluster.advance_pt)
+                })
+                .collect();
+            collect_semantic_pairs(entry, &semantic, Some(run.base_direction))?;
+        }
+        Item::Glyphs(run) => {
+            *glyph_count = glyph_count.saturating_add(run.glyphs.len());
+            if *glyph_count > limit {
+                return Err(OfficeError::unsupported(
+                    crate::UnsupportedCode::DecompressionLimit,
+                    format!("text glyph count exceeds limit {limit}"),
+                ));
+            }
+            let entry = used.entry(run.face).or_default();
+            let semantic_clusters = semantic_clusters(&run.glyphs);
+            collect_semantic_pairs(entry, &semantic_clusters, run.base_direction)?;
+            for g in &run.glyphs {
+                if is_semantic_glyph(g) {
+                    continue;
+                }
+                let gid = GlyphId(g.gid);
+                entry.gids.insert(gid);
+                if g.ch != '\0' {
+                    entry.semantic_pairs.insert((g.gid, g.ch.to_string(), true));
                 }
             }
         }
+        _ => {}
     }
-    used
+    Ok(())
+}
+
+fn collect_semantic_pairs(
+    entry: &mut UsedFace,
+    semantic: &[(u16, String, f64)],
+    base_direction: Option<text_core::Direction>,
+) -> Result<()> {
+    if semantic.is_empty() {
+        return Ok(());
+    }
+    let logical: String = semantic
+        .iter()
+        .map(|(_, source, _)| source.as_str())
+        .collect();
+    for token in visual_semantic_tokens(semantic, &logical, base_direction)? {
+        for (gid, source, advance_pt) in token {
+            entry.gids.insert(GlyphId(gid));
+            entry
+                .semantic_pairs
+                .insert((gid, source, advance_pt.abs() > f64::EPSILON));
+        }
+    }
+    Ok(())
 }
 
 fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
@@ -275,7 +442,7 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
         .base_font(Name(b"OfficeCoreSubset"))
         .encoding_predefined(Name(b"Identity-H"))
         .descendant_font(f.cid)
-        .to_unicode(f.to_unicode);
+        .to_unicode(f.to_unicode_ref);
 
     // CIDFontType2.
     {
@@ -288,7 +455,7 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
                 supplement: 0,
             })
             .font_descriptor(f.descriptor)
-            .cid_to_gid_map_predefined(Name(b"Identity"));
+            .cid_to_gid_map_stream(f.mapping);
         if let (Some(&min), Some(&max)) =
             (f.cid_widths.keys().next(), f.cid_widths.keys().next_back())
         {
@@ -318,12 +485,14 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
     .filter(Filter::FlateDecode);
 
     // ToUnicode CMap.
-    let cmap = build_to_unicode(&f.subset);
+    let cmap = build_to_unicode(&f.to_unicode);
     pdf.stream(
-        f.to_unicode,
+        f.to_unicode_ref,
         &miniz_oxide::deflate::compress_to_vec_zlib(&cmap, 6),
     )
     .filter(Filter::FlateDecode);
+    let mapping = build_cid_to_gid(&f.cid_to_gid);
+    pdf.stream(f.mapping, &mapping);
 }
 
 fn write_image(pdf: &mut Pdf, img: &EncodedImage, main: Ref, smask: Option<Ref>) {
@@ -393,32 +562,99 @@ fn render_page(
     page: &Page,
     subsets: &BTreeMap<FaceId, EmbeddedFont>,
     face_order: &[FaceId],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut content = Content::new();
     let h = page.height_pt;
     for pos in &page.items {
-        match &pos.item {
-            Item::Rect {
-                w_pt,
-                h_pt,
-                fill,
-                stroke,
-            } => draw_rect(&mut content, pos, h, *w_pt, *h_pt, fill, stroke),
-            Item::Line {
-                dx_pt,
-                dy_pt,
-                stroke,
-            } => draw_line(&mut content, pos, h, *dx_pt, *dy_pt, stroke),
-            Item::Glyphs(run) => draw_glyphs(&mut content, pos, h, run, subsets, face_order),
-            Item::Image {
-                w_pt,
-                h_pt,
-                image_id,
-            } => draw_image(&mut content, pos, h, *w_pt, *h_pt, image_id.0),
-            Item::Link { .. } => {} // handled as annotations
-        }
+        draw_item(&mut content, pos, h, &pos.item, subsets, face_order)?;
     }
-    content.finish().to_vec()
+    Ok(content.finish().to_vec())
+}
+
+fn draw_item(
+    content: &mut Content,
+    pos: &Positioned,
+    page_h: f64,
+    item: &Item,
+    subsets: &BTreeMap<FaceId, EmbeddedFont>,
+    face_order: &[FaceId],
+) -> Result<()> {
+    match item {
+        Item::Transform { matrix, item } => {
+            let [a, b, c, d, e, f] = *matrix;
+            content.save_state();
+            content.transform([
+                a as f32,
+                -b as f32,
+                -c as f32,
+                d as f32,
+                (e + c * page_h) as f32,
+                (page_h - d * page_h - f) as f32,
+            ]);
+            draw_item(content, pos, page_h, item, subsets, face_order)?;
+            content.restore_state();
+        }
+        Item::Rect {
+            w_pt,
+            h_pt,
+            fill,
+            stroke,
+        } => draw_rect(content, pos, page_h, *w_pt, *h_pt, fill, stroke),
+        Item::Line {
+            dx_pt,
+            dy_pt,
+            stroke,
+        } => draw_line(content, pos, page_h, *dx_pt, *dy_pt, stroke),
+        Item::Path { commands, paint } => {
+            draw_path(content, pos, page_h, commands, paint);
+        }
+        Item::Clip {
+            commands,
+            fill_rule,
+            items,
+        } => {
+            content.save_state();
+            append_path(content, pos, page_h, commands);
+            match fill_rule {
+                FillRule::NonZero => content.clip_nonzero(),
+                FillRule::EvenOdd => content.clip_even_odd(),
+            };
+            content.end_path();
+            for child in items {
+                let child_pos = Positioned {
+                    x_pt: pos.x_pt + child.x_pt,
+                    y_pt: pos.y_pt + child.y_pt,
+                    item: child.item.clone(),
+                };
+                draw_item(
+                    content,
+                    &child_pos,
+                    page_h,
+                    &child_pos.item,
+                    subsets,
+                    face_order,
+                )?;
+            }
+            content.restore_state();
+        }
+        Item::Glyphs(run) => draw_glyphs(content, pos, page_h, run, subsets, face_order)?,
+        Item::SemanticText(run) => {
+            draw_semantic_run(content, pos, page_h, run, subsets, face_order)?
+        }
+        Item::Image {
+            w_pt,
+            h_pt,
+            image_id,
+        } => draw_image(content, pos, page_h, *w_pt, *h_pt, image_id.0),
+        Item::CroppedImage {
+            w_pt,
+            h_pt,
+            image_id,
+            crop,
+        } => draw_cropped_image(content, pos, page_h, *w_pt, *h_pt, image_id.0, *crop),
+        Item::Link { .. } => {} // handled as annotations
+    }
+    Ok(())
 }
 
 fn set_fill(content: &mut Content, c: Rgba) {
@@ -426,6 +662,77 @@ fn set_fill(content: &mut Content, c: Rgba) {
 }
 fn set_stroke(content: &mut Content, c: Rgba) {
     content.set_stroke_rgb(c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0);
+}
+
+fn apply_stroke(content: &mut Content, stroke: &Stroke) {
+    set_stroke(content, stroke.color);
+    content.set_line_width(stroke.width_pt as f32);
+    content.set_dash_pattern(
+        stroke
+            .dash
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|value| *value as f32),
+        0.0,
+    );
+}
+
+fn append_path(content: &mut Content, pos: &Positioned, page_h: f64, commands: &[PathCommand]) {
+    for command in commands {
+        match *command {
+            PathCommand::MoveTo { x, y } => {
+                content.move_to((pos.x_pt + x) as f32, (page_h - pos.y_pt - y) as f32);
+            }
+            PathCommand::LineTo { x, y } => {
+                content.line_to((pos.x_pt + x) as f32, (page_h - pos.y_pt - y) as f32);
+            }
+            PathCommand::CubicTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
+                content.cubic_to(
+                    (pos.x_pt + x1) as f32,
+                    (page_h - pos.y_pt - y1) as f32,
+                    (pos.x_pt + x2) as f32,
+                    (page_h - pos.y_pt - y2) as f32,
+                    (pos.x_pt + x) as f32,
+                    (page_h - pos.y_pt - y) as f32,
+                );
+            }
+            PathCommand::Close => {
+                content.close_path();
+            }
+        }
+    }
+}
+
+fn draw_path(
+    content: &mut Content,
+    pos: &Positioned,
+    page_h: f64,
+    commands: &[PathCommand],
+    paint: &PathPaint,
+) {
+    append_path(content, pos, page_h, commands);
+    if let Some(fill) = paint.fill {
+        set_fill(content, fill);
+    }
+    if let Some(stroke) = &paint.stroke {
+        apply_stroke(content, stroke);
+    }
+    match (&paint.fill, &paint.stroke, paint.fill_rule) {
+        (Some(_), Some(_), FillRule::NonZero) => content.fill_nonzero_and_stroke(),
+        (Some(_), Some(_), FillRule::EvenOdd) => content.fill_even_odd_and_stroke(),
+        (Some(_), None, FillRule::NonZero) => content.fill_nonzero(),
+        (Some(_), None, FillRule::EvenOdd) => content.fill_even_odd(),
+        (None, Some(_), _) => content.stroke(),
+        (None, None, _) => content.end_path(),
+    };
 }
 
 fn draw_rect(
@@ -442,8 +749,7 @@ fn draw_rect(
     match (fill, stroke) {
         (Some(f), Some(s)) => {
             set_fill(content, *f);
-            set_stroke(content, s.color);
-            content.set_line_width(s.width_pt as f32);
+            apply_stroke(content, s);
             content.fill_nonzero_and_stroke();
         }
         (Some(f), None) => {
@@ -451,8 +757,7 @@ fn draw_rect(
             content.fill_nonzero();
         }
         (None, Some(s)) => {
-            set_stroke(content, s.color);
-            content.set_line_width(s.width_pt as f32);
+            apply_stroke(content, s);
             content.stroke();
         }
         (None, None) => {}
@@ -467,8 +772,7 @@ fn draw_line(
     dy: f64,
     stroke: &crate::layout::Stroke,
 ) {
-    set_stroke(content, stroke.color);
-    content.set_line_width(stroke.width_pt as f32);
+    apply_stroke(content, stroke);
     content.move_to(pos.x_pt as f32, (page_h - pos.y_pt) as f32);
     content.line_to((pos.x_pt + dx) as f32, (page_h - (pos.y_pt + dy)) as f32);
     content.stroke();
@@ -481,14 +785,79 @@ fn draw_glyphs(
     run: &crate::layout::GlyphRun,
     subsets: &BTreeMap<FaceId, EmbeddedFont>,
     face_order: &[FaceId],
-) {
+) -> Result<()> {
+    draw_glyphs_impl(content, pos, page_h, run, subsets, face_order, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_glyphs_impl(
+    content: &mut Content,
+    pos: &Positioned,
+    page_h: f64,
+    run: &crate::layout::GlyphRun,
+    subsets: &BTreeMap<FaceId, EmbeddedFont>,
+    face_order: &[FaceId],
+    mark_artifact: bool,
+) -> Result<()> {
     let Some(font) = subsets.get(&run.face) else {
-        return;
+        return Err(OfficeError::Internal(format!(
+            "missing embedded font for laid-out face {:?}",
+            run.face
+        )));
     };
     let idx = face_order.iter().position(|f| *f == run.face).unwrap_or(0);
     let baseline = page_h - pos.y_pt;
+    let semantic = semantic_clusters(&run.glyphs);
+    if !semantic.is_empty() {
+        draw_semantic_text(content, pos, baseline, run, idx, font, &semantic)?;
+        let mut visible = run.clone();
+        visible.glyphs.retain(|glyph| !is_semantic_glyph(glyph));
+        if visible.glyphs.is_empty() {
+            return Ok(());
+        }
+        draw_glyphs_impl(content, pos, page_h, &visible, subsets, face_order, true)?;
+        return Ok(());
+    }
+    if mark_artifact && run.glyphs.iter().all(|glyph| glyph.ch == '\0') {
+        draw_glyph_outlines(content, pos, baseline, run, font)?;
+        if let Some(dec) = run.underline {
+            draw_decor(content, pos, page_h, run, dec.thickness_pt, dec.y_offset_pt);
+        }
+        if let Some(dec) = run.strike {
+            draw_decor(content, pos, page_h, run, dec.thickness_pt, dec.y_offset_pt);
+        }
+        return Ok(());
+    }
+
+    if run
+        .glyphs
+        .iter()
+        .any(|glyph| glyph.x_offset_pt != 0.0 || glyph.y_offset_pt != 0.0)
+    {
+        let mut cursor = pos.x_pt;
+        for glyph in &run.glyphs {
+            let cid = painted_cid(font, glyph);
+            content.begin_text();
+            content.set_text_rendering_mode(TextRenderingMode::Fill);
+            set_fill(content, run.color);
+            content.set_font(Name(font_res_name(idx).as_bytes()), run.size_pt as f32);
+            content.set_text_matrix([
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                (cursor + glyph.x_offset_pt) as f32,
+                (baseline + glyph.y_offset_pt) as f32,
+            ]);
+            content.show(Str(&cid.to_be_bytes()));
+            content.end_text();
+            cursor += glyph.advance_pt;
+        }
+        return Ok(());
+    }
 
     content.begin_text();
+    content.set_text_rendering_mode(TextRenderingMode::Fill);
     set_fill(content, run.color);
     content.set_font(Name(font_res_name(idx).as_bytes()), run.size_pt as f32);
     content.set_text_matrix([1.0, 0.0, 0.0, 1.0, pos.x_pt as f32, baseline as f32]);
@@ -496,7 +865,7 @@ fn draw_glyphs(
     let mut tj = content.show_positioned();
     let mut items = tj.items();
     for g in &run.glyphs {
-        let cid = font.subset.remap.get(&g.gid).copied().unwrap_or(0);
+        let cid = painted_cid(font, g);
         items.show(Str(&cid.to_be_bytes()));
         let font_w = font.cid_widths.get(&cid).copied().unwrap_or(0.0);
         let actual_1000 = (g.advance_pt / run.size_pt.max(0.01) * 1000.0) as f32;
@@ -516,6 +885,554 @@ fn draw_glyphs(
     if let Some(dec) = run.strike {
         draw_decor(content, pos, page_h, run, dec.thickness_pt, dec.y_offset_pt);
     }
+    Ok(())
+}
+
+struct PdfGlyphOutline<'a> {
+    content: &'a mut Content,
+    origin_x: f32,
+    origin_y: f32,
+    scale: f32,
+    current: (f32, f32),
+    contour_start: (f32, f32),
+}
+
+impl PdfGlyphOutline<'_> {
+    fn point(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.origin_x + x * self.scale,
+            self.origin_y + y * self.scale,
+        )
+    }
+}
+
+impl OutlineBuilder for PdfGlyphOutline<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let point = self.point(x, y);
+        self.content.move_to(point.0, point.1);
+        self.current = point;
+        self.contour_start = point;
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let point = self.point(x, y);
+        self.content.line_to(point.0, point.1);
+        self.current = point;
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let control = self.point(x1, y1);
+        let end = self.point(x, y);
+        let first = (
+            self.current.0 + (control.0 - self.current.0) * (2.0 / 3.0),
+            self.current.1 + (control.1 - self.current.1) * (2.0 / 3.0),
+        );
+        let second = (
+            end.0 + (control.0 - end.0) * (2.0 / 3.0),
+            end.1 + (control.1 - end.1) * (2.0 / 3.0),
+        );
+        self.content
+            .cubic_to(first.0, first.1, second.0, second.1, end.0, end.1);
+        self.current = end;
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let first = self.point(x1, y1);
+        let second = self.point(x2, y2);
+        let end = self.point(x, y);
+        self.content
+            .cubic_to(first.0, first.1, second.0, second.1, end.0, end.1);
+        self.current = end;
+    }
+
+    fn close(&mut self) {
+        self.content.close_path();
+        self.current = self.contour_start;
+    }
+}
+
+fn draw_glyph_outlines(
+    content: &mut Content,
+    pos: &Positioned,
+    baseline: f64,
+    run: &crate::layout::GlyphRun,
+    font: &EmbeddedFont,
+) -> Result<()> {
+    let face = ttf_parser::Face::parse(&font.subset.data, 0).map_err(|error| {
+        OfficeError::Font(format!(
+            "embedded font subset could not be parsed during glyph painting: {error:?}"
+        ))
+    })?;
+    let scale = run.size_pt as f32 / f32::from(face.units_per_em().max(1));
+    let mut cursor = pos.x_pt;
+    set_fill(content, run.color);
+    for glyph in &run.glyphs {
+        let subset_gid = font.subset.remap.get(&glyph.gid).copied().ok_or_else(|| {
+            OfficeError::Font(format!(
+                "painted glyph {} is absent from the embedded font subset",
+                glyph.gid
+            ))
+        })?;
+        let outlined = {
+            let mut outline = PdfGlyphOutline {
+                content,
+                origin_x: (cursor + glyph.x_offset_pt) as f32,
+                origin_y: (baseline + glyph.y_offset_pt) as f32,
+                scale,
+                current: (0.0, 0.0),
+                contour_start: (0.0, 0.0),
+            };
+            let outlined = face
+                .outline_glyph(GlyphId(subset_gid), &mut outline)
+                .is_some();
+            if outlined {
+                outline.content.fill_nonzero();
+            }
+            outlined
+        };
+        if !outlined && face.glyph_bounding_box(GlyphId(subset_gid)).is_some() {
+            return Err(OfficeError::Font(format!(
+                "painted glyph {} has bounds but its outline could not be emitted",
+                glyph.gid
+            )));
+        }
+        cursor += glyph.advance_pt;
+    }
+    Ok(())
+}
+
+fn draw_semantic_text(
+    content: &mut Content,
+    pos: &Positioned,
+    baseline: f64,
+    run: &crate::layout::GlyphRun,
+    font_index: usize,
+    font: &EmbeddedFont,
+    semantic: &[(u16, String, f64)],
+) -> Result<()> {
+    // Semantic clusters carry the complete shaped-run width even when fallback faces
+    // split the painted suffix into a separate GlyphRun. Any visible glyphs sharing this
+    // run are necessarily that suffix, so backtrack over the remainder to recover the
+    // source run's physical origin. Paragraph justification has already been folded into
+    // whitespace semantic-cluster advances by line layout.
+    let painted_width: f64 = run
+        .glyphs
+        .iter()
+        .filter(|glyph| !is_semantic_glyph(glyph))
+        .map(|glyph| glyph.advance_pt)
+        .sum();
+    let semantic_width: f64 = semantic.iter().map(|(_, _, advance)| *advance).sum();
+    let origin_x = pos.x_pt - (semantic_width - painted_width).max(0.0);
+
+    draw_semantic_layer(
+        content,
+        origin_x,
+        baseline,
+        run.size_pt,
+        run.base_direction,
+        font_index,
+        font,
+        semantic,
+    )
+}
+
+fn draw_semantic_run(
+    content: &mut Content,
+    pos: &Positioned,
+    page_h: f64,
+    run: &crate::layout::SemanticRun,
+    subsets: &BTreeMap<FaceId, EmbeddedFont>,
+    face_order: &[FaceId],
+) -> Result<()> {
+    let font = subsets.get(&run.face).ok_or_else(|| {
+        OfficeError::Internal(format!(
+            "missing embedded font for semantic face {:?}",
+            run.face
+        ))
+    })?;
+    let font_index = face_order
+        .iter()
+        .position(|face| *face == run.face)
+        .unwrap_or(0);
+    let semantic: Vec<_> = run
+        .clusters
+        .iter()
+        .map(|cluster| (cluster.gid, cluster.source.clone(), cluster.advance_pt))
+        .collect();
+    draw_semantic_layer(
+        content,
+        pos.x_pt,
+        page_h - pos.y_pt,
+        run.size_pt,
+        Some(run.base_direction),
+        font_index,
+        font,
+        &semantic,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_semantic_layer(
+    content: &mut Content,
+    origin_x: f64,
+    baseline: f64,
+    size_pt: f64,
+    base_direction: Option<text_core::Direction>,
+    font_index: usize,
+    font: &EmbeddedFont,
+    semantic: &[(u16, String, f64)],
+) -> Result<()> {
+    if semantic.is_empty() {
+        return Ok(());
+    }
+    let logical: String = semantic.iter().map(|pair| pair.1.as_str()).collect();
+    let actual_text = pdfium_actual_text(&logical, base_direction);
+    let visual_semantic = visual_semantic_tokens(semantic, &logical, base_direction)?;
+    let mut marked = content.begin_marked_content_with_properties(Name(b"Span"));
+    marked.properties().actual_text(TextStr(&actual_text));
+    marked.finish();
+
+    let semantic_width: f64 = semantic.iter().map(|(_, _, advance)| *advance).sum();
+
+    let rtl = base_direction.unwrap_or_else(|| text_core::bidi_base_direction(&logical))
+        == text_core::Direction::Rtl;
+    let mut cursor = if rtl {
+        origin_x + semantic_width
+    } else {
+        origin_x
+    };
+    for token in &visual_semantic {
+        let desired_width: f64 = token.iter().map(|(_, _, advance)| *advance).sum();
+        let x = if rtl {
+            cursor -= desired_width;
+            cursor
+        } else {
+            let x = cursor;
+            cursor += desired_width;
+            x
+        };
+        content.begin_text();
+        content.set_text_rendering_mode(TextRenderingMode::Invisible);
+        content.set_font(Name(font_res_name(font_index).as_bytes()), size_pt as f32);
+        let mut encoded = Vec::with_capacity(token.len().saturating_mul(2));
+        let mut natural_width_1000 = 0.0_f64;
+        for (gid, source, advance_pt) in token {
+            let cid = font
+                .semantic_cids
+                .get(&(*gid, source.clone(), advance_pt.abs() > f64::EPSILON))
+                .copied()
+                .ok_or_else(|| {
+                    OfficeError::Internal(format!(
+                        "semantic text CID is missing for glyph {gid} and source {source:?}"
+                    ))
+                })?;
+            encoded.extend_from_slice(&cid.to_be_bytes());
+            natural_width_1000 += f64::from(font.cid_widths.get(&cid).copied().unwrap_or(0.0));
+        }
+        let natural_width_pt = natural_width_1000 / 1000.0 * size_pt.max(0.01);
+        if natural_width_pt <= f64::EPSILON && desired_width > f64::EPSILON {
+            return Err(OfficeError::Font(
+                "semantic text token has no usable embedded-font width".to_string(),
+            ));
+        }
+        let horizontal_scale = if natural_width_pt > f64::EPSILON {
+            desired_width / natural_width_pt
+        } else {
+            1.0
+        };
+        content.set_text_matrix([
+            horizontal_scale as f32,
+            0.0,
+            0.0,
+            1.0,
+            x as f32,
+            baseline as f32,
+        ]);
+        content.show(Str(&encoded));
+        content.end_text();
+    }
+    content.end_marked_content();
+    Ok(())
+}
+
+fn visual_semantic_tokens(
+    semantic: &[(u16, String, f64)],
+    logical: &str,
+    base_direction: Option<text_core::Direction>,
+) -> Result<Vec<Vec<(u16, String, f64)>>> {
+    let Some(owner_gid) = semantic.first().map(|(gid, _, _)| *gid) else {
+        return Ok(Vec::new());
+    };
+    let tokens = pdfjs_semantic_tokens(logical, base_direction);
+    let advances = semantic_token_advances(semantic);
+    let cluster_counts = semantic_token_cluster_counts(semantic);
+    if tokens.len() != advances.len() || tokens.len() != cluster_counts.len() {
+        return Err(OfficeError::Internal(format!(
+            "semantic token count mismatch: {} text tokens, {} advance tokens, {} cluster counts",
+            tokens.len(),
+            advances.len(),
+            cluster_counts.len()
+        )));
+    }
+    Ok(tokens
+        .into_iter()
+        .zip(advances)
+        .zip(cluster_counts)
+        .map(|((token, advance), cluster_count)| {
+            if cluster_count == 1 && token.chars().count() > 1 {
+                let characters: Vec<_> = token.chars().collect();
+                let advance_owner = characters
+                    .iter()
+                    .position(|character| !is_semantic_modifier(*character))
+                    .unwrap_or(0);
+                characters
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, character)| {
+                        (
+                            owner_gid,
+                            character.to_string(),
+                            if index == advance_owner { advance } else { 0.0 },
+                        )
+                    })
+                    .collect()
+            } else {
+                vec![(owner_gid, token, advance)]
+            }
+        })
+        .collect())
+}
+
+fn semantic_token_cluster_counts(semantic: &[(u16, String, f64)]) -> Vec<usize> {
+    let mut counts = Vec::new();
+    let mut current_kind = None;
+    let mut current_count = 0usize;
+    for (_, source, _) in semantic {
+        let mut cluster_kind = None;
+        for character in source.chars() {
+            let kind = character.is_whitespace();
+            if cluster_kind == Some(kind) {
+                continue;
+            }
+            cluster_kind = Some(kind);
+            if current_kind.is_some_and(|current| current != kind) {
+                counts.push(current_count);
+                current_count = 0;
+            }
+            current_kind = Some(kind);
+            current_count += 1;
+        }
+    }
+    if current_kind.is_some() {
+        counts.push(current_count);
+    }
+    counts
+}
+
+fn semantic_token_advances(semantic: &[(u16, String, f64)]) -> Vec<f64> {
+    let mut advances = Vec::new();
+    let mut current_kind = None;
+    let mut current_advance = 0.0;
+    for (_, source, cluster_advance) in semantic {
+        let mut segments: Vec<(bool, usize)> = Vec::new();
+        for character in source.chars() {
+            let whitespace = character.is_whitespace();
+            if let Some((kind, count)) = segments.last_mut()
+                && *kind == whitespace
+            {
+                *count += 1;
+            } else {
+                segments.push((whitespace, 1));
+            }
+        }
+        let scalar_count: usize = segments.iter().map(|(_, count)| *count).sum();
+        for (kind, count) in segments {
+            if current_kind.is_some_and(|current| current != kind) {
+                advances.push(current_advance);
+                current_advance = 0.0;
+            }
+            current_kind = Some(kind);
+            current_advance += if scalar_count == count {
+                *cluster_advance
+            } else {
+                *cluster_advance * count as f64 / scalar_count as f64
+            };
+        }
+    }
+    if current_kind.is_some() {
+        advances.push(current_advance);
+    }
+    advances
+}
+
+/// Pre-compensates semantic text for PDFium's extraction-time bidi pass.
+///
+/// PDFium reorders RTL `/ActualText` as if it were still in logical order, so
+/// serializing UAX #9 display order here makes the extracted result logical.
+/// Combining marks inside RTL sequences need the inverse order as well because
+/// PDFium reverses them together with their base characters.
+fn pdfium_actual_text(text: &str, base_direction: Option<text_core::Direction>) -> String {
+    let visual = text_core::bidi_visual_order_with_base(text, base_direction);
+    reverse_rtl_combining_sequences(&visual)
+}
+
+/// Pre-compensates each PDF.js text item while preserving logical item order.
+///
+/// PDF.js applies bidi reordering independently to the non-whitespace items it
+/// derives from a content stream. A full paragraph visual order would therefore
+/// reverse both the characters and the word sequence twice. Keeping whitespace
+/// boundaries in logical order while visualizing each token lets PDF.js recover
+/// the original source sequence.
+#[cfg(test)]
+fn pdfjs_semantic_text(text: &str) -> String {
+    pdfjs_semantic_tokens(text, None).concat()
+}
+
+fn pdfjs_semantic_tokens(text: &str, base_direction: Option<text_core::Direction>) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut token = String::new();
+    let mut token_is_whitespace = None;
+    for character in text.chars() {
+        let is_whitespace = character.is_whitespace();
+        if token_is_whitespace.is_some_and(|current| current != is_whitespace) {
+            if token_is_whitespace == Some(true) {
+                output.push(std::mem::take(&mut token));
+            } else {
+                output.push(pdfjs_token_text(&token, base_direction));
+                token.clear();
+            }
+        }
+        token_is_whitespace = Some(is_whitespace);
+        token.push(character);
+    }
+    if token_is_whitespace == Some(true) {
+        output.push(token);
+    } else if !token.is_empty() {
+        output.push(pdfjs_token_text(&token, base_direction));
+    }
+    output
+}
+
+fn pdfjs_token_text(text: &str, base_direction: Option<text_core::Direction>) -> String {
+    let visual = text_core::bidi_visual_order_with_base(text, base_direction);
+    reverse_pdfjs_rtl_combining_sequences(&visual)
+}
+
+fn reverse_pdfjs_rtl_combining_sequences(text: &str) -> String {
+    // The pinned bidi tables already preserve the logical mark order for the
+    // established Hebrew/Arabic ranges. U+08CA..U+08D2 are newer and arrive in
+    // reverse order; PDF.js preserves their sequence while moving the base.
+    reverse_combining_sequences(text, |character| {
+        matches!(character as u32, 0x08CA..=0x08D2)
+    })
+}
+
+fn reverse_rtl_combining_sequences(text: &str) -> String {
+    reverse_combining_sequences(text, is_rtl_combining_mark)
+}
+
+fn reverse_combining_sequences(text: &str, is_mark: impl Fn(char) -> bool) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut marks = Vec::new();
+    for character in text.chars() {
+        if is_mark(character) {
+            marks.push(character);
+        } else {
+            output.extend(marks.drain(..).rev());
+            output.push(character);
+        }
+    }
+    output.extend(marks.into_iter().rev());
+    output
+}
+
+fn is_rtl_combining_mark(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x0591..=0x05BD
+            | 0x05BF
+            | 0x05C1..=0x05C2
+            | 0x05C4..=0x05C5
+            | 0x05C7
+            | 0x0610..=0x061A
+            | 0x064B..=0x065F
+            | 0x0670
+            | 0x06D6..=0x06DC
+            | 0x06DF..=0x06E4
+            | 0x06E7..=0x06E8
+            | 0x06EA..=0x06ED
+            | 0x08D3..=0x08FF
+    )
+}
+
+fn is_semantic_modifier(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x0300..=0x036F
+            | 0x0483..=0x0489
+            | 0x0591..=0x05BD
+            | 0x05BF
+            | 0x05C1..=0x05C2
+            | 0x05C4..=0x05C5
+            | 0x05C7
+            | 0x0610..=0x061A
+            | 0x064B..=0x065F
+            | 0x0670
+            | 0x06D6..=0x06ED
+            | 0x08CA..=0x08FF
+            | 0x0900..=0x0903
+            | 0x093A..=0x094D
+            | 0x0951..=0x0957
+            | 0x0962..=0x0963
+            | 0x0E31
+            | 0x0E34..=0x0E3A
+            | 0x0E47..=0x0E4E
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x200D
+            | 0x20D0..=0x20FF
+            | 0xFE00..=0xFE0F
+            | 0xFE20..=0xFE2F
+            | 0x1F3FB..=0x1F3FF
+            | 0xE0100..=0xE01EF
+    )
+}
+
+/// Semantic clusters together with the advance the painted run gives each one.
+///
+/// The invisible text layer has to walk the page at the same pace as the visible
+/// glyphs; without the advance it would restack every cluster on the run's origin.
+fn semantic_clusters(glyphs: &[crate::layout::PlacedGlyph]) -> Vec<(u16, String, f64)> {
+    let mut clusters: Vec<(u16, String, f64)> = Vec::new();
+    let mut current: Option<(u16, String, f64)> = None;
+    for glyph in glyphs.iter().filter(|glyph| is_semantic_glyph(glyph)) {
+        if glyph.y_offset_pt == -1.0e100
+            && let Some(cluster) = current.take()
+        {
+            clusters.push(cluster);
+        }
+        let entry = current.get_or_insert_with(|| (glyph.gid, String::new(), 0.0));
+        entry.1.push(glyph.ch);
+        entry.2 += glyph.x_offset_pt;
+    }
+    if let Some(cluster) = current {
+        clusters.push(cluster);
+    }
+    clusters
+}
+
+fn is_semantic_glyph(glyph: &crate::layout::PlacedGlyph) -> bool {
+    glyph.y_offset_pt <= crate::text::semantic::SEMANTIC_START_Y
+}
+
+fn painted_cid(font: &EmbeddedFont, glyph: &crate::layout::PlacedGlyph) -> u16 {
+    if glyph.ch != '\0'
+        && !is_semantic_glyph(glyph)
+        && let Some(cid) = font.painted_cids.get(&(glyph.gid, glyph.ch))
+    {
+        return *cid;
+    }
+    font.subset.remap.get(&glyph.gid).copied().unwrap_or(0)
 }
 
 fn draw_decor(
@@ -546,6 +1463,36 @@ fn draw_image(
     let y = page_h - (pos.y_pt + hgt);
     content.save_state();
     content.transform([w as f32, 0.0, 0.0, hgt as f32, pos.x_pt as f32, y as f32]);
+    content.x_object(Name(image_res_name(image_idx).as_bytes()));
+    content.restore_state();
+}
+
+fn draw_cropped_image(
+    content: &mut Content,
+    pos: &Positioned,
+    page_h: f64,
+    w: f64,
+    hgt: f64,
+    image_idx: usize,
+    crop: [f64; 4],
+) {
+    let visible_w = (1.0 - crop[0] - crop[2]).max(0.001);
+    let visible_h = (1.0 - crop[1] - crop[3]).max(0.001);
+    let full_w = w / visible_w;
+    let full_h = hgt / visible_h;
+    let clip_y = page_h - (pos.y_pt + hgt);
+    content.save_state();
+    content.rect(pos.x_pt as f32, clip_y as f32, w as f32, hgt as f32);
+    content.clip_nonzero();
+    content.end_path();
+    content.transform([
+        full_w as f32,
+        0.0,
+        0.0,
+        full_h as f32,
+        (pos.x_pt - crop[0] * full_w) as f32,
+        (clip_y - crop[3] * full_h) as f32,
+    ]);
     content.x_object(Name(image_res_name(image_idx).as_bytes()));
     content.restore_state();
 }
@@ -584,18 +1531,21 @@ fn write_outline(
 }
 
 /// Builds a ToUnicode CMap for a subset.
-fn build_to_unicode(subset: &SubsetFont) -> Vec<u8> {
+fn build_to_unicode(to_unicode: &BTreeMap<u16, String>) -> Vec<u8> {
     let mut s = String::from(
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
          /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
          /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
          1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
     );
-    let mut entries: Vec<(u16, String)> = subset
-        .to_unicode
+    let mut entries: Vec<(u16, String)> = to_unicode
         .iter()
-        .map(|(cid, txt)| {
-            let utf16: String = txt.encode_utf16().map(|u| format!("{u:04X}")).collect();
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(cid, text)| {
+            let utf16 = text
+                .encode_utf16()
+                .map(|unit| format!("{unit:04X}"))
+                .collect();
             (*cid, utf16)
         })
         .collect();
@@ -609,6 +1559,16 @@ fn build_to_unicode(subset: &SubsetFont) -> Vec<u8> {
     }
     s.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
     s.into_bytes()
+}
+
+fn build_cid_to_gid(mapping: &BTreeMap<u16, u16>) -> Vec<u8> {
+    let max_cid = mapping.keys().next_back().copied().unwrap_or(0);
+    let mut bytes = vec![0; (usize::from(max_cid) + 1) * 2];
+    for (&cid, &gid) in mapping {
+        let offset = usize::from(cid) * 2;
+        bytes[offset..offset + 2].copy_from_slice(&gid.to_be_bytes());
+    }
+    bytes
 }
 
 fn parse_pdf_date(s: &str) -> Option<Date> {
@@ -653,4 +1613,464 @@ pub fn is_pdf(bytes: &[u8]) -> bool {
 /// Fails with an internal error (used when emission preconditions are violated).
 pub fn internal(msg: impl Into<String>) -> OfficeError {
     OfficeError::Internal(msg.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_path_emits_cubic_even_odd_paint_dash_and_bounded_clip() {
+        use crate::layout::{FillRule, PathCommand, PathPaint, Stroke};
+
+        let red = Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 1.0,
+        };
+        let blue = Rgba {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 1.0,
+        };
+        let commands = vec![
+            PathCommand::MoveTo { x: 0.0, y: 0.0 },
+            PathCommand::LineTo { x: 20.0, y: 0.0 },
+            PathCommand::CubicTo {
+                x1: 25.0,
+                y1: 0.0,
+                x2: 25.0,
+                y2: 20.0,
+                x: 20.0,
+                y: 20.0,
+            },
+            PathCommand::Close,
+        ];
+        let page = Page {
+            width_pt: 100.0,
+            height_pt: 100.0,
+            items: vec![
+                Positioned {
+                    x_pt: 10.0,
+                    y_pt: 10.0,
+                    item: Item::Path {
+                        commands: commands.clone(),
+                        paint: PathPaint {
+                            fill: Some(red),
+                            stroke: Some(Stroke {
+                                width_pt: 2.0,
+                                color: blue,
+                                dash: Some(vec![3.0, 2.0]),
+                            }),
+                            fill_rule: FillRule::EvenOdd,
+                        },
+                    },
+                },
+                Positioned {
+                    x_pt: 40.0,
+                    y_pt: 10.0,
+                    item: Item::Clip {
+                        commands,
+                        fill_rule: FillRule::EvenOdd,
+                        items: vec![Positioned {
+                            x_pt: 0.0,
+                            y_pt: 0.0,
+                            item: Item::Rect {
+                                w_pt: 30.0,
+                                h_pt: 30.0,
+                                fill: Some(red),
+                                stroke: None,
+                            },
+                        }],
+                    },
+                },
+            ],
+        };
+
+        let bytes = render_page(&page, &BTreeMap::new(), &[]).expect("render path page");
+        let stream = String::from_utf8(bytes).expect("ASCII content stream");
+        assert!(stream.contains(" c\n"), "missing cubic operator: {stream}");
+        assert!(
+            stream.contains("B*\n"),
+            "missing even-odd fill+stroke: {stream}"
+        );
+        assert!(
+            stream.contains("[3 2] 0 d"),
+            "missing dash pattern: {stream}"
+        );
+        assert!(
+            stream.contains("W*\nn\n"),
+            "missing even-odd clip: {stream}"
+        );
+        assert_eq!(
+            stream.lines().filter(|line| *line == "q").count(),
+            stream.lines().filter(|line| *line == "Q").count(),
+            "unbalanced clipping state: {stream}"
+        );
+    }
+
+    #[test]
+    fn distinct_source_sequences_get_distinct_cids_for_one_gid() {
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2)]),
+            widths: vec![(2, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let pairs = BTreeSet::from([(5, "का".to_string(), true), (5, "कि".to_string(), true)]);
+        let embedded = EmbeddedFont::new(subset, &pairs).expect("embedded font state");
+        let first = embedded.semantic_cids[&(5, "का".to_string(), true)];
+        let second = embedded.semantic_cids[&(5, "कि".to_string(), true)];
+
+        assert_ne!(first, second);
+        assert_eq!(embedded.cid_to_gid[&first], embedded.cid_to_gid[&second]);
+        assert_eq!(embedded.to_unicode[&first], "का");
+        assert_eq!(embedded.to_unicode[&second], "कि");
+    }
+
+    #[test]
+    fn zero_width_semantic_owner_gets_usable_selection_width() {
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2), (6, 3)]),
+            widths: vec![(2, 0), (3, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let source = "ب\u{08CA}\u{08CB}".to_string();
+        let embedded = EmbeddedFont::new(
+            subset,
+            &BTreeSet::from([(
+                5,
+                pdfium_actual_text(&source, Some(text_core::Direction::Rtl)),
+                true,
+            )]),
+        )
+        .unwrap();
+        let cid = *embedded.semantic_cids.values().next().unwrap();
+
+        assert_eq!(embedded.cid_to_gid[&cid], 3);
+        assert_eq!(embedded.cid_widths[&cid], 500.0);
+    }
+
+    #[test]
+    fn semantic_text_matrix_scales_viewer_geometry_to_the_physical_width() {
+        use crate::layout::{SemanticCluster, SemanticRun};
+
+        let face = FaceId(0);
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2)]),
+            widths: vec![(2, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let embedded = EmbeddedFont::new(subset, &BTreeSet::from([(5, "word".to_string(), true)]))
+            .expect("semantic font state");
+        let page = Page {
+            width_pt: 100.0,
+            height_pt: 100.0,
+            items: vec![Positioned {
+                x_pt: 10.0,
+                y_pt: 20.0,
+                item: Item::SemanticText(SemanticRun {
+                    face,
+                    size_pt: 10.0,
+                    base_direction: text_core::Direction::Ltr,
+                    clusters: "word"
+                        .chars()
+                        .map(|character| SemanticCluster {
+                            gid: 5,
+                            source: character.to_string(),
+                            advance_pt: 6.25,
+                        })
+                        .collect(),
+                }),
+            }],
+        };
+        let bytes = render_page(&page, &BTreeMap::from([(face, embedded)]), &[face])
+            .expect("render semantic page");
+        let stream = String::from_utf8(bytes).expect("ASCII content stream");
+
+        assert!(
+            stream.contains("5 0 0 1 10 80 Tm"),
+            "25pt desired width over a 5pt backing glyph must use 5x horizontal scaling: {stream}"
+        );
+        assert!(
+            !stream.contains("TJ"),
+            "trailing TJ adjustments do not produce reliable PDF.js geometry: {stream}"
+        );
+    }
+
+    #[test]
+    fn directly_mapped_painted_glyph_uses_its_unicode_specific_cid() {
+        use crate::layout::PlacedGlyph;
+
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2)]),
+            widths: vec![(2, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let pairs = BTreeSet::from([(5, "A".to_string(), true)]);
+        let embedded = EmbeddedFont::new(subset, &pairs).expect("embedded font state");
+        let glyph = PlacedGlyph {
+            gid: 5,
+            advance_pt: 6.0,
+            x_offset_pt: 0.0,
+            y_offset_pt: 0.0,
+            ch: 'A',
+        };
+
+        let cid = painted_cid(&embedded, &glyph);
+        assert_ne!(cid, embedded.subset.remap[&5]);
+        assert_eq!(embedded.to_unicode[&cid], "A");
+        let cmap = String::from_utf8(build_to_unicode(&embedded.to_unicode)).unwrap();
+        assert!(cmap.contains(&format!("<{cid:04X}> <0041>")));
+    }
+
+    #[test]
+    fn direct_unicode_pair_does_not_relabel_the_shared_artifact_cid() {
+        use crate::layout::{GlyphRun, PlacedGlyph};
+
+        let face = FaceId(0);
+        let item = Item::Glyphs(GlyphRun {
+            face,
+            size_pt: 12.0,
+            color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+            base_direction: None,
+            glyphs: vec![
+                PlacedGlyph {
+                    gid: 5,
+                    advance_pt: 6.0,
+                    x_offset_pt: 0.0,
+                    y_offset_pt: 0.0,
+                    ch: 'A',
+                },
+                PlacedGlyph {
+                    gid: 5,
+                    advance_pt: 6.0,
+                    x_offset_pt: 0.0,
+                    y_offset_pt: 0.0,
+                    ch: '\0',
+                },
+            ],
+            underline: None,
+            strike: None,
+        });
+        let mut used = UsedGlyphs::new();
+        let mut glyph_count = 0;
+        collect_item_glyphs(&item, &mut used, &mut glyph_count, 10).unwrap();
+        let usage = &used[&face];
+
+        assert!(
+            usage.chars.is_empty(),
+            "base CIDs must remain extraction-empty"
+        );
+        assert!(usage.semantic_pairs.contains(&(5, "A".to_string(), true)));
+    }
+
+    #[test]
+    fn semantic_actual_text_precompensates_pdfium_rtl_reordering() {
+        use crate::layout::{GlyphRun, PlacedGlyph};
+
+        let logical = "مرحبا بالعالم";
+        let glyphs: Vec<_> = logical
+            .chars()
+            .map(|character| PlacedGlyph {
+                gid: 5,
+                advance_pt: 0.0,
+                x_offset_pt: 0.0,
+                y_offset_pt: crate::text::semantic::SEMANTIC_START_Y,
+                ch: character,
+            })
+            .collect();
+        let semantic = semantic_clusters(&glyphs);
+        let pairs: BTreeSet<_> =
+            visual_semantic_tokens(&semantic, logical, Some(text_core::Direction::Rtl))
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .map(|(gid, source, advance_pt)| (gid, source, advance_pt.abs() > f64::EPSILON))
+                .collect();
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2)]),
+            widths: vec![(2, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let embedded = EmbeddedFont::new(subset, &pairs).unwrap();
+        let face = FaceId(0);
+        let page = Page {
+            width_pt: 200.0,
+            height_pt: 100.0,
+            items: vec![Positioned {
+                x_pt: 10.0,
+                y_pt: 20.0,
+                item: Item::Glyphs(GlyphRun {
+                    face,
+                    size_pt: 12.0,
+                    color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+                    base_direction: Some(text_core::Direction::Rtl),
+                    glyphs,
+                    underline: None,
+                    strike: None,
+                }),
+            }],
+        };
+        let stream = render_page(&page, &BTreeMap::from([(face, embedded)]), &[face])
+            .expect("render semantic page");
+        let pdfium_precompensated = text_core::bidi_visual_order(logical);
+        let utf16 = format!(
+            "FEFF{}",
+            pdfium_precompensated
+                .encode_utf16()
+                .map(|unit| format!("{unit:04X}"))
+                .collect::<String>()
+        )
+        .into_bytes();
+        assert!(
+            stream.windows(utf16.len()).any(|window| window == utf16),
+            "PDFium-precompensated /ActualText UTF-16 sequence is absent: {stream:?}"
+        );
+    }
+
+    #[test]
+    fn pdfjs_semantic_order_visualizes_rtl_tokens_without_reversing_words() {
+        assert_eq!(pdfjs_semantic_text("مرحبا بالعالم"), "ابحرم ملاعلاب");
+        assert_eq!(pdfjs_semantic_text("Total 123 ريال"), "Total 123 لاير");
+        assert_eq!(pdfjs_semantic_text("Cafe\u{301} text"), "Cafe\u{301} text");
+        assert!(is_rtl_combining_mark('\u{08D3}'));
+    }
+
+    #[test]
+    fn extended_a_marks_follow_the_bidi_tables_used_for_pdfium_compensation() {
+        let source = "ب\u{08CA}\u{08CB}";
+        let bidi_visual =
+            text_core::bidi_visual_order_with_base(source, Some(text_core::Direction::Rtl));
+        let actual_text = pdfium_actual_text(source, Some(text_core::Direction::Rtl));
+
+        assert_eq!(
+            actual_text, bidi_visual,
+            "U+08CA..U+08D2 are already reversed by the pinned bidi tables"
+        );
+        assert!(!is_rtl_combining_mark('\u{08CA}'));
+        assert!(!is_rtl_combining_mark('\u{08CB}'));
+        assert!(is_rtl_combining_mark('\u{08D3}'));
+        assert_eq!(
+            pdfjs_semantic_tokens(source, Some(text_core::Direction::Rtl)),
+            vec!["\u{08CA}\u{08CB}ب"],
+            "PDF.js preserves these marks during bidi, so its token needs the inverse order"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_keep_shaped_cluster_advances() {
+        let semantic = vec![
+            (5, "e\u{301}".to_string(), 4.5),
+            (5, " ".to_string(), 2.0),
+            (5, "word".to_string(), 10.0),
+        ];
+        let tokens = visual_semantic_tokens(&semantic, "e\u{301} word", None).unwrap();
+
+        assert_eq!(
+            tokens
+                .iter()
+                .flatten()
+                .map(|(_, source, _)| source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["e", "\u{301}", " ", "w", "o", "r", "d"]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .flatten()
+                .map(|(_, _, advance)| *advance)
+                .collect::<Vec<_>>(),
+            vec![4.5, 0.0, 2.0, 10.0, 0.0, 0.0, 0.0]
+        );
+
+        let standalone = vec![(5, "e\u{301}".to_string(), 4.5)];
+        let standalone_tokens = visual_semantic_tokens(&standalone, "e\u{301}", None).unwrap();
+        assert_eq!(
+            standalone_tokens[0]
+                .iter()
+                .map(|(_, source, advance)| (source.as_str(), *advance))
+                .collect::<Vec<_>>(),
+            vec![("e", 4.5), ("\u{301}", 0.0)]
+        );
+    }
+
+    #[test]
+    fn visible_artifact_cids_have_no_to_unicode_mapping() {
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2)]),
+            widths: vec![(2, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let embedded = EmbeddedFont::new(subset, &BTreeSet::new()).unwrap();
+
+        assert_eq!(embedded.to_unicode.get(&2), None);
+        let cmap = String::from_utf8(build_to_unicode(&embedded.to_unicode)).unwrap();
+        assert!(
+            !cmap.contains("<0002>"),
+            "paint-only artifact CIDs must be absent from ToUnicode: {cmap}"
+        );
+    }
+
+    #[test]
+    fn paint_only_glyphs_fail_closed_when_subset_cannot_be_parsed() {
+        use crate::layout::{GlyphRun, PlacedGlyph};
+
+        let face = FaceId(0);
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2)]),
+            widths: vec![(2, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let embedded = EmbeddedFont::new(subset, &BTreeSet::new()).unwrap();
+        let page = Page {
+            width_pt: 100.0,
+            height_pt: 100.0,
+            items: vec![Positioned {
+                x_pt: 10.0,
+                y_pt: 20.0,
+                item: Item::Glyphs(GlyphRun {
+                    face,
+                    size_pt: 12.0,
+                    color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+                    base_direction: None,
+                    glyphs: vec![PlacedGlyph {
+                        gid: 5,
+                        advance_pt: 6.0,
+                        x_offset_pt: 0.0,
+                        y_offset_pt: 0.0,
+                        ch: '\0',
+                    }],
+                    underline: None,
+                    strike: None,
+                }),
+            }],
+        };
+
+        let error = render_page(&page, &BTreeMap::from([(face, embedded)]), &[face])
+            .expect_err("invalid paint-only subset must fail conversion");
+        assert!(matches!(error, OfficeError::Font(_)));
+    }
 }
