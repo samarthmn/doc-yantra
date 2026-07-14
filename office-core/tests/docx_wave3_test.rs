@@ -1203,6 +1203,16 @@ fn unsupported_anchor_contracts_and_nested_anchors_fail_typed() {
 }
 
 #[test]
+fn fractional_simple_position_coordinates_remain_outside_integral_contract() {
+    let anchor = r#"<wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" allowOverlap="1"><wp:simplePos x="0.5" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="914400"/><wp:wrapNone/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic></wp:anchor>"#;
+    let body = format!("<w:p><w:r><w:drawing>{anchor}</w:drawing></w:r></w:p>");
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#;
+    let image = std::fs::read("../mock-files/png/file1.png").unwrap();
+    let bytes = package_with_parts(&body, rels, vec![("word/media/image1.png", image)]);
+    assert_profile_convert_reject(&bytes, UnsupportedCode::AnchoredDrawing);
+}
+
+#[test]
 fn overlapping_wrap_anchors_are_rejected_by_profile_and_layout() {
     let anchor = |side: &str| {
         format!(
@@ -1481,6 +1491,47 @@ fn right_paragraph_border_spans_the_complete_multiline_box() {
         border_height > text_span + 5.0,
         "border={border_height}, text_span={text_span}"
     );
+}
+
+#[test]
+fn invisible_bar_paragraph_borders_remain_supported() {
+    for value in ["nil", "none"] {
+        let body = format!(
+            r#"<w:p><w:pPr><w:pBdr><w:bar w:val="{value}"/></w:pBdr></w:pPr><w:r><w:t>Invisible bar</w:t></w:r></w:p>"#
+        );
+        let bytes = minimal_docx(&body);
+        assert_profile_convert_agree(&bytes);
+    }
+}
+
+#[test]
+fn visible_bar_paragraph_border_fails_typed() {
+    let bytes = minimal_docx(
+        r#"<w:p><w:pPr><w:pBdr><w:bar w:val="single" w:sz="8" w:space="0" w:color="000000"/></w:pBdr></w:pPr><w:r><w:t>Visible bar</w:t></w:r></w:p>"#,
+    );
+    assert_profile_convert_reject(&bytes, UnsupportedCode::UnknownElement);
+}
+
+#[test]
+fn unknown_paragraph_border_child_fails_typed() {
+    let bytes = minimal_docx(
+        r#"<w:p><w:pPr><w:pBdr><w:diagonal w:val="nil"/></w:pBdr></w:pPr><w:r><w:t>Unknown edge</w:t></w:r></w:p>"#,
+    );
+    assert_profile_convert_reject(&bytes, UnsupportedCode::UnknownElement);
+}
+
+#[test]
+fn unknown_attribute_on_visible_paragraph_border_fails_typed() {
+    for extra in [
+        r#"w:foo="bar""#,
+        r#"xmlns:foreign="urn:foreign" foreign:frame="1""#,
+    ] {
+        let body = format!(
+            r#"<w:p><w:pPr><w:pBdr><w:right w:val="single" w:sz="8" w:space="0" w:color="000000" {extra}/></w:pBdr></w:pPr><w:r><w:t>Unknown attribute</w:t></w:r></w:p>"#
+        );
+        let bytes = minimal_docx(&body);
+        assert_profile_convert_reject(&bytes, UnsupportedCode::UnknownElement);
+    }
 }
 
 #[test]

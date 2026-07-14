@@ -666,7 +666,6 @@ fn flatten(
     Ok(atoms)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn flatten_inlines(
     doc: &WordDoc,
     warnings: &mut Vec<Warning>,

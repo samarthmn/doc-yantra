@@ -757,6 +757,12 @@ impl ParaProps {
                     .between
                     .clone()
                     .or_else(|| base.borders.between.clone()),
+                bar: self
+                    .borders
+                    .bar
+                    .clone()
+                    .or_else(|| base.borders.bar.clone()),
+                unsupported: self.borders.unsupported.or(base.borders.unsupported),
             },
             shading: self.shading.or(base.shading),
             contextual_spacing: self.contextual_spacing || base.contextual_spacing,
@@ -822,6 +828,10 @@ pub struct ParaBorders {
     pub right: Option<Border>,
     /// Between consecutive bordered paragraphs.
     pub between: Option<Border>,
+    /// Bar edge (outside the rendered subset when visible).
+    pub bar: Option<Border>,
+    /// Unknown child classification retained for profile/layout agreement.
+    pub(crate) unsupported: Option<&'static str>,
 }
 
 impl ParaBorders {
@@ -833,6 +843,12 @@ impl ParaBorders {
                 .as_ref()
                 .is_some_and(|border| !matches!(border.val.as_str(), "nil" | "none"))
         };
+        if let Some(detail) = self.unsupported {
+            return Some(detail);
+        }
+        if visible(&self.bar) {
+            return Some("visible paragraph bar border is outside the rendered subset");
+        }
         if visible(&self.top) || visible(&self.left) || visible(&self.between) {
             return Some("paragraph border edge outside bottom-single subset");
         }
@@ -2218,8 +2234,7 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
     }
     if simple.is_none()
         || simple.is_some_and(|value| {
-            parse_measure(value.attribute("x")).is_none()
-                || parse_measure(value.attribute("y")).is_none()
+            parse_i64(value.attribute("x")).is_none() || parse_i64(value.attribute("y")).is_none()
         })
     {
         reject("wp:anchor has an invalid or missing wp:simplePos child");
@@ -2596,8 +2611,25 @@ fn parse_border(node: Node) -> Border {
         value => Rgb::from_hex(value),
     });
     let theme_color = attr(node, W, "themeColor").map(str::to_string);
+    let has_unknown_attribute = node.attributes().any(|attribute| {
+        !matches!(attribute.namespace(), None | Some(W))
+            || !matches!(
+                attribute.name(),
+                "val"
+                    | "sz"
+                    | "space"
+                    | "color"
+                    | "themeColor"
+                    | "themeTint"
+                    | "themeShade"
+                    | "shadow"
+                    | "frame"
+            )
+    });
     let unsupported = if matches!(val, Some("nil" | "none")) {
         None
+    } else if has_unknown_attribute {
+        Some("visible paragraph border has an unsupported attribute")
     } else if val.is_none() {
         Some("paragraph border is missing w:val")
     } else if !size.is_some_and(|value| (2..=96).contains(&value)) {
@@ -2628,6 +2660,10 @@ fn parse_border(node: Node) -> Border {
 fn parse_para_borders(node: Node) -> ParaBorders {
     let mut b = ParaBorders::default();
     for c in children(node) {
+        if c.tag_name().namespace() != Some(W) {
+            b.unsupported = Some("unknown paragraph border element");
+            continue;
+        }
         let border = Some(parse_border(c));
         match c.tag_name().name() {
             "top" => b.top = border,
@@ -2635,7 +2671,8 @@ fn parse_para_borders(node: Node) -> ParaBorders {
             "left" => b.left = border,
             "right" => b.right = border,
             "between" => b.between = border,
-            _ => {}
+            "bar" => b.bar = border,
+            _ => b.unsupported = Some("unknown paragraph border element"),
         }
     }
     b
@@ -2944,14 +2981,7 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
             "keepLines" => props.keep_lines = toggle_child(c),
             "pageBreakBefore" => props.page_break_before = toggle_child(c),
             "widowControl" => props.widow_control = Some(toggle_child(c)),
-            "pBdr" => {
-                if children(c).any(|edge| edge.tag_name().name() == "bar") {
-                    props
-                        .visible_unsupported
-                        .push("w:bar paragraph border".to_string());
-                }
-                props.borders = parse_para_borders(c);
-            }
+            "pBdr" => props.borders = parse_para_borders(c),
             "shd" => props.shading = parse_shd_fill(c),
             "contextualSpacing" => props.contextual_spacing = toggle_child(c),
             "outlineLvl" => {
