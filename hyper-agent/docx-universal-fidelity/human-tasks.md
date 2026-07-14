@@ -4,13 +4,27 @@ Everything here needs a human (the fixture binaries, a Word installation, judgme
 
 ## H1. Commit the three reference fixture pairs (BEFORE agent phase 5; ~10 min)
 
-The planning thread (https://hyperagent.com/thread/cmrki1y8p0ixg06adbyatevrz) carries the four docx/pdf pairs. `4.docx`/`4.pdf` are already committed as `fidelity-corpus/docx/complex/` — do NOT re-add them. Binaries cannot be pushed through the planning agent's text-only GitHub API access, so this is a human step.
+The fixture bytes are committed on this plan branch as **base64 text** under `hyper-agent/docx-universal-fidelity/fixtures/*.b64` (the planning agent's GitHub API access is text-only; base64 round-trips bit-exact — see `fixtures/README.md`). The originals are also attached to the planning thread (https://hyperagent.com/thread/cmrki1y8p0ixg06adbyatevrz). `4.docx`/`4.pdf` are already committed as `fidelity-corpus/docx/complex/` — do NOT re-add them.
 
-1. Download `1.docx`, `1.pdf`, `2.docx`, `2.pdf`, `3.docx`, `3.pdf` from the thread.
-2. Place them in the repo (names must be exactly `source.docx` / `ground-truth.pdf`):
-   - `fidelity-corpus/docx/gdocs-anchors-toc/source.docx` ← `1.docx`, `ground-truth.pdf` ← `1.pdf`
-   - `fidelity-corpus/docx/gdocs-tables-longdoc/source.docx` ← `2.docx`, `ground-truth.pdf` ← `2.pdf`
-   - `fidelity-corpus/docx/gdocs-columns/source.docx` ← `3.docx`, `ground-truth.pdf` ← `3.pdf`
+1. Decode the six `.b64` files into the corpus (from the repo root; `python3` variant is fully portable, or use `base64 -d`):
+   ```bash
+   P=hyper-agent/docx-universal-fidelity/fixtures
+   mkdir -p fidelity-corpus/docx/{gdocs-anchors-toc,gdocs-tables-longdoc,gdocs-columns}
+   python3 - <<'EOF'
+   import base64, pathlib
+   pairs = {
+     '1.docx': 'gdocs-anchors-toc/source.docx',     '1.pdf': 'gdocs-anchors-toc/ground-truth.pdf',
+     '2.docx': 'gdocs-tables-longdoc/source.docx',  '2.pdf': 'gdocs-tables-longdoc/ground-truth.pdf',
+     '3.docx': 'gdocs-columns/source.docx',         '3.pdf': 'gdocs-columns/ground-truth.pdf',
+   }
+   src = pathlib.Path('hyper-agent/docx-universal-fidelity/fixtures')
+   for name, dest in pairs.items():
+       out = pathlib.Path('fidelity-corpus/docx') / dest
+       out.write_bytes(base64.b64decode((src / f'{name}.b64').read_text()))
+       print('wrote', out)
+   EOF
+   ```
+2. Do NOT commit decoded binaries under `hyper-agent/` — they belong only at the `fidelity-corpus/docx/<case>/` paths above.
 3. Verify integrity (`shasum -a 256 <file>`), expected SHA-256:
    | File | SHA-256 |
    |---|---|
