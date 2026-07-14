@@ -188,6 +188,27 @@ mod tests {
     }
 
     #[test]
+    fn bundled_superscript_subscript_coverage_boundary_is_pinned() {
+        let db = FontDb::with_bundled();
+        let faces: Vec<_> = db.faces().iter().collect();
+        let covered: String = (0x2070..=0x2094)
+            .filter(|codepoint| !matches!(codepoint, 0x2072 | 0x2073))
+            .filter_map(char::from_u32)
+            .collect();
+        let shaped = shape_with_fallback(&covered, &faces, 12.0, 0.0, false);
+        assert!(
+            shaped.missing_glyphs.is_empty(),
+            "bundled font coverage regressed for {:?}",
+            shaped.missing_glyphs
+        );
+        let uncovered = shape_with_fallback("ₕₖₗₘₙₚₛₜ", &faces, 12.0, 0.0, false);
+        assert_eq!(
+            uncovered.missing_glyphs,
+            "ₕₖₗₘₙₚₛₜ".chars().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn kern_false_matches_word_un_kerned_advances() {
         let db = FontDb::with_bundled();
         let face = db

@@ -23,6 +23,8 @@ use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+pub(crate) type NoteSequence = HashMap<(NoteKind, i64), u32>;
+
 /// Field substitution context (page numbering) for headers/footers.
 #[derive(Debug, Clone)]
 pub struct FieldContext {
@@ -255,6 +257,8 @@ pub struct Line {
     pub items: Vec<LineItem>,
     /// Anchored items whose page-level paint order is resolved by flow.
     pub(crate) anchored_items: Vec<AnchoredLineItem>,
+    /// Internal bookmark names whose zero-width marker falls on this line.
+    pub(crate) bookmarks: Vec<String>,
     /// An explicit page break (`<w:br w:type="page"/>`) ends this line — the flow
     /// must start the next line on a new page.
     pub page_break_after: bool,
@@ -326,8 +330,18 @@ struct AtomSemanticCluster {
     cluster: SemanticCluster,
 }
 
+struct LeaderGlyph {
+    gid: u16,
+    advance_pt: f64,
+    x_offset_pt: f64,
+    y_offset_pt: f64,
+    ch: char,
+    style: Rc<RunStyle>,
+}
+
 /// An atom in the pre-break stream.
 enum Atom {
+    Bookmark(String),
     Glyph {
         gid: u16,
         advance_pt: f64,
@@ -338,8 +352,10 @@ enum Atom {
         style: Rc<RunStyle>,
         semantic: Vec<AtomSemanticCluster>,
     },
-    /// A tab (advances to the next stop; alignment/leaders are v1-simplified).
-    Tab,
+    /// A tab plus extraction-visible glyph candidates in the tab run's style.
+    Tab {
+        leaders: Vec<(TabLeader, LeaderGlyph)>,
+    },
     Break(BreakKind),
     Image {
         image_id: ImageId,
@@ -383,6 +399,29 @@ pub fn layout_paragraph(
     label_override: Option<PlacedLabel>,
     field_ctx: Option<FieldContext>,
 ) -> Result<ParaLayout> {
+    layout_paragraph_with_note_sequence(
+        doc,
+        warnings,
+        para,
+        rels,
+        avail_width_pt,
+        label_override,
+        field_ctx,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layout_paragraph_with_note_sequence(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    para: &Paragraph,
+    rels: &HashMap<String, String>,
+    avail_width_pt: f64,
+    label_override: Option<PlacedLabel>,
+    field_ctx: Option<FieldContext>,
+    note_sequence: Option<&NoteSequence>,
+) -> Result<ParaLayout> {
     layout_paragraph_with_wrap(
         doc,
         warnings,
@@ -392,6 +431,7 @@ pub fn layout_paragraph(
         label_override,
         field_ctx,
         None,
+        note_sequence,
     )
 }
 
@@ -406,6 +446,7 @@ pub(crate) fn layout_paragraph_with_wrap(
     label_override: Option<PlacedLabel>,
     field_ctx: Option<FieldContext>,
     incoming_wrap: Option<WrapExclusion>,
+    note_sequence: Option<&NoteSequence>,
 ) -> Result<ParaLayout> {
     layout_paragraph_with_wrap_context(
         doc,
@@ -418,6 +459,7 @@ pub(crate) fn layout_paragraph_with_wrap(
         incoming_wrap,
         None,
         Vec::new(),
+        note_sequence,
     )
 }
 
@@ -435,6 +477,7 @@ pub(crate) fn layout_paragraph_with_page_wrap(
     incoming_wrap: Option<WrapExclusion>,
     page_horizontal: PageHorizontalContext,
     scheduled_line_wraps: Vec<Option<WrapExclusion>>,
+    note_sequence: Option<&NoteSequence>,
 ) -> Result<ParaLayout> {
     layout_paragraph_with_wrap_context(
         doc,
@@ -447,6 +490,7 @@ pub(crate) fn layout_paragraph_with_page_wrap(
         incoming_wrap,
         Some(page_horizontal),
         scheduled_line_wraps,
+        note_sequence,
     )
 }
 
@@ -462,6 +506,7 @@ fn layout_paragraph_with_wrap_context(
     incoming_wrap: Option<WrapExclusion>,
     page_horizontal: Option<PageHorizontalContext>,
     scheduled_line_wraps: Vec<Option<WrapExclusion>>,
+    note_sequence: Option<&NoteSequence>,
 ) -> Result<ParaLayout> {
     let eff_para = doc.styles.para_props(&para.props);
     if let Some(detail) = eff_para.borders.unsupported_detail(&doc.theme) {
@@ -502,7 +547,7 @@ fn layout_paragraph_with_wrap_context(
 
     let content_first = (avail_width_pt - left - right - first_offset).max(1.0);
     let content_rest = (avail_width_pt - left - right).max(1.0);
-    let atoms = flatten(doc, warnings, para, rels, field_ctx)?;
+    let atoms = flatten(doc, warnings, para, rels, field_ctx, note_sequence)?;
     let text: String = atoms
         .iter()
         .filter_map(|a| match a {
@@ -783,6 +828,7 @@ fn layout_paragraph_with_wrap_context(
             height_pt: apply_line_spacing(line_spacing, h),
             items: Vec::new(),
             anchored_items: Vec::new(),
+            bookmarks: Vec::new(),
             page_break_after: false,
             column_break_after: false,
         });
@@ -956,6 +1002,7 @@ fn paragraph_note_refs(para: &Paragraph) -> Vec<(NoteKind, i64)> {
     fn scan_inlines(inlines: &[InlineContent], scan_run: &mut impl FnMut(&Run)) {
         for inline in inlines {
             match inline {
+                InlineContent::Bookmark(_) => {}
                 InlineContent::Run(run) => scan_run(run),
                 InlineContent::Hyperlink { runs, .. } => runs.iter().for_each(&mut *scan_run),
                 InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
@@ -1005,10 +1052,22 @@ fn flatten(
     para: &Paragraph,
     rels: &HashMap<String, String>,
     field_ctx: Option<FieldContext>,
+    note_sequence: Option<&NoteSequence>,
 ) -> Result<Vec<Atom>> {
     let mut atoms = Vec::new();
-    flatten_inlines(doc, warnings, para, &para.runs, rels, field_ctx, &mut atoms)?;
+    let context = FlattenContext {
+        rels,
+        note_sequence,
+    };
+    flatten_inlines(
+        doc, warnings, para, &para.runs, &context, field_ctx, &mut atoms,
+    )?;
     Ok(atoms)
+}
+
+struct FlattenContext<'a> {
+    rels: &'a HashMap<String, String>,
+    note_sequence: Option<&'a NoteSequence>,
 }
 
 fn flatten_inlines(
@@ -1016,33 +1075,34 @@ fn flatten_inlines(
     warnings: &mut Vec<Warning>,
     para: &Paragraph,
     inlines: &[InlineContent],
-    rels: &HashMap<String, String>,
+    context: &FlattenContext<'_>,
     field_ctx: Option<FieldContext>,
     atoms: &mut Vec<Atom>,
 ) -> Result<()> {
     for inline in inlines {
         match inline {
-            InlineContent::Run(r) => flatten_run(doc, warnings, para, r, None, rels, atoms)?,
+            InlineContent::Bookmark(name) => atoms.push(Atom::Bookmark(name.clone())),
+            InlineContent::Run(r) => flatten_run(doc, warnings, para, r, None, context, atoms)?,
             InlineContent::Hyperlink {
                 rel_id,
                 anchor,
                 runs,
             } => {
-                let target = link_target(doc, rels, rel_id.as_deref(), anchor.as_deref());
+                let target = link_target(doc, context.rels, rel_id.as_deref(), anchor.as_deref());
                 for r in runs {
-                    flatten_run(doc, warnings, para, r, target.clone(), rels, atoms)?;
+                    flatten_run(doc, warnings, para, r, target.clone(), context, atoms)?;
                 }
             }
             InlineContent::SimpleField(f) | InlineContent::ComplexFieldRegion(f) => {
                 if let Some(run) = substituted_field_run(f, field_ctx.clone()) {
-                    flatten_run(doc, warnings, para, &run, None, rels, atoms)?;
+                    flatten_run(doc, warnings, para, &run, None, context, atoms)?;
                 } else {
                     flatten_inlines(
                         doc,
                         warnings,
                         para,
                         &f.content,
-                        rels,
+                        context,
                         field_ctx.clone(),
                         atoms,
                     )?;
@@ -1081,6 +1141,7 @@ fn substituted_field_run(field: &Field, ctx: Option<FieldContext>) -> Option<Run
 fn first_field_run(inlines: &[InlineContent]) -> Option<&Run> {
     for inline in inlines {
         match inline {
+            InlineContent::Bookmark(_) => {}
             InlineContent::Run(run) => return Some(run),
             InlineContent::Hyperlink { runs, .. } => {
                 if let Some(run) = runs.first() {
@@ -1106,7 +1167,7 @@ fn link_target(
 ) -> Option<LinkTarget> {
     match rel_id {
         Some(rid) => doc.hyperlink_url(rels, rid).map(LinkTarget::Url),
-        None => anchor.map(|_| LinkTarget::Page(0)),
+        None => anchor.map(|name| LinkTarget::Anchor(name.to_string())),
     }
 }
 
@@ -1116,9 +1177,10 @@ fn flatten_run(
     para: &Paragraph,
     run: &Run,
     link: Option<LinkTarget>,
-    rels: &HashMap<String, String>,
+    context: &FlattenContext<'_>,
     atoms: &mut Vec<Atom>,
 ) -> Result<()> {
+    let rels = context.rels;
     let eff = doc.styles.run_props(&para.props, &run.props);
     if eff.vanish == Some(true) {
         return Ok(());
@@ -1185,7 +1247,16 @@ fn flatten_run(
                 &style,
                 atoms,
             )?,
-            RunContent::Tab => atoms.push(Atom::Tab),
+            RunContent::Tab => atoms.push(tab_atom(
+                &doc.fonts,
+                &fallback_ids,
+                size,
+                char_spacing,
+                kern,
+                allow_direct_text,
+                base_direction,
+                &style,
+            )?),
             RunContent::Break(k) => atoms.push(Atom::Break(*k)),
             RunContent::Symbol { font, char_code } => {
                 if let Some(ch) = matching::map_symbol_char(font, *char_code) {
@@ -1370,7 +1441,7 @@ fn flatten_run(
                 });
             }
             RunContent::Math(math) => push_math_atom(doc, math, atoms)?,
-            RunContent::NoteReference { id, .. } => {
+            RunContent::NoteReference { kind, id } => {
                 let note_size = size * 0.75;
                 let mut note_style = (*style).clone();
                 note_style.size_pt = note_size;
@@ -1379,7 +1450,12 @@ fn flatten_run(
                 shape_text(
                     &doc.fonts,
                     &fallback_ids,
-                    &id.to_string(),
+                    &context
+                        .note_sequence
+                        .and_then(|sequence| sequence.get(&(*kind, *id)))
+                        .copied()
+                        .unwrap_or_else(|| u32::try_from(*id).unwrap_or_default())
+                        .to_string(),
                     note_size,
                     char_spacing,
                     kern,
@@ -1718,6 +1794,64 @@ fn shape_text(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "tab leader candidates use the surrounding run's complete shaping context"
+)]
+fn tab_atom(
+    fonts: &FontDb,
+    face_ids: &[FaceId],
+    size: f64,
+    char_spacing: f64,
+    kern: bool,
+    allow_direct_text: bool,
+    base_direction: text_core::Direction,
+    style: &Rc<RunStyle>,
+) -> Result<Atom> {
+    let mut leaders = Vec::new();
+    for (leader, ch) in [
+        (TabLeader::Dot, '.'),
+        (TabLeader::Hyphen, '-'),
+        (TabLeader::Underscore, '_'),
+    ] {
+        let mut shaped = Vec::new();
+        shape_text(
+            fonts,
+            face_ids,
+            &ch.to_string(),
+            size,
+            char_spacing,
+            kern,
+            allow_direct_text,
+            base_direction,
+            style,
+            &mut shaped,
+        )?;
+        if let Some(Atom::Glyph {
+            gid,
+            advance_pt,
+            x_offset_pt,
+            y_offset_pt,
+            style,
+            ..
+        }) = shaped.into_iter().next()
+        {
+            leaders.push((
+                leader,
+                LeaderGlyph {
+                    gid,
+                    advance_pt,
+                    x_offset_pt,
+                    y_offset_pt,
+                    ch,
+                    style,
+                },
+            ));
+        }
+    }
+    Ok(Atom::Tab { leaders })
+}
+
 fn weight(props: &RunProps) -> u16 {
     if props.bold == Some(true) { 700 } else { 400 }
 }
@@ -1790,7 +1924,7 @@ fn break_lines(
                 i += 1;
                 continue;
             }
-            Atom::Tab => {
+            Atom::Tab { .. } => {
                 width_used = next_tab_stop(width_used, default_tab, tab_stops);
                 current.push(i);
                 last_break = Some(current.len());
@@ -1868,7 +2002,7 @@ fn place_line(
     let mut spaces = 0usize;
     for &k in indices {
         match &atoms[k] {
-            Atom::Tab => natural = next_tab_stop(natural, default_tab, tab_stops),
+            Atom::Tab { .. } => natural = next_tab_stop(natural, default_tab, tab_stops),
             Atom::Glyph {
                 advance_pt,
                 is_space,
@@ -1885,7 +2019,7 @@ fn place_line(
                     natural += w_pt;
                 }
             }
-            Atom::Break(_) => {}
+            Atom::Bookmark(_) | Atom::Break(_) => {}
         }
     }
     let trailing: f64 = indices
@@ -1924,6 +2058,15 @@ fn place_line(
                 text_natural_h = text_natural_h.max(style.line_height_pt);
                 ascent = ascent.max(style.ascent_pt);
                 descent = descent.max((style.line_height_pt - style.ascent_pt).max(0.0));
+            }
+            Atom::Tab { leaders } => {
+                for (_, leader) in leaders {
+                    natural_h = natural_h.max(leader.style.line_height_pt);
+                    text_natural_h = text_natural_h.max(leader.style.line_height_pt);
+                    ascent = ascent.max(leader.style.ascent_pt);
+                    descent = descent
+                        .max((leader.style.line_height_pt - leader.style.ascent_pt).max(0.0));
+                }
             }
             Atom::Image { h_pt, .. } => {
                 natural_h = natural_h.max(*h_pt);
@@ -1964,6 +2107,7 @@ fn place_line(
     // same-style glyph run is exposed before later directly mapped characters.
     let mut text_items: Vec<(usize, u8, LineItem)> = Vec::new();
     let mut anchored_items: Vec<AnchoredLineItem> = Vec::new();
+    let mut bookmarks = Vec::new();
 
     // Numbering label at (left - hanging).
     if let Some(l) = label {
@@ -2024,6 +2168,7 @@ fn place_line(
 
     for (visual_position, &k) in indices.iter().enumerate() {
         match &atoms[k] {
+            Atom::Bookmark(name) => bookmarks.push(name.clone()),
             Atom::Glyph {
                 gid,
                 advance_pt,
@@ -2075,7 +2220,7 @@ fn place_line(
                 });
                 x += adv;
             }
-            Atom::Tab => {
+            Atom::Tab { leaders } => {
                 flush(
                     &mut pending,
                     &mut pending_style,
@@ -2092,7 +2237,7 @@ fn place_line(
                 let segment: Vec<_> = following
                     .iter()
                     .copied()
-                    .take_while(|index| !matches!(atoms[*index], Atom::Tab | Atom::Break(_)))
+                    .take_while(|index| !matches!(atoms[*index], Atom::Tab { .. } | Atom::Break(_)))
                     .collect();
                 let segment_width: f64 = segment.iter().map(|index| atoms[*index].advance()).sum();
                 let decimal_width: f64 = segment
@@ -2123,25 +2268,34 @@ fn place_line(
                             },
                         });
                     }
-                    if stop.leader != TabLeader::None && aligned > relative_x {
-                        let dash = match stop.leader {
-                            TabLeader::Dot => Some(vec![0.5, 2.0]),
-                            TabLeader::Hyphen => Some(vec![3.0, 2.0]),
-                            TabLeader::Underscore | TabLeader::None => None,
-                        };
-                        items.push(LineItem {
-                            x_pt: x,
-                            y_pt: ascent + 1.0,
-                            item: Item::Line {
-                                dx_pt: aligned - relative_x,
-                                dy_pt: 0.0,
-                                stroke: Stroke {
-                                    width_pt: 0.5,
-                                    color: Rgba::opaque(Rgb::new(0, 0, 0)),
-                                    dash,
+                    if stop.leader != TabLeader::None
+                        && aligned > relative_x
+                        && let Some((_, leader)) =
+                            leaders.iter().find(|(kind, _)| *kind == stop.leader)
+                        && leader.advance_pt > 0.0
+                    {
+                        let count = ((aligned - relative_x) / leader.advance_pt).floor() as usize;
+                        if count > 0 {
+                            let leader_width = count as f64 * leader.advance_pt;
+                            let glyphs = (0..count)
+                                .map(|_| PlacedGlyph {
+                                    gid: leader.gid,
+                                    advance_pt: leader.advance_pt,
+                                    x_offset_pt: leader.x_offset_pt,
+                                    y_offset_pt: leader.y_offset_pt,
+                                    ch: leader.ch,
+                                })
+                                .collect();
+                            text_items.push((
+                                k.saturating_add(1),
+                                1,
+                                LineItem {
+                                    x_pt: base_x + aligned - leader_width,
+                                    y_pt: ascent - leader.style.rise_pt,
+                                    item: Item::Glyphs(build_run(&leader.style, glyphs, rtl)),
                                 },
-                            },
-                        });
+                            ));
+                        }
                     }
                 }
                 x = base_x + aligned;
@@ -2282,6 +2436,7 @@ fn place_line(
         height_pt: height,
         items,
         anchored_items,
+        bookmarks,
         page_break_after,
         column_break_after,
     }
@@ -2344,6 +2499,7 @@ fn link_key(l: Option<&LinkTarget>) -> String {
     match l {
         None => String::new(),
         Some(LinkTarget::Url(u)) => format!("u:{u}"),
+        Some(LinkTarget::Anchor(name)) => format!("a:{name}"),
         Some(LinkTarget::Page(p)) => format!("p:{p}"),
     }
 }

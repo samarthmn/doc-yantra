@@ -94,6 +94,10 @@ pub fn emit(
         let mut annots = Vec::new();
         for pos in &page.items {
             if let Item::Link { w_pt, h_pt, target } = &pos.item {
+                if matches!(target, LinkTarget::Anchor(name) if !laid.anchors.iter().any(|anchor| anchor.name == *name))
+                {
+                    continue;
+                }
                 let y0 = page.height_pt - (pos.y_pt + h_pt);
                 let rect = Rect::new(
                     pos.x_pt as f32,
@@ -190,6 +194,19 @@ pub fn emit(
                     a.action()
                         .action_type(ActionType::Uri)
                         .uri(Str(url.as_bytes()));
+                }
+                LinkTarget::Anchor(name) => {
+                    let Some(anchor) = laid.anchors.iter().find(|anchor| anchor.name == *name)
+                    else {
+                        continue;
+                    };
+                    let target_page = (anchor.page as usize).min(page_ids.len().saturating_sub(1));
+                    let top = laid.pages[target_page].height_pt - anchor.y_pt;
+                    a.action()
+                        .action_type(ActionType::GoTo)
+                        .destination()
+                        .page(page_ids[target_page])
+                        .xyz(0.0, top as f32, None);
                 }
                 LinkTarget::Page(p) => {
                     let target_page = (*p as usize).min(page_ids.len().saturating_sub(1));

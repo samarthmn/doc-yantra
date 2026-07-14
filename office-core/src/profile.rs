@@ -966,6 +966,7 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
         BlockContent::Paragraph(paragraph) => paragraph_has_page_float(paragraph),
         BlockContent::Table(_) => false,
     });
+    let body_has_floating_table = blocks_have_floating_table(&document.body);
     let has_footnote_references = collector
         .note_refs
         .iter()
@@ -984,12 +985,18 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
     if profile.supported
         && (body_anchor_count > 1
             || body_has_page_float
+            || body_has_floating_table
             || has_footnote_references
             || has_multi_section_columns)
     {
         let layout_doc = crate::layout::WordDoc::open(bytes, opts)?;
-        if let Err(error) = crate::layout::layout_docx(&layout_doc) {
-            match error {
+        match crate::layout::layout_docx(&layout_doc) {
+            Ok((_, warnings)) => {
+                for warning in warnings {
+                    profile.add_warning_deduped(warning);
+                }
+            }
+            Err(error) => match error {
                 OfficeError::Unsupported { code, detail } => {
                     profile.add_reason_deduped(code, detail)
                 }
@@ -999,7 +1006,7 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
                 OfficeError::Invalid(detail) | OfficeError::Internal(detail) => {
                     profile.add_reason_deduped(UnsupportedCode::InvalidFile, detail)
                 }
-            }
+            },
         }
     }
 
@@ -1120,6 +1127,20 @@ fn blocks_have_body_anchor(blocks: &[BlockContent]) -> bool {
     blocks.iter().any(|block| match block {
         BlockContent::Paragraph(paragraph) => paragraph_anchor_count(paragraph) > 0,
         BlockContent::Table(_) => false,
+    })
+}
+
+fn blocks_have_floating_table(blocks: &[BlockContent]) -> bool {
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(_) => false,
+        BlockContent::Table(table) => {
+            table.props.floating.is_some()
+                || table
+                    .rows
+                    .iter()
+                    .flat_map(|row| &row.cells)
+                    .any(|cell| blocks_have_floating_table(&cell.content))
+        }
     })
 }
 
@@ -1270,6 +1291,7 @@ fn paragraph_anchor_count(paragraph: &Paragraph) -> usize {
 
     fn inline_count(inline: &InlineContent) -> usize {
         match inline {
+            InlineContent::Bookmark(_) => 0,
             InlineContent::Run(run) => run_count(run),
             InlineContent::Hyperlink { runs, .. } => runs.iter().map(run_count).sum(),
             InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
@@ -1297,6 +1319,7 @@ fn paragraph_has_page_float(paragraph: &Paragraph) -> bool {
 
     fn inline_has_page_float(inline: &InlineContent) -> bool {
         match inline {
+            InlineContent::Bookmark(_) => false,
             InlineContent::Run(run) => run_has_page_float(run),
             InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_page_float),
             InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
@@ -1475,11 +1498,48 @@ impl<'a> Collector<'a> {
                     .or(eff.fonts.h_ansi)
                     .or_else(|| self.theme.minor_latin.clone())
                     .unwrap_or_else(|| "Calibri".to_string());
-                let mapped: String = level
+                let symbol_mapped: String = level
                     .lvl_text
                     .chars()
                     .map(|ch| matching::map_symbol_char(&family, ch as u32).unwrap_or(ch))
                     .collect();
+                let resolved = matching::resolve(
+                    self.font_db,
+                    &family,
+                    if eff.bold == Some(true) { 700 } else { 400 },
+                    eff.italic == Some(true),
+                );
+                for warning in resolved.warnings {
+                    profile.add_warning_deduped(warning);
+                }
+                let mapped = if let Some(primary) = resolved.face {
+                    let fallback_ids = matching::coverage_fallbacks(
+                        self.font_db,
+                        primary,
+                        if eff.bold == Some(true) { 700 } else { 400 },
+                        eff.italic == Some(true),
+                    );
+                    symbol_mapped
+                        .chars()
+                        .map(|source| {
+                            let rendered = matching::substitute_bullet_char(
+                                self.font_db,
+                                &fallback_ids,
+                                source,
+                            )
+                            .unwrap_or(source);
+                            if rendered != source {
+                                profile.add_warning_deduped(Warning::new(
+                                    "bullet_substituted",
+                                    format!("U+{:04X} → U+{:04X}", source as u32, rendered as u32),
+                                ));
+                            }
+                            rendered
+                        })
+                        .collect::<String>()
+                } else {
+                    symbol_mapped
+                };
                 record_coverage(
                     &mut self.coverage,
                     &family,
@@ -1511,6 +1571,7 @@ impl<'a> Collector<'a> {
         context: StoryContext,
     ) {
         match inline {
+            InlineContent::Bookmark(_) => {}
             InlineContent::Run(run) => self.run(para, run, pkg, rels, profile, context),
             InlineContent::Hyperlink { runs, .. } => {
                 for run in runs {
@@ -2163,6 +2224,38 @@ mod tests {
             r.code,
             UnsupportedCode::ComplexScript | UnsupportedCode::RtlText
         )));
+    }
+
+    #[test]
+    fn bundled_subscript_tail_profile_and_layout_boundaries_both_fail_closed() {
+        let db = FontDb::with_bundled();
+        let mut requests = Vec::new();
+        record_coverage(&mut requests, "Calibri", 400, false, "ₕₖₗₘₙₚₛₜ");
+        let mut profile = DocProfile::new("docx");
+        add_fallback_face_missing_reason(&mut profile, &db, &requests);
+        assert!(profile.reasons.iter().any(|reason| {
+            reason.code == UnsupportedCode::MissingGlyph && reason.detail.contains("U+2095")
+        }));
+        assert!(
+            profile
+                .warnings
+                .iter()
+                .all(|warning| warning.code != "superscript_synthesized")
+        );
+
+        let primary = matching::resolve(&db, "Calibri", 400, false)
+            .face
+            .expect("bundled primary face");
+        let ids = matching::coverage_fallbacks(&db, primary, 400, false);
+        let faces: Vec<_> = ids.iter().filter_map(|id| db.face(*id)).collect();
+        let shaped = crate::text::shape::shape_with_fallback("ₕₖₗₘₙₚₛₜ", &faces, 12.0, 0.0, false);
+        assert!(matches!(
+            crate::text::shape::require_glyphs(shaped),
+            Err(OfficeError::Unsupported {
+                code: UnsupportedCode::MissingGlyph,
+                ..
+            })
+        ));
     }
 
     #[test]

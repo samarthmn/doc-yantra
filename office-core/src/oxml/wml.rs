@@ -331,6 +331,8 @@ pub struct NumRef {
 /// Inline content within a paragraph.
 #[derive(Debug, Clone)]
 pub enum InlineContent {
+    /// A zero-width internal-link destination.
+    Bookmark(String),
     /// A text/formatting run.
     Run(Run),
     /// A hyperlink wrapping runs.
@@ -511,7 +513,7 @@ pub struct VmlShape {
 }
 
 /// Note family used by inline references and note parts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NoteKind {
     /// `word/footnotes.xml`.
     Footnote,
@@ -1525,6 +1527,7 @@ pub fn parse_notes(xml: &str, kind: NoteKind) -> Result<NotesPart> {
 struct WmlParser {
     flags: DocFlags,
     field: Option<FieldBuild>,
+    pending_bookmarks: Vec<String>,
 }
 
 impl WmlParser {
@@ -1571,8 +1574,23 @@ impl WmlParser {
         parent: &str,
         out: &mut Vec<BlockContent>,
     ) -> Result<bool> {
-        if is(node, W, "p") {
-            out.push(BlockContent::Paragraph(self.paragraph(node)?));
+        if is(node, W, "bookmarkStart") {
+            if let Some(name) = attr(node, W, "name") {
+                self.pending_bookmarks.push(name.to_string());
+            }
+        } else if is(node, W, "bookmarkEnd") {
+            // A block-level end marker has no visible effect.
+        } else if is(node, W, "p") {
+            let mut paragraph = self.paragraph(node)?;
+            if !self.pending_bookmarks.is_empty() {
+                let mut bookmarks = std::mem::take(&mut self.pending_bookmarks)
+                    .into_iter()
+                    .map(InlineContent::Bookmark)
+                    .collect::<Vec<_>>();
+                bookmarks.append(&mut paragraph.runs);
+                paragraph.runs = bookmarks;
+            }
+            out.push(BlockContent::Paragraph(paragraph));
         } else if is(node, M, "oMathPara") {
             out.push(BlockContent::Paragraph(Paragraph {
                 props: ParaProps {
@@ -1648,7 +1666,13 @@ impl WmlParser {
     }
 
     fn inline_child(&mut self, node: Node, out: &mut Vec<InlineContent>) -> Result<()> {
-        if is(node, W, "pPr") || wml_ignorable(node) {
+        if is(node, W, "bookmarkStart") {
+            if let Some(name) = attr(node, W, "name") {
+                self.push_inline(InlineContent::Bookmark(name.to_string()), out);
+            }
+            return Ok(());
+        }
+        if is(node, W, "bookmarkEnd") || is(node, W, "pPr") || wml_ignorable(node) {
             return Ok(());
         }
         if is(node, W, "r") {
@@ -2224,6 +2248,7 @@ fn inline_has_result_content(inline: &InlineContent) -> bool {
     }
 
     match inline {
+        InlineContent::Bookmark(_) => false,
         InlineContent::Run(run) => run_has_content(run),
         InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_content),
         InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {

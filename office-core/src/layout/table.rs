@@ -8,7 +8,7 @@
 
 use super::assemble::WordDoc;
 use super::numbering_layout::ListCounters;
-use super::paragraph::{LineItem, layout_paragraph};
+use super::paragraph::{LineItem, NoteSequence, layout_paragraph_with_note_sequence};
 use super::{FillRule, Item, PathCommand, Positioned, Stroke};
 use crate::Result;
 use crate::oxml::TblWidth;
@@ -53,16 +53,21 @@ pub fn layout_table(
     table_left: f64,
     counters: &mut ListCounters,
 ) -> Result<Vec<RowLayout>> {
-    Ok(layout_table_with_width(
-        doc,
-        warnings,
-        table,
+    let options = TableLayoutOptions {
         rels,
         avail_width_pt,
         table_left,
-        counters,
-    )?
-    .rows)
+        note_sequence: None,
+    };
+    Ok(layout_table_with_width(doc, warnings, table, &options, counters)?.rows)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TableLayoutOptions<'a> {
+    pub(crate) rels: &'a HashMap<String, String>,
+    pub(crate) avail_width_pt: f64,
+    pub(crate) table_left: f64,
+    pub(crate) note_sequence: Option<&'a NoteSequence>,
 }
 
 /// Internal additive form used by floating-table flow to retain the resolved
@@ -71,11 +76,15 @@ pub(crate) fn layout_table_with_width(
     doc: &WordDoc,
     warnings: &mut Vec<Warning>,
     table: &Table,
-    rels: &HashMap<String, String>,
-    avail_width_pt: f64,
-    table_left: f64,
+    options: &TableLayoutOptions<'_>,
     counters: &mut ListCounters,
 ) -> Result<TableLayout> {
+    let TableLayoutOptions {
+        rels,
+        avail_width_pt,
+        table_left,
+        note_sequence,
+    } = *options;
     let cols = resolve_columns(table, avail_width_pt);
     let table_width: f64 = cols.iter().sum();
     let free_width = (avail_width_pt - table_width).max(0.0);
@@ -119,7 +128,15 @@ pub(crate) fn layout_table_with_width(
             let (items, height) = if is_continue {
                 (Vec::new(), 0.0)
             } else {
-                layout_cell(doc, warnings, &cell.content, rels, content_w, counters)?
+                layout_cell(
+                    doc,
+                    warnings,
+                    &cell.content,
+                    rels,
+                    content_w,
+                    counters,
+                    note_sequence,
+                )?
             };
             let border_top = horizontal_boundaries[row_index].half_width_for_span(col, col + span);
             let border_bottom =
@@ -365,6 +382,7 @@ fn layout_cell(
     rels: &HashMap<String, String>,
     width: f64,
     counters: &mut ListCounters,
+    note_sequence: Option<&NoteSequence>,
 ) -> Result<(Vec<LineItem>, f64)> {
     let mut items = Vec::new();
     let mut y = 0.0_f64;
@@ -372,7 +390,16 @@ fn layout_cell(
         match block {
             BlockContent::Paragraph(p) => {
                 let label = counter_label(doc, warnings, p, counters)?;
-                let layout = layout_paragraph(doc, warnings, p, rels, width, label, None)?;
+                let layout = layout_paragraph_with_note_sequence(
+                    doc,
+                    warnings,
+                    p,
+                    rels,
+                    width,
+                    label,
+                    None,
+                    note_sequence,
+                )?;
                 if !layout.page_floats.is_empty()
                     || layout
                         .lines
@@ -398,7 +425,15 @@ fn layout_cell(
                 y += layout.space_after_pt;
             }
             BlockContent::Table(t) => {
-                for row in layout_table(doc, warnings, t, rels, width, 0.0, counters)? {
+                let nested_options = TableLayoutOptions {
+                    rels,
+                    avail_width_pt: width,
+                    table_left: 0.0,
+                    note_sequence,
+                };
+                for row in
+                    layout_table_with_width(doc, warnings, t, &nested_options, counters)?.rows
+                {
                     for li in &row.items {
                         items.push(LineItem {
                             x_pt: li.x_pt,

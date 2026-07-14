@@ -115,8 +115,8 @@ pub fn build_label(
         .or_else(|| doc.theme.minor_latin.clone())
         .unwrap_or_else(|| "Calibri".to_string());
 
-    // Map symbol/bullet code points to Unicode using the label font as the hint.
-    let mapped: String = label_text
+    // Symbol/Wingdings mapping is the first normalization layer.
+    let symbol_mapped: String = label_text
         .chars()
         .map(|c| matching::map_symbol_char(&family, c as u32).unwrap_or(c))
         .collect();
@@ -133,6 +133,27 @@ pub fn build_label(
     };
     let fallback_ids =
         matching::coverage_fallbacks(&doc.fonts, face, weight, eff.italic == Some(true));
+    let mapped = if level.num_fmt == NumFmt::Bullet {
+        symbol_mapped
+            .chars()
+            .map(|source| {
+                let rendered = matching::substitute_bullet_char(&doc.fonts, &fallback_ids, source)
+                    .unwrap_or(source);
+                if rendered != source {
+                    let warning = Warning::new(
+                        "bullet_substituted",
+                        format!("U+{:04X} → U+{:04X}", source as u32, rendered as u32),
+                    );
+                    if !warnings.contains(&warning) {
+                        warnings.push(warning);
+                    }
+                }
+                rendered
+            })
+            .collect::<String>()
+    } else {
+        symbol_mapped
+    };
     let (fallback_ids, fallback_faces): (Vec<_>, Vec<_>) = fallback_ids
         .into_iter()
         .filter_map(|id| doc.fonts.face(id).map(|font| (id, font)))

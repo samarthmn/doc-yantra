@@ -107,6 +107,38 @@ pub fn coverage_fallbacks(db: &FontDb, primary: FaceId, weight: u16, italic: boo
     ids
 }
 
+/// Resolves a bullet-only documented substitution when the authored glyph is
+/// absent from every selected coverage fallback. Unknown characters are not
+/// substituted, preserving the fail-closed behavior for arbitrary PUA bullets.
+pub fn substitute_bullet_char(db: &FontDb, faces: &[FaceId], ch: char) -> Option<char> {
+    let covered = |candidate: char| {
+        faces.iter().any(|face_id| {
+            db.face(*face_id)
+                .and_then(|face| face.parsed())
+                .and_then(|face| face.glyph_index(candidate))
+                .is_some()
+        })
+    };
+    if covered(ch) {
+        return Some(ch);
+    }
+    let candidates: &[char] = match ch {
+        // Google/Office arrowhead bullets -> black right-pointing pointer.
+        '\u{2B9A}' | '\u{27A2}' | '\u{27A4}' => &['\u{25BA}', '\u{2022}'],
+        // Diamond ornaments retain filled/outlined intent before generic bullet.
+        '\u{2756}' => &['\u{2666}', '\u{2022}'],
+        '\u{2726}' => &['\u{25C6}', '\u{2022}'],
+        '\u{2727}' => &['\u{25C7}', '\u{2022}'],
+        // Dot operators and middle dots normalize to the ordinary bullet.
+        '\u{2219}' | '\u{00B7}' => &['\u{2022}'],
+        _ => &[],
+    };
+    candidates
+        .iter()
+        .copied()
+        .find(|candidate| covered(*candidate))
+}
+
 struct Pick {
     face: FaceId,
     synthetic_italic: bool,

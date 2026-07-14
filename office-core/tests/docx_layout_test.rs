@@ -78,6 +78,30 @@ fn glyph_runs(page: &Page) -> Vec<(String, f64, f64, f64)> {
         .collect()
 }
 
+fn pdf_page_object_ids(pdf: &[u8]) -> Vec<i32> {
+    let text = String::from_utf8_lossy(pdf);
+    let mut object = None;
+    let mut pages = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() == 3 && fields[1] == "0" && fields[2] == "obj" {
+            object = fields[0].parse::<i32>().ok();
+        } else if line.trim() == "/Type /Page"
+            && let Some(object) = object
+        {
+            pages.push(object);
+        }
+    }
+    pages
+}
+
+fn pdf_goto_destination_object(pdf: &[u8]) -> Option<i32> {
+    String::from_utf8_lossy(pdf).lines().find_map(|line| {
+        let destination = line.trim().strip_prefix("/D [")?;
+        destination.split_whitespace().next()?.parse().ok()
+    })
+}
+
 fn assert_anchor_rejection_parity(bytes: &[u8], detail: &str) {
     let predicted = profile(bytes, OfficeFormat::Docx).expect("profile");
     assert!(
@@ -273,16 +297,32 @@ fn floating_table_wraps_side_text_then_releases_full_width() {
 
 #[test]
 fn overwide_floating_table_falls_back_with_stable_warning() {
-    let bytes = floating_table_side_wrap_docx(8600);
+    let table = r#"<w:tbl><w:tblPr><w:tblW w:w="8600" w:type="dxa"/><w:tblpPr w:vertAnchor="text" w:horzAnchor="text" w:tblpX="0" w:tblpY="1" w:rightFromText="187"/></w:tblPr><w:tblGrid><w:gridCol w:w="8600"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Overwide floating table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let bytes = minimal_docx(&format!(
+        r#"{table}<w:p><w:r><w:t>between</w:t></w:r></w:p>{table}<w:p><w:r><w:t>after</w:t></w:r></w:p>"#
+    ));
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("fallback profile");
+    assert!(predicted.supported, "reasons: {:?}", predicted.reasons);
     let output = convert(&bytes, OfficeFormat::Docx, &opts()).expect("fallback converts");
-    assert!(
-        output
-            .warnings
-            .iter()
-            .any(|warning| { warning.code == "floating_table_block_fallback" }),
-        "warnings: {:?}",
-        output.warnings
+    let profile_warnings: Vec<_> = predicted
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == "floating_table_block_fallback")
+        .collect();
+    let convert_warnings: Vec<_> = output
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == "floating_table_block_fallback")
+        .collect();
+    assert_eq!(
+        profile_warnings.len(),
+        1,
+        "profile: {:?}",
+        predicted.warnings
     );
+    assert_eq!(convert_warnings.len(), 1, "convert: {:?}", output.warnings);
+    assert_eq!(convert_warnings[0], profile_warnings[0]);
+    assert_eq!(output.warnings, predicted.warnings);
 }
 
 #[test]
@@ -1027,6 +1067,112 @@ fn profile_predicts_convert_verdict() {
             );
         }
     }
+}
+
+#[test]
+fn internal_anchor_link_targets_bookmark_page_and_dangling_anchor_is_not_annotated() {
+    let linked = minimal_docx(
+        r#"<w:p><w:hyperlink w:anchor="target"><w:r><w:t>Jump</w:t></w:r></w:hyperlink><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>Destination</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#,
+    );
+    let predicted = profile(&linked, OfficeFormat::Docx).expect("profile linked anchor");
+    assert!(
+        predicted.supported,
+        "profile reasons: {:?}",
+        predicted.reasons
+    );
+    let output = convert(&linked, OfficeFormat::Docx, &opts()).expect("convert linked anchor");
+    let page_ids = pdf_page_object_ids(&output.pdf);
+    assert_eq!(page_ids.len(), 2, "page objects: {page_ids:?}");
+    assert_eq!(
+        pdf_goto_destination_object(&output.pdf),
+        Some(page_ids[1]),
+        "anchor must resolve to the bookmark's second page"
+    );
+
+    let dangling = minimal_docx(
+        r#"<w:p><w:hyperlink w:anchor="missing"><w:r><w:t>Dangling</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let dangling_profile = profile(&dangling, OfficeFormat::Docx).expect("profile dangling");
+    assert!(dangling_profile.supported);
+    let dangling_output =
+        convert(&dangling, OfficeFormat::Docx, &opts()).expect("dangling converts");
+    assert!(
+        !String::from_utf8_lossy(&dangling_output.pdf).contains("/Subtype /Link"),
+        "dangling anchors must render text without an annotation"
+    );
+}
+
+#[test]
+fn tab_leaders_are_extraction_visible_glyphs_and_require_a_positive_gap() {
+    for (leader, expected) in [("dot", '.'), ("hyphen", '-'), ("underscore", '_')] {
+        let body = format!(
+            r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="{leader}" w:pos="8640"/></w:tabs></w:pPr><w:r><w:t>Entry</w:t><w:tab/><w:t>12</w:t></w:r></w:p>"#
+        );
+        let laid = layout_body(&body);
+        let runs = glyph_runs(&laid.pages[0]);
+        let leader_run = runs
+            .iter()
+            .find(|(text, ..)| !text.is_empty() && text.chars().all(|ch| ch == expected))
+            .unwrap_or_else(|| panic!("missing {leader} glyph leader in {runs:?}"));
+        assert!(leader_run.3 > 0.0, "leader must occupy the tab gap");
+    }
+
+    let no_gap = layout_body(
+        r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="120"/></w:tabs></w:pPr><w:r><w:t>Already past stop</w:t><w:tab/><w:t>12</w:t></w:r></w:p>"#,
+    );
+    assert!(
+        glyph_runs(&no_gap.pages[0])
+            .iter()
+            .all(|(text, ..)| text.is_empty() || !text.chars().all(|ch| ch == '.')),
+        "no leader may be painted without a positive authored-stop gap"
+    );
+}
+
+#[test]
+fn unicode_superscript_scientific_notation_has_profile_convert_warning_parity() {
+    let bytes = minimal_docx(r#"<w:p><w:r><w:t>10⁻⁹ m</w:t></w:r></w:p>"#);
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile superscripts");
+    assert!(
+        predicted.supported,
+        "profile reasons: {:?}",
+        predicted.reasons
+    );
+    let output = convert(&bytes, OfficeFormat::Docx, &opts()).expect("convert superscripts");
+    assert_eq!(output.warnings, predicted.warnings);
+    assert!(
+        predicted
+            .warnings
+            .iter()
+            .all(|warning| warning.code != "superscript_synthesized")
+    );
+    let pdf = String::from_utf8_lossy(&output.pdf);
+    assert!(!pdf.is_empty());
+
+    let doc = WordDoc::open(&bytes, &opts()).expect("open superscripts");
+    let laid = layout_docx(&doc).expect("layout superscripts").0;
+    assert!(page_text(&laid.pages[0]).contains("10⁻⁹ m"));
+}
+
+#[test]
+fn canonical_core_properties_dates_flow_deterministically_into_pdf_metadata() {
+    let document = wrap_document(r#"<w:p><w:r><w:t>Dated</w:t></w:r></w:p>"#);
+    let core = r#"<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dcterms="http://purl.org/dc/terms/"><dcterms:created>2024-01-02T03:04:05Z</dcterms:created><dcterms:modified>2025-06-07T08:09:10Z</dcterms:modified></cp:coreProperties>"#;
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("docProps/core.xml", core.as_bytes()),
+    ]);
+
+    let doc = WordDoc::open(&bytes, &opts()).expect("open dated input");
+    assert_eq!(doc.dates.created, "D:20240102030405Z");
+    assert_eq!(doc.dates.modified, "D:20250607080910Z");
+    let output = convert(&bytes, OfficeFormat::Docx, &opts()).expect("convert dated input");
+    let pdf = String::from_utf8_lossy(&output.pdf);
+    assert!(pdf.contains("/CreationDate (D:20240102030405)"));
+    assert!(pdf.contains("/ModDate (D:20250607080910)"));
 }
 
 fn assert_missing_header_footer_target_is_typed(bytes: &[u8], expected_detail: &str) {

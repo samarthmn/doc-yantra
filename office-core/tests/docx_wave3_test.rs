@@ -1077,6 +1077,45 @@ fn fixture_footnote_and_endnote_render_and_agree() {
 }
 
 #[test]
+fn note_markers_follow_first_reference_order_per_kind() {
+    let body = r#"<w:p><w:r><w:t>A</w:t><w:footnoteReference w:id="0"/><w:t>B</w:t><w:footnoteReference w:id="7"/><w:t>E</w:t><w:endnoteReference w:id="42"/></w:r></w:p>"#;
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="0"><w:p><w:r><w:t>Footnote zero</w:t></w:r></w:p></w:footnote><w:footnote w:id="7"><w:p><w:r><w:t>Footnote seven</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let endnotes = format!(
+        r#"<?xml version="1.0"?><w:endnotes{DOC_NAMESPACES}><w:endnote w:id="42"><w:p><w:r><w:t>Endnote forty-two</w:t></w:r></w:p></w:endnote></w:endnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let bytes = package_with_parts(
+        body,
+        rels,
+        vec![
+            ("word/footnotes.xml", footnotes.into_bytes()),
+            ("word/endnotes.xml", endnotes.into_bytes()),
+        ],
+    );
+
+    assert_profile_convert_agree(&bytes);
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let first_page = page_text(&laid.pages[0]);
+    let last_page = page_text(laid.pages.last().unwrap());
+
+    assert!(
+        first_page.contains("A1B2E1"),
+        "inline markers: {first_page:?}"
+    );
+    assert!(
+        first_page.contains("1 Footnote zero") && first_page.contains("2 Footnote seven"),
+        "footnote body markers: {first_page:?}"
+    );
+    assert!(
+        last_page.contains("1 Endnote forty-two"),
+        "endnote body marker: {last_page:?}"
+    );
+}
+
+#[test]
 fn fixture_footnote_overflow_continues_on_following_page() {
     let body = r#"<w:p><w:r><w:t>Body</w:t><w:footnoteReference w:id="1"/></w:r></w:p>"#;
     let note_body = (0..80)

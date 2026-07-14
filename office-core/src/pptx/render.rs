@@ -90,6 +90,7 @@ pub fn render_pptx(doc: &PptxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         pages,
         images: doc.images.clone(),
         outline: Vec::new(),
+        anchors: Vec::new(),
         dates: doc.dates.clone(),
     };
     Ok((laid, warnings))

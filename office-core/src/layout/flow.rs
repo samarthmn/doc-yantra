@@ -9,11 +9,15 @@ use super::assemble::WordDoc;
 use super::numbering_layout::{ListCounters, PlacedLabel, build_label};
 use super::page::PageGeometry;
 use super::paragraph::{
-    AnchoredLineItem, ExclusionBand, FieldContext, LineItem, PageFloat, PageHorizontalContext,
-    ParaLayout, WrapExclusion, layout_paragraph, layout_paragraph_with_page_wrap,
+    AnchoredLineItem, ExclusionBand, FieldContext, LineItem, NoteSequence, PageFloat,
+    PageHorizontalContext, ParaLayout, WrapExclusion, layout_paragraph,
+    layout_paragraph_with_page_wrap,
 };
-use super::table::{layout_table, layout_table_with_width};
-use super::{EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned};
+use super::table::{TableLayoutOptions, layout_table, layout_table_with_width};
+use super::{
+    AnchorPosition, EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCommand,
+    Positioned,
+};
 use crate::oxml::numbering::{NumFmt, format_number};
 use crate::oxml::wml::{
     AnchorOrigin, BlockContent, ColumnSpec, FrameAlign, FrameHeightRule, FrameProps, HdrFtrKind,
@@ -45,6 +49,7 @@ struct Unit {
     table_id: Option<usize>,
     is_header_row: bool,
     outline: Option<(String, u8)>,
+    bookmarks: Vec<String>,
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
     frame: Option<FramePlacement>,
     block_index: usize,
@@ -382,12 +387,19 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         }
     }
 
-    let mut pass = run_document_pass(doc, &section_runs, None)?;
+    let initial_pass = run_document_pass(doc, &section_runs, None, None)?;
+    let note_sequence = build_note_sequence(&initial_pass.units);
+    let mut pass = if note_sequence.is_empty() {
+        initial_pass
+    } else {
+        run_document_pass(doc, &section_runs, Some(&note_sequence), None)?
+    };
     if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
         let mut schedule = page_band_schedule(&pass.units, &pass.pages, &pass.runs);
         let mut converged = false;
         for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
-            let next = run_document_pass(doc, &section_runs, Some(&schedule))?;
+            let next =
+                run_document_pass(doc, &section_runs, Some(&note_sequence), Some(&schedule))?;
             let next_schedule = page_band_schedule(&next.units, &next.pages, &next.runs);
             let stable = page_band_schedules_equivalent(&schedule, &next_schedule);
             pass = next;
@@ -412,7 +424,7 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
     let run_layouts = pass.runs;
     let mut pages = pass.pages;
     align_body_vertically(&section_runs, &run_layouts, &units, &mut pages);
-    place_footnotes(doc, &mut warnings, &run_layouts, &mut pages)?;
+    place_footnotes(doc, &mut warnings, &run_layouts, &note_sequence, &mut pages)?;
 
     let mut endnote_refs = Vec::new();
     for unit in &units {
@@ -423,7 +435,14 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         }
     }
     if !endnote_refs.is_empty() {
-        append_endnotes(doc, &mut warnings, &run_layouts, &endnote_refs, &mut pages)?;
+        append_endnotes(
+            doc,
+            &mut warnings,
+            &run_layouts,
+            &endnote_refs,
+            &note_sequence,
+            &mut pages,
+        )?;
     }
 
     let total_pages = pages.len() as u32;
@@ -436,11 +455,13 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         total_pages,
     )?;
     let outline = collect_outline(&units, &pages);
+    let anchors = collect_bookmarks(&units, &pages);
 
     let laid = LaidOutDocument {
         pages: pages.into_iter().map(finish_work_page).collect(),
         images: clone_images(&doc.images),
         outline,
+        anchors,
         dates: doc.dates.clone(),
     };
     Ok((laid, warnings))
@@ -620,6 +641,7 @@ struct WorkPage {
 fn run_document_pass(
     doc: &WordDoc,
     section_runs: &[SectionRun<'_>],
+    note_sequence: Option<&NoteSequence>,
     schedule: Option<&PageBandSchedule>,
 ) -> Result<DocumentPass> {
     let mut warnings = Vec::new();
@@ -650,6 +672,7 @@ fn run_document_pass(
             },
             Some(run.body_block_offset),
             schedule,
+            note_sequence,
             &mut build_state,
         )?);
         runs.push(RunLayout {
@@ -687,6 +710,7 @@ fn build_units(
     page_horizontal: PageHorizontalContext,
     body_block_offset: Option<usize>,
     page_schedule: Option<&PageBandSchedule>,
+    note_sequence: Option<&NoteSequence>,
     state: &mut UnitBuildState,
 ) -> Result<Vec<Unit>> {
     let mut units = Vec::new();
@@ -750,6 +774,7 @@ fn build_units(
                     active_wrap.take(),
                     page_horizontal,
                     scheduled_line_wraps,
+                    note_sequence,
                 )?;
                 active_wrap = layout.wrap_after.take();
                 if let Some(frame) = frame {
@@ -793,8 +818,14 @@ fn build_units(
                 let table_id = table_counter;
                 table_counter += 1;
                 keep_next_group = None;
+                let table_options = TableLayoutOptions {
+                    rels,
+                    avail_width_pt: content_w,
+                    table_left: 0.0,
+                    note_sequence,
+                };
                 let table_layout =
-                    layout_table_with_width(doc, warnings, t, rels, content_w, 0.0, counters)?;
+                    layout_table_with_width(doc, warnings, t, &table_options, counters)?;
                 if let Some(floating) = t.props.floating {
                     let mut items = Vec::new();
                     let mut row_y = 0.0;
@@ -860,10 +891,13 @@ fn build_units(
                         && side_wrap.is_some()
                         && text_window < MIN_TEXT_WINDOW_PT
                     {
-                        warnings.push(Warning::new(
+                        let warning = Warning::new(
                             "floating_table_block_fallback",
                             "floating table leaves less than 36pt for side-wrapped text",
-                        ));
+                        );
+                        if !warnings.contains(&warning) {
+                            warnings.push(warning);
+                        }
                     }
                     units.push(Unit {
                         height: if wraps_text {
@@ -882,6 +916,7 @@ fn build_units(
                         table_id: None,
                         is_header_row: false,
                         outline: None,
+                        bookmarks: Vec::new(),
                         note_refs: Vec::new(),
                         frame: None,
                         block_index: source_block_index,
@@ -913,6 +948,7 @@ fn build_units(
                         table_id: Some(table_id),
                         is_header_row: row.is_header,
                         outline: None,
+                        bookmarks: Vec::new(),
                         note_refs: Vec::new(),
                         frame: None,
                         block_index: source_block_index,
@@ -957,6 +993,7 @@ fn blocks_contain_anchors(blocks: &[BlockContent]) -> bool {
 
     fn inline_has_anchor(inline: &InlineContent) -> bool {
         match inline {
+            InlineContent::Bookmark(_) => false,
             InlineContent::Run(run) => run_has_anchor(run),
             InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_anchor),
             InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
@@ -994,6 +1031,7 @@ fn clone_unit(u: &Unit) -> Unit {
         table_id: u.table_id,
         is_header_row: u.is_header_row,
         outline: u.outline.clone(),
+        bookmarks: u.bookmarks.clone(),
         note_refs: u.note_refs.clone(),
         frame: u.frame,
         block_index: u.block_index,
@@ -1092,6 +1130,7 @@ fn push_paragraph_units(
             table_id: None,
             is_header_row: false,
             outline,
+            bookmarks: line.bookmarks,
             note_refs: if i == 0 {
                 note_refs.clone()
             } else {
@@ -1139,6 +1178,11 @@ fn push_frame_unit(
     }
     let mut items = Vec::new();
     let mut content_height = 0.0;
+    let bookmarks = layout
+        .lines
+        .iter()
+        .flat_map(|line| line.bookmarks.iter().cloned())
+        .collect();
     for line in layout.lines {
         for item in line.items {
             items.push(LineItem {
@@ -1237,6 +1281,7 @@ fn push_frame_unit(
         outline: layout
             .outline_level
             .map(|level| (layout.text.clone(), level)),
+        bookmarks,
         note_refs: layout.note_refs,
         frame: Some(FramePlacement {
             props: frame,
@@ -2009,10 +2054,35 @@ fn finish_work_page(mut work: WorkPage) -> Page {
     work.page
 }
 
+fn build_note_sequence(units: &[Unit]) -> NoteSequence {
+    let mut sequence = NoteSequence::new();
+    let mut next = HashMap::from([(NoteKind::Footnote, 1_u32), (NoteKind::Endnote, 1_u32)]);
+    for unit in units {
+        for &(kind, id) in &unit.note_refs {
+            if sequence.contains_key(&(kind, id)) {
+                continue;
+            }
+            let value = next.entry(kind).or_insert(1);
+            sequence.insert((kind, id), *value);
+            *value += 1;
+        }
+    }
+    sequence
+}
+
+fn note_marker(sequence: &NoteSequence, kind: NoteKind, id: i64) -> String {
+    let value = sequence.get(&(kind, id)).copied().unwrap_or(1);
+    // Note numbering settings (start/restart/numFmt) remain deliberately outside
+    // the supported envelope; the implemented subset is independent decimal
+    // first-reference order for footnotes and endnotes.
+    format_number(&NumFmt::Decimal, i64::from(value)).unwrap_or_else(|_| value.to_string())
+}
+
 fn place_footnotes(
     doc: &WordDoc,
     warnings: &mut Vec<Warning>,
     run_layouts: &[RunLayout],
+    note_sequence: &NoteSequence,
     pages: &mut Vec<WorkPage>,
 ) -> Result<()> {
     let mut page_index = 0usize;
@@ -2053,7 +2123,10 @@ fn place_footnotes(
                         vert_align: Some(VertAlign::Super),
                         ..RunProps::default()
                     },
-                    content: vec![RunContent::Text(format!("{id} "))],
+                    content: vec![RunContent::Text(format!(
+                        "{} ",
+                        note_marker(note_sequence, kind, id)
+                    ))],
                 })],
                 ..Paragraph::default()
             };
@@ -2073,6 +2146,7 @@ fn place_footnotes(
                 },
                 None,
                 None,
+                Some(note_sequence),
                 &mut build_state,
             )?);
         }
@@ -2118,6 +2192,7 @@ fn append_endnotes(
     warnings: &mut Vec<Warning>,
     run_layouts: &[RunLayout],
     refs: &[(NoteKind, i64)],
+    note_sequence: &NoteSequence,
     pages: &mut Vec<WorkPage>,
 ) -> Result<()> {
     let governing_run = run_layouts.len() - 1;
@@ -2145,7 +2220,10 @@ fn append_endnotes(
                     vert_align: Some(VertAlign::Super),
                     ..RunProps::default()
                 },
-                content: vec![RunContent::Text(format!("{id} "))],
+                content: vec![RunContent::Text(format!(
+                    "{} ",
+                    note_marker(note_sequence, kind, id)
+                ))],
             })],
             ..Paragraph::default()
         };
@@ -2165,6 +2243,7 @@ fn append_endnotes(
             },
             None,
             None,
+            Some(note_sequence),
             &mut build_state,
         )?);
     }
@@ -2437,4 +2516,26 @@ fn collect_outline(units: &[Unit], pages: &[WorkPage]) -> Vec<OutlineEntry> {
         }
     }
     entries
+}
+
+fn collect_bookmarks(units: &[Unit], pages: &[WorkPage]) -> Vec<AnchorPosition> {
+    let mut anchors = Vec::new();
+    for (page_idx, page) in pages.iter().enumerate() {
+        for &(unit_idx, y_pt) in &page.unit_ys {
+            for name in &units[unit_idx].bookmarks {
+                if anchors
+                    .iter()
+                    .any(|anchor: &AnchorPosition| anchor.name == *name)
+                {
+                    continue;
+                }
+                anchors.push(AnchorPosition {
+                    name: name.clone(),
+                    page: page_idx as u32,
+                    y_pt,
+                });
+            }
+        }
+    }
+    anchors
 }

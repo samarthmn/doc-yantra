@@ -391,7 +391,9 @@ fn decode_images(
 /// Reads `docProps/core.xml` created/modified and formats PDF date literals.
 fn core_dates(pkg: &Package) -> DocDates {
     let mut dates = DocDates::default();
-    let Some(bytes) = pkg.part("docprops/core.xml") else {
+    // Package lookup is case-insensitive, but keep the canonical OPC spelling
+    // visible here because ZIP producers conventionally write `docProps/`.
+    let Some(bytes) = pkg.part("docProps/core.xml") else {
         return dates;
     };
     let Ok(text) = std::str::from_utf8(bytes) else {

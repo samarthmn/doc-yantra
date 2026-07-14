@@ -2,7 +2,7 @@
 
 use office_core::layout::{Item, WordDoc, layout_docx};
 use office_core::testkit::{DOC_NAMESPACES, zip_package};
-use office_core::{ConvertOptions, OfficeFormat, convert};
+use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
 
 fn numbering_docx() -> Vec<u8> {
     let document = format!(
@@ -28,6 +28,28 @@ fn options() -> ConvertOptions {
     }
 }
 
+fn bullet_docx(label: char, items: usize) -> Vec<u8> {
+    let paragraphs = (0..items)
+        .map(|index| {
+            format!(r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item {index}</w:t></w:r></w:p>"#)
+        })
+        .collect::<String>();
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{DOC_NAMESPACES}><w:body>{paragraphs}</w:body></w:document>"#
+    );
+    let numbering = format!(
+        r#"<?xml version="1.0"?><w:numbering{DOC_NAMESPACES}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="{label}"/><w:rPr><w:rFonts w:ascii="Noto Sans Symbols"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/numbering.xml", numbering.as_bytes()),
+    ])
+}
+
 #[test]
 fn numbering_label_splits_mixed_primary_and_fallback_faces() {
     let bytes = numbering_docx();
@@ -50,4 +72,73 @@ fn numbering_label_splits_mixed_primary_and_fallback_faces() {
         extracted.contains("१1."),
         "missing numbering label: {extracted:?}"
     );
+}
+
+#[test]
+fn exotic_bullet_substitution_warns_in_profile_and_convert_once() {
+    let bytes = bullet_docx('\u{2B9A}', 2);
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile exotic bullet");
+    assert!(
+        predicted.supported,
+        "profile reasons: {:?}",
+        predicted.reasons
+    );
+    let output = convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
+        .expect("substituted bullet converts");
+    let expected_detail = "U+2B9A → U+25BA";
+    let profile_warnings: Vec<_> = predicted
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == "bullet_substituted")
+        .collect();
+    let convert_warnings: Vec<_> = output
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == "bullet_substituted")
+        .collect();
+    assert_eq!(
+        profile_warnings.len(),
+        1,
+        "profile: {:?}",
+        predicted.warnings
+    );
+    assert_eq!(convert_warnings.len(), 1, "convert: {:?}", output.warnings);
+    assert_eq!(profile_warnings[0].detail, expected_detail);
+    assert_eq!(convert_warnings[0], profile_warnings[0]);
+
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).expect("open exotic bullet");
+    let (laid, _) = layout_docx(&doc).expect("layout exotic bullet");
+    let extracted: String = laid
+        .pages
+        .iter()
+        .flat_map(|page| &page.items)
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) => Some(run.glyphs.iter().map(|glyph| glyph.ch).collect::<String>()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        extracted.contains('\u{25BA}'),
+        "substituted label: {extracted:?}"
+    );
+    assert!(
+        !extracted.contains('\u{2B9A}'),
+        "raw label survived: {extracted:?}"
+    );
+}
+
+#[test]
+fn unmappable_private_use_bullet_remains_fail_closed() {
+    let bytes = bullet_docx('\u{10FFFD}', 1);
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile PUA bullet");
+    assert!(predicted.reasons.iter().any(|reason| {
+        reason.code == UnsupportedCode::MissingGlyph && reason.detail.contains("U+10FFFD")
+    }));
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::MissingGlyph,
+            ..
+        })
+    ));
 }

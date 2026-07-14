@@ -97,6 +97,7 @@ pub fn render_xlsx(doc: &XlsxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         pages,
         images: doc.images.clone(),
         outline: Vec::new(),
+        anchors: Vec::new(),
         dates: doc.dates.clone(),
     };
     Ok((laid, warnings))

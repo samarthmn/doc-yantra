@@ -25,6 +25,7 @@ fn para_text(p: &office_core::oxml::wml::Paragraph) -> String {
     fn inline_text(inlines: &[InlineContent], output: &mut String) {
         for inline in inlines {
             match inline {
+                InlineContent::Bookmark(_) => {}
                 InlineContent::Run(run) => output.push_str(&run_text(run)),
                 InlineContent::Hyperlink { runs, .. } => {
                     for run in runs {
@@ -278,6 +279,105 @@ fn paragraph_mark_empty_run_properties_are_parsed_as_supported_bookkeeping() {
         "empty paragraph-mark properties must not poison the paragraph: {:?}",
         paragraph.props.visible_unsupported
     );
+}
+
+#[test]
+fn explicit_toggle_matrix_obeys_on_off_semantics_across_wml_scopes() {
+    for value in [
+        None,
+        Some("1"),
+        Some("true"),
+        Some("0"),
+        Some("false"),
+        Some("off"),
+    ] {
+        let attr = value.map_or_else(String::new, |value| format!(r#" w:val="{value}""#));
+        let expected = !matches!(value, Some("0" | "false" | "off"));
+        let toggle = |name: &str| format!("<w:{name}{attr}/>");
+        let run_props = [
+            "b",
+            "i",
+            "caps",
+            "smallCaps",
+            "strike",
+            "dstrike",
+            "vanish",
+            "rtl",
+        ]
+        .into_iter()
+        .map(toggle)
+        .collect::<String>();
+        let para_props = [
+            "keepNext",
+            "keepLines",
+            "pageBreakBefore",
+            "widowControl",
+            "bidi",
+            "contextualSpacing",
+        ]
+        .into_iter()
+        .map(toggle)
+        .collect::<String>();
+        let row_props = ["tblHeader", "cantSplit", "hidden"]
+            .into_iter()
+            .map(toggle)
+            .collect::<String>();
+        let xml = wrap_document(&format!(
+            r#"<w:p><w:pPr>{para_props}</w:pPr><w:r><w:rPr>{run_props}</w:rPr><w:t>x</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:trPr>{row_props}</w:trPr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:sectPr>{}</w:sectPr>"#,
+            toggle("titlePg")
+        ));
+        let doc = parse_document(&xml).unwrap();
+        let BlockContent::Paragraph(paragraph) = &doc.body[0] else {
+            panic!("expected paragraph");
+        };
+        let InlineContent::Run(run) = &paragraph.runs[0] else {
+            panic!("expected run");
+        };
+        let BlockContent::Table(table) = &doc.body[1] else {
+            panic!("expected table");
+        };
+        let actual = vec![
+            run.props.bold,
+            run.props.italic,
+            run.props.caps,
+            run.props.small_caps,
+            run.props.strike,
+            run.props.dstrike,
+            run.props.vanish,
+            run.props.rtl,
+            Some(paragraph.props.keep_next),
+            Some(paragraph.props.keep_lines),
+            Some(paragraph.props.page_break_before),
+            paragraph.props.widow_control,
+            paragraph.props.bidi,
+            Some(paragraph.props.contextual_spacing),
+            Some(table.rows[0].props.header),
+            Some(table.rows[0].props.cant_split),
+            Some(table.rows[0].props.hidden),
+            Some(doc.final_sect.title_pg),
+        ];
+        assert_eq!(actual, vec![Some(expected); 18], "w:val={value:?}");
+    }
+}
+
+#[test]
+fn inline_and_block_level_bookmarks_are_captured_safely() {
+    let xml = wrap_document(
+        r#"<w:bookmarkStart w:id="1" w:name="before-paragraph"/><w:p><w:bookmarkStart w:id="2" w:name="inside-paragraph"/><w:bookmarkStart w:id="3"/><w:r><w:t>Target</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p><w:bookmarkEnd w:id="1"/>"#,
+    );
+    let doc = parse_document(&xml).expect("bookmark parse");
+    let BlockContent::Paragraph(paragraph) = &doc.body[0] else {
+        panic!("expected paragraph");
+    };
+    let bookmarks: Vec<_> = paragraph
+        .runs
+        .iter()
+        .filter_map(|inline| match inline {
+            InlineContent::Bookmark(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bookmarks, ["before-paragraph", "inside-paragraph"]);
 }
 
 /// Fixture: a final section with header references and custom page geometry.
