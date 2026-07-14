@@ -1158,9 +1158,9 @@ fn two_sections_use_distinct_page_geometry() {
 #[test]
 fn continuous_section_with_changed_geometry_fails_closed() {
     let body = r#"
-        <w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>Letter</w:t></w:r></w:p>
+        <w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>Letter</w:t></w:r></w:p>
         <w:p><w:r><w:t>A4</w:t></w:r></w:p>
-        <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>"#;
+        <w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>"#;
     let bytes = minimal_docx(body);
     let prof = profile(&bytes, OfficeFormat::Docx).expect("profile");
     assert!(prof.reasons.iter().any(|reason| {
@@ -1179,9 +1179,9 @@ fn continuous_section_with_changed_geometry_fails_closed() {
 #[test]
 fn continuous_section_with_same_geometry_stays_on_page() {
     let body = r#"
-        <w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First section</w:t></w:r></w:p>
+        <w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First section</w:t></w:r></w:p>
         <w:p><w:r><w:t>Second section</w:t></w:r></w:p>
-        <w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>"#;
+        <w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>"#;
     let bytes = minimal_docx(body);
     let doc = WordDoc::open(&bytes, &opts()).expect("open");
     let laid = layout_docx(&doc).expect("layout").0;

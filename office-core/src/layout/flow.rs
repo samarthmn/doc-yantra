@@ -2,8 +2,8 @@
 //! table-header repeat, explicit and section breaks), renders headers/footers
 //! per page with page-number field substitution, and collects the outline.
 //!
-//! v1 uses the final section's geometry for every page (the common single-section
-//! case); mid-document geometry changes are a fidelity-harness refinement.
+//! Section properties are self-describing: each section run carries the properties
+//! that govern its blocks and the transition into that run.
 
 use super::assemble::WordDoc;
 use super::numbering_layout::{ListCounters, PlacedLabel, build_label};
@@ -17,8 +17,8 @@ use super::{EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCom
 use crate::oxml::numbering::{NumFmt, format_number};
 use crate::oxml::wml::{
     AnchorOrigin, BlockContent, ColumnSpec, FrameAlign, FrameHeightRule, FrameProps, HdrFtrKind,
-    InlineContent, NoteKind, PageVAlign, Paragraph, Run, RunContent, RunProps, SectPr, SectType,
-    VertAlign, WrapMode,
+    HdrFtrRef, InlineContent, NoteKind, PageVAlign, Paragraph, Run, RunContent, RunProps, SectPr,
+    SectType, VertAlign, WrapMode,
 };
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
@@ -108,11 +108,50 @@ struct ScheduledUnitPlacement {
     height_pt: f64,
 }
 
-struct SectionPass {
+struct SectionRun<'a> {
+    blocks: &'a [BlockContent],
+    sect: &'a SectPr,
+    body_block_offset: usize,
+    effective_header_refs: &'a [HdrFtrRef],
+    effective_footer_refs: &'a [HdrFtrRef],
+}
+
+struct RunLayout {
+    unit_start: usize,
+    unit_end: usize,
+    geo: PageGeometry,
+    column_widths: Vec<f64>,
+    column_offsets: Vec<f64>,
+}
+
+struct DocumentPass {
     units: Vec<Unit>,
+    runs: Vec<RunLayout>,
     pages: Vec<WorkPage>,
-    counters: ListCounters,
     warnings: Vec<Warning>,
+}
+
+#[derive(Default)]
+struct UnitBuildState {
+    group_counter: usize,
+    keep_next_group: Option<usize>,
+    prev_after: f64,
+    table_counter: usize,
+    pending_break: bool,
+    pending_column_break: bool,
+    active_wrap: Option<WrapExclusion>,
+    previous_scheduled_page: Option<usize>,
+}
+
+impl UnitBuildState {
+    fn reset_for_page_transition(&mut self) {
+        self.keep_next_group = None;
+        self.prev_after = 0.0;
+        self.pending_break = false;
+        self.pending_column_break = false;
+        self.active_wrap = None;
+        self.previous_scheduled_page = None;
+    }
 }
 
 impl PageBandSchedule {
@@ -311,8 +350,6 @@ fn wrap_remaining(wrap: WrapExclusion) -> f64 {
 
 /// Lays out a resolved document into pages plus emitter resources.
 pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
-    let mut warnings = Vec::new();
-    let mut counters = ListCounters::default();
     let boundaries: Vec<(usize, &SectPr)> = doc
         .document
         .body
@@ -327,12 +364,11 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         })
         .collect();
     validate_anchor_section_envelope(&doc.document.body, &boundaries, &doc.document.final_sect)?;
-    let mut all_sections: Vec<&SectPr> = boundaries.iter().map(|(_, section)| *section).collect();
-    all_sections.push(&doc.document.final_sect);
-    for pair in all_sections.windows(2) {
-        let current = pair[0];
-        let next = pair[1];
-        if current.sect_type == SectType::Continuous && geometry_differs(current, next) {
+    let section_runs = build_section_runs(doc, &boundaries);
+    for pair in section_runs.windows(2) {
+        let previous = pair[0].sect;
+        let current = pair[1].sect;
+        if current.sect_type == SectType::Continuous && geometry_differs(previous, current) {
             return Err(OfficeError::unsupported(
                 UnsupportedCode::UnknownElement,
                 "continuous section break changes page geometry",
@@ -340,139 +376,59 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         }
     }
 
-    let mut sections = Vec::new();
-    let mut start = 0usize;
-    for (boundary_index, (block_index, section)) in boundaries.iter().enumerate() {
-        let next = boundaries
-            .get(boundary_index + 1)
-            .map(|(_, section)| *section)
-            .unwrap_or(&doc.document.final_sect);
-        if section.sect_type == SectType::Continuous && !geometry_differs(section, next) {
-            continue;
+    let mut pass = run_document_pass(doc, &section_runs, None)?;
+    if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
+        let first_geo = &pass.runs[0].geo;
+        let mut schedule = page_band_schedule(&pass.units, &pass.pages, first_geo);
+        let mut converged = false;
+        for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
+            let next = run_document_pass(doc, &section_runs, Some(&schedule))?;
+            let next_schedule = page_band_schedule(&next.units, &next.pages, &next.runs[0].geo);
+            let stable = page_band_schedules_equivalent(&schedule, &next_schedule);
+            pass = next;
+            if stable {
+                converged = true;
+                break;
+            }
+            schedule = next_schedule;
         }
-        sections.push((start, &doc.document.body[start..=*block_index], *section));
-        start = *block_index + 1;
+        if !converged {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::AnchoredDrawing,
+                "page-anchored drawing did not converge",
+            ));
+        }
     }
-    sections.push((start, &doc.document.body[start..], &doc.document.final_sect));
 
-    let mut batches = Vec::new();
-    let mut pages_before = 0usize;
-    for (body_block_offset, blocks, section) in sections {
-        let geo = PageGeometry::from_section(section);
-        let (column_widths, column_offsets) = section_columns(&geo, &section.cols);
-        let layout_width = column_widths.iter().copied().fold(f64::INFINITY, f64::min);
-        if section.cols.is_multi() && blocks_contain_anchors(blocks) {
-            return Err(OfficeError::unsupported(
-                UnsupportedCode::AnchoredDrawing,
-                "anchored drawing in a multi-column section",
-            ));
-        }
-        if section.vertical_align != PageVAlign::Top && blocks_contain_page_floats(blocks) {
-            return Err(OfficeError::unsupported(
-                UnsupportedCode::AnchoredDrawing,
-                "page-anchored drawing with non-top body alignment",
-            ));
-        }
-        let counter_start = counters.clone();
-        let mut pass = run_section_pass(
-            doc,
-            blocks,
-            &geo,
-            layout_width,
-            &column_widths,
-            &column_offsets,
-            &counter_start,
-            body_block_offset,
-            None,
-        )?;
-        if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
-            let mut schedule = page_band_schedule(&pass.units, &pass.pages, &geo);
-            let mut converged = false;
-            for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
-                let next = run_section_pass(
-                    doc,
-                    blocks,
-                    &geo,
-                    layout_width,
-                    &column_widths,
-                    &column_offsets,
-                    &counter_start,
-                    body_block_offset,
-                    Some(&schedule),
-                )?;
-                let next_schedule = page_band_schedule(&next.units, &next.pages, &geo);
-                let stable = page_band_schedules_equivalent(&schedule, &next_schedule);
-                pass = next;
-                if stable {
-                    converged = true;
-                    break;
-                }
-                schedule = next_schedule;
-            }
-            if !converged {
-                return Err(OfficeError::unsupported(
-                    UnsupportedCode::AnchoredDrawing,
-                    "page-anchored drawing did not converge",
-                ));
-            }
-        }
-        counters = pass.counters;
-        warnings.extend(pass.warnings);
-        let units = pass.units;
-        let mut pages = pass.pages;
-        align_body_vertically(section.vertical_align, &geo, &units, &mut pages);
-        place_footnotes(doc, &mut warnings, &geo, &mut pages)?;
-        let next_page_number = pages_before + 1;
-        let needs_blank = match section.sect_type {
-            SectType::OddPage => next_page_number.is_multiple_of(2),
-            SectType::EvenPage => !next_page_number.is_multiple_of(2),
-            _ => false,
-        };
-        if needs_blank {
-            pages.insert(0, new_page(&geo));
-        }
-        pages_before += pages.len();
-        batches.push((section, geo, units, pages));
-    }
+    let mut warnings = pass.warnings;
+    let units = pass.units;
+    let run_layouts = pass.runs;
+    let mut pages = pass.pages;
+    align_body_vertically(&section_runs, &run_layouts, &units, &mut pages);
+    place_footnotes(doc, &mut warnings, &run_layouts, &mut pages)?;
 
     let mut endnote_refs = Vec::new();
-    for (_, _, units, _) in &batches {
-        for unit in units {
-            for note_ref in &unit.note_refs {
-                if note_ref.0 == NoteKind::Endnote && !endnote_refs.contains(note_ref) {
-                    endnote_refs.push(*note_ref);
-                }
+    for unit in &units {
+        for note_ref in &unit.note_refs {
+            if note_ref.0 == NoteKind::Endnote && !endnote_refs.contains(note_ref) {
+                endnote_refs.push(*note_ref);
             }
         }
     }
-    if !endnote_refs.is_empty()
-        && let Some((_, geo, _, pages)) = batches.last_mut()
-    {
-        append_endnotes(doc, &mut warnings, geo, &endnote_refs, pages)?;
+    if !endnote_refs.is_empty() {
+        append_endnotes(doc, &mut warnings, &run_layouts, &endnote_refs, &mut pages)?;
     }
 
-    let total_pages: u32 = batches.iter().map(|batch| batch.3.len() as u32).sum();
-    let mut page_offset = 0u32;
-    let mut outline = Vec::new();
-    let mut pages = Vec::new();
-    for (section, geo, units, mut batch_pages) in batches {
-        render_headers_footers(
-            doc,
-            &mut warnings,
-            section,
-            &geo,
-            &mut batch_pages,
-            total_pages,
-            page_offset,
-        )?;
-        let mut batch_outline = collect_outline(&units, &batch_pages, &geo);
-        for entry in &mut batch_outline {
-            entry.page += page_offset;
-        }
-        outline.extend(batch_outline);
-        page_offset += batch_pages.len() as u32;
-        pages.extend(batch_pages);
-    }
+    let total_pages = pages.len() as u32;
+    render_headers_footers(
+        doc,
+        &mut warnings,
+        &section_runs,
+        &run_layouts,
+        &mut pages,
+        total_pages,
+    )?;
+    let outline = collect_outline(&units, &pages);
 
     let laid = LaidOutDocument {
         pages: pages.into_iter().map(finish_work_page).collect(),
@@ -483,16 +439,60 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
     Ok((laid, warnings))
 }
 
+fn build_section_runs<'a>(
+    doc: &'a WordDoc,
+    boundaries: &[(usize, &'a SectPr)],
+) -> Vec<SectionRun<'a>> {
+    let mut runs = Vec::with_capacity(boundaries.len() + 1);
+    let mut start = 0usize;
+    let mut effective_header_refs: &[HdrFtrRef] = &[];
+    let mut effective_footer_refs: &[HdrFtrRef] = &[];
+    for &(block_index, sect) in boundaries {
+        if !sect.header_refs.is_empty() {
+            effective_header_refs = &sect.header_refs;
+        }
+        if !sect.footer_refs.is_empty() {
+            effective_footer_refs = &sect.footer_refs;
+        }
+        runs.push(SectionRun {
+            blocks: &doc.document.body[start..=block_index],
+            sect,
+            body_block_offset: start,
+            effective_header_refs,
+            effective_footer_refs,
+        });
+        start = block_index + 1;
+    }
+    let sect = &doc.document.final_sect;
+    if !sect.header_refs.is_empty() {
+        effective_header_refs = &sect.header_refs;
+    }
+    if !sect.footer_refs.is_empty() {
+        effective_footer_refs = &sect.footer_refs;
+    }
+    runs.push(SectionRun {
+        blocks: &doc.document.body[start..],
+        sect,
+        body_block_offset: start,
+        effective_header_refs,
+        effective_footer_refs,
+    });
+    runs
+}
+
 fn align_body_vertically(
-    alignment: PageVAlign,
-    geo: &PageGeometry,
+    section_runs: &[SectionRun<'_>],
+    run_layouts: &[RunLayout],
     units: &[Unit],
     pages: &mut [WorkPage],
 ) {
-    if alignment == PageVAlign::Top {
-        return;
-    }
     for page in pages {
+        let run_index = page.governing_run;
+        let alignment = section_runs[run_index].sect.vertical_align;
+        if alignment == PageVAlign::Top {
+            continue;
+        }
+        let geo = &run_layouts[run_index].geo;
         let body_bottom = page
             .unit_ys
             .iter()
@@ -548,31 +548,13 @@ fn geometry_differs(left: &SectPr, right: &SectPr) -> bool {
         || left.margins.gutter != right.margins.gutter
 }
 
-fn columns_differ(left: &ColumnSpec, right: &ColumnSpec) -> bool {
-    left.num != right.num
-        || left.cols != right.cols
-        || left.space_pt != right.space_pt
-        || left.spaces != right.spaces
-}
-
 fn validate_anchor_section_envelope(
     blocks: &[BlockContent],
     boundaries: &[(usize, &SectPr)],
     final_section: &SectPr,
 ) -> Result<()> {
     let mut start = 0usize;
-    for (boundary_index, (block_index, section)) in boundaries.iter().enumerate() {
-        let next = boundaries
-            .get(boundary_index + 1)
-            .map(|(_, section)| *section)
-            .unwrap_or(final_section);
-        if section.sect_type == SectType::Continuous
-            && !geometry_differs(section, next)
-            && !columns_differ(&section.cols, &next.cols)
-            && section.vertical_align == next.vertical_align
-        {
-            continue;
-        }
+    for (block_index, section) in boundaries {
         let section_blocks = &blocks[start..=*block_index];
         if section.cols.is_multi() && blocks_contain_anchors(section_blocks) {
             return Err(OfficeError::unsupported(
@@ -611,6 +593,7 @@ fn clone_images(images: &[EncodedImage]) -> Vec<EncodedImage> {
 
 /// A page under construction plus the y where body content ended.
 struct WorkPage {
+    governing_run: usize,
     page: Page,
     underlays: Vec<(u32, Positioned)>,
     overlays: Vec<(u32, Positioned)>,
@@ -625,42 +608,60 @@ struct WorkPage {
 
 // --- Unit construction ------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-fn run_section_pass(
+fn run_document_pass(
     doc: &WordDoc,
-    blocks: &[BlockContent],
-    geo: &PageGeometry,
-    layout_width: f64,
-    column_widths: &[f64],
-    column_offsets: &[f64],
-    counter_start: &ListCounters,
-    body_block_offset: usize,
+    section_runs: &[SectionRun<'_>],
     schedule: Option<&PageBandSchedule>,
-) -> Result<SectionPass> {
+) -> Result<DocumentPass> {
     let mut warnings = Vec::new();
-    let mut counters = counter_start.clone();
+    let mut counters = ListCounters::default();
+    let mut build_state = UnitBuildState::default();
     let mut table_headers = HashMap::new();
-    let units = build_units(
-        doc,
-        &mut warnings,
-        blocks,
-        doc.main_rels(),
-        layout_width,
-        &mut counters,
-        &mut table_headers,
-        PageHorizontalContext {
-            content_left_pt: geo.content_left_pt,
-            page_width_pt: geo.width_pt,
-        },
-        Some(body_block_offset),
-        schedule,
-    )?;
-    let pages = paginate(&units, geo, &table_headers, column_widths, column_offsets);
-    validate_page_bands(&pages, geo.content_width_pt())?;
-    Ok(SectionPass {
+    let mut units = Vec::new();
+    let mut runs = Vec::with_capacity(section_runs.len());
+    for (run_index, run) in section_runs.iter().enumerate() {
+        if run_index > 0 && run.sect.sect_type != SectType::Continuous {
+            build_state.reset_for_page_transition();
+        }
+        let geo = PageGeometry::from_section(run.sect);
+        let (column_widths, column_offsets) = section_columns(&geo, &run.sect.cols);
+        let layout_width = column_widths.iter().copied().fold(f64::INFINITY, f64::min);
+        let unit_start = units.len();
+        units.extend(build_units(
+            doc,
+            &mut warnings,
+            run.blocks,
+            doc.main_rels(),
+            layout_width,
+            &mut counters,
+            &mut table_headers,
+            PageHorizontalContext {
+                content_left_pt: geo.content_left_pt,
+                page_width_pt: geo.width_pt,
+            },
+            Some(run.body_block_offset),
+            schedule,
+            &mut build_state,
+        )?);
+        runs.push(RunLayout {
+            unit_start,
+            unit_end: units.len(),
+            geo,
+            column_widths,
+            column_offsets,
+        });
+    }
+    let pages = paginate(&units, section_runs, &runs, &table_headers);
+    for page in &pages {
+        validate_page_bands(
+            std::slice::from_ref(page),
+            runs[page.governing_run].geo.content_width_pt(),
+        )?;
+    }
+    Ok(DocumentPass {
         units,
+        runs,
         pages,
-        counters,
         warnings,
     })
 }
@@ -677,24 +678,27 @@ fn build_units(
     page_horizontal: PageHorizontalContext,
     body_block_offset: Option<usize>,
     page_schedule: Option<&PageBandSchedule>,
+    state: &mut UnitBuildState,
 ) -> Result<Vec<Unit>> {
     let mut units = Vec::new();
-    let mut group_counter = 0usize;
+    let mut group_counter = state.group_counter;
     let mut next_group = || {
         group_counter += 1;
         group_counter
     };
-    let mut keep_next_group: Option<usize> = None;
-    let mut prev_after = 0.0_f64;
-    let mut table_counter = 0usize;
-    let mut pending_break = false;
-    let mut pending_column_break = false;
-    let mut active_wrap: Option<WrapExclusion> = None;
-    let mut previous_scheduled_page = None;
+    let mut keep_next_group = state.keep_next_group;
+    let mut prev_after = state.prev_after;
+    let mut table_counter = state.table_counter;
+    let mut pending_break = state.pending_break;
+    let mut pending_column_break = state.pending_column_break;
+    let mut active_wrap = state.active_wrap.take();
+    let mut previous_scheduled_page = state.previous_scheduled_page;
 
     for (block_index, block) in blocks.iter().enumerate() {
+        let source_block_index =
+            body_block_offset.map_or(block_index, |offset| offset + block_index);
         let scheduled_page =
-            page_schedule.and_then(|schedule| schedule.first_page_for_block(block_index));
+            page_schedule.and_then(|schedule| schedule.first_page_for_block(source_block_index));
         if previous_scheduled_page.is_some()
             && scheduled_page.is_some()
             && previous_scheduled_page != scheduled_page
@@ -724,7 +728,7 @@ fn build_units(
                     active_wrap = advance_wrap(wrap, gap);
                 }
                 let scheduled_line_wraps = page_schedule
-                    .map(|schedule| schedule.line_wraps_for_block(block_index, frame_width))
+                    .map(|schedule| schedule.line_wraps_for_block(source_block_index, frame_width))
                     .unwrap_or_default();
                 let mut layout = layout_paragraph_with_page_wrap(
                     doc,
@@ -750,7 +754,7 @@ fn build_units(
                         &mut prev_after,
                         &mut pending_break,
                         &mut pending_column_break,
-                        block_index,
+                        source_block_index,
                     )?;
                 } else {
                     push_paragraph_units(
@@ -761,13 +765,13 @@ fn build_units(
                         &mut prev_after,
                         &mut pending_break,
                         &mut pending_column_break,
-                        block_index,
+                        source_block_index,
                     );
                 }
             }
             BlockContent::Table(t) => {
                 let scheduled_wrap = page_schedule
-                    .and_then(|schedule| schedule.wrap_for_unit(block_index, 0, content_w));
+                    .and_then(|schedule| schedule.wrap_for_unit(source_block_index, 0, content_w));
                 active_wrap = combine_wraps(active_wrap.take(), scheduled_wrap)?;
                 // A table cannot occupy the single text interval beside an
                 // active float. Clear it below the exclusion before laying out
@@ -795,10 +799,7 @@ fn build_units(
                         }
                         row_y += row.height_pt;
                     }
-                    let distances = doc.floating_table_distances(
-                        body_block_offset.map(|offset| offset + block_index),
-                        t,
-                    );
+                    let distances = doc.floating_table_distances(Some(source_block_index), t);
                     // Resolve the authored origin into content-relative physical
                     // coordinates before deciding whether the table hugs a text
                     // edge. Page-edge tables therefore cannot masquerade as
@@ -874,7 +875,7 @@ fn build_units(
                         outline: None,
                         note_refs: Vec::new(),
                         frame: None,
-                        block_index,
+                        block_index: source_block_index,
                         block_unit_index: 0,
                         floating_table: Some(FloatingTablePlacement {
                             horizontal: floating.horizontal,
@@ -905,7 +906,7 @@ fn build_units(
                         outline: None,
                         note_refs: Vec::new(),
                         frame: None,
-                        block_index,
+                        block_index: source_block_index,
                         block_unit_index: row_index,
                         floating_table: None,
                     };
@@ -922,6 +923,14 @@ fn build_units(
             }
         }
     }
+    state.group_counter = group_counter;
+    state.keep_next_group = keep_next_group;
+    state.prev_after = prev_after;
+    state.table_counter = table_counter;
+    state.pending_break = pending_break;
+    state.pending_column_break = pending_column_break;
+    state.active_wrap = active_wrap;
+    state.previous_scheduled_page = previous_scheduled_page;
     Ok(units)
 }
 
@@ -1312,104 +1321,235 @@ fn counter_label(
 
 fn paginate(
     units: &[Unit],
-    geo: &PageGeometry,
+    section_runs: &[SectionRun<'_>],
+    run_layouts: &[RunLayout],
     table_headers: &HashMap<usize, Vec<Unit>>,
-    column_widths: &[f64],
-    column_offsets: &[f64],
 ) -> Vec<WorkPage> {
+    let first_geo = &run_layouts[0].geo;
     let mut pages: Vec<WorkPage> = Vec::new();
-    let mut page = new_page(geo);
-    let mut y = geo.content_top_pt;
-    let mut column = 0usize;
+    let mut page = new_page(first_geo, 0);
+    let mut y = first_geo.content_top_pt;
     let has_footnotes = units.iter().any(|unit| {
         unit.note_refs
             .iter()
             .any(|(kind, _)| *kind == NoteKind::Footnote)
     });
-    let full_bottom = if has_footnotes {
-        geo.content_bottom_pt - geo.content_height_pt() * 0.25
-    } else {
-        geo.content_bottom_pt
-    };
-    let total_height: f64 = units
-        .iter()
-        .map(|unit| unit.gap_before + unit.float_leading + unit.height)
-        .sum();
-    let column_height = full_bottom - geo.content_top_pt;
-    let content_bottom = if column_widths.len() > 1
-        && total_height > 0.0
-        && total_height <= column_height * column_widths.len() as f64
-    {
-        geo.content_top_pt + (total_height / column_widths.len() as f64).ceil() + 0.5
-    } else {
-        full_bottom
-    };
-    let mut active_table: Option<usize> = None;
-    let mut table_first_page: Option<usize> = None;
 
-    // Coalesce contiguous same-group units into atomic runs.
-    let runs = coalesce_runs(units);
-
-    for run in runs {
-        let mut probe_y = y;
-        for &i in &run {
-            probe_y += effective_gap_before(&units[i], probe_y, geo.content_top_pt);
-            probe_y += units[i].height;
-        }
-        let break_before = units[run[0]].break_before;
-        let fits = probe_y <= content_bottom + 0.01;
-
-        if break_before && (y > geo.content_top_pt || column > 0) {
-            pages.push(std::mem::replace(&mut page, new_page(geo)));
-            y = geo.content_top_pt;
-            column = 0;
-        } else if units[run[0]].column_break_before || !fits {
-            if column + 1 < column_widths.len() {
-                column += 1;
-                y = geo.content_top_pt;
-            } else if y > geo.content_top_pt || column > 0 {
-                pages.push(std::mem::replace(&mut page, new_page(geo)));
-                y = geo.content_top_pt;
-                column = 0;
+    for (run_index, (section_run, run_layout)) in section_runs.iter().zip(run_layouts).enumerate() {
+        let geo = &run_layout.geo;
+        if run_index == 0 {
+            if parity_blank_needed(1, section_run.sect.sect_type) {
+                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
             }
-            // Re-emit table headers on a continuation page.
-            if let Some(t) = active_table
+            y = geo.content_top_pt;
+        } else if section_run.sect.sect_type != SectType::Continuous {
+            if !work_page_is_empty(&page) {
+                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+            } else {
+                page = new_page(geo, run_index);
+            }
+            let next_page_number = pages.len() + 1;
+            if parity_blank_needed(next_page_number, section_run.sect.sect_type) {
+                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+            }
+            y = geo.content_top_pt;
+        }
+
+        let mut column = 0usize;
+        let mut band_top = y;
+        let mut band_extent = y;
+        let full_bottom = if has_footnotes {
+            geo.content_bottom_pt - geo.content_height_pt() * 0.25
+        } else {
+            geo.content_bottom_pt
+        };
+        let should_balance = run_layout.column_widths.len() > 1
+            && (run_index + 1 == section_runs.len()
+                || section_runs[run_index + 1].sect.sect_type == SectType::Continuous);
+        let (mut content_bottom, mut band_is_balanced) = column_band_bottom(
+            units,
+            run_layout.unit_start,
+            run_layout.unit_end,
+            band_top,
+            full_bottom,
+            run_layout.column_widths.len(),
+            should_balance,
+        );
+        let mut active_table: Option<usize> = None;
+        let mut table_first_page: Option<usize> = None;
+
+        for unit_run in coalesce_runs(units, run_layout.unit_start, run_layout.unit_end) {
+            let mut probe_y = y;
+            for &unit_index in &unit_run {
+                probe_y += effective_gap_before(&units[unit_index], probe_y, band_top);
+                probe_y += units[unit_index].height;
+            }
+            let first_unit_index = unit_run[0];
+            let break_before = units[first_unit_index].break_before;
+            let fits = probe_y <= content_bottom + 0.01;
+            let mut advanced = false;
+
+            if break_before && (y > band_top + 0.01 || column > 0) {
+                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+                y = geo.content_top_pt;
+                band_top = y;
+                band_extent = y;
+                column = 0;
+                (content_bottom, band_is_balanced) = column_band_bottom(
+                    units,
+                    first_unit_index,
+                    run_layout.unit_end,
+                    band_top,
+                    full_bottom,
+                    run_layout.column_widths.len(),
+                    should_balance,
+                );
+                advanced = true;
+            } else if units[first_unit_index].column_break_before || !fits {
+                if column + 1 < run_layout.column_widths.len() {
+                    column += 1;
+                    y = band_top;
+                    advanced = true;
+                } else if y > band_top + 0.01 || column > 0 {
+                    pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+                    y = geo.content_top_pt;
+                    band_top = y;
+                    band_extent = y;
+                    column = 0;
+                    (content_bottom, band_is_balanced) = column_band_bottom(
+                        units,
+                        first_unit_index,
+                        run_layout.unit_end,
+                        band_top,
+                        full_bottom,
+                        run_layout.column_widths.len(),
+                        should_balance,
+                    );
+                    advanced = true;
+                }
+            }
+
+            if advanced
+                && let Some(table_id) = active_table
                 && table_first_page.is_some()
-                && let Some(headers) = table_headers.get(&t)
+                && let Some(headers) = table_headers.get(&table_id)
             {
-                for h in headers {
+                for header in headers {
                     place_unit(
                         &mut page,
                         &mut y,
                         geo,
-                        column_offsets[column],
-                        h,
+                        run_layout.column_offsets[column],
+                        header,
                         usize::MAX,
                     );
                 }
             }
-        }
 
-        for &i in &run {
-            let u = &units[i];
-            if let Some(t) = u.table_id {
-                if active_table != Some(t) {
-                    active_table = Some(t);
-                    table_first_page = Some(pages.len());
+            for &unit_index in &unit_run {
+                let unit = &units[unit_index];
+                if let Some(table_id) = unit.table_id {
+                    if active_table != Some(table_id) {
+                        active_table = Some(table_id);
+                        table_first_page = Some(pages.len());
+                    }
+                } else {
+                    active_table = None;
+                    table_first_page = None;
                 }
-            } else {
-                active_table = None;
-                table_first_page = None;
+                place_unit(
+                    &mut page,
+                    &mut y,
+                    geo,
+                    run_layout.column_offsets[column],
+                    unit,
+                    unit_index,
+                );
+                band_extent = band_extent.max(y);
             }
-            // A single oversized unit taller than a page is placed anyway
-            // (content simply overflows the bottom margin — rare).
-            place_unit(&mut page, &mut y, geo, column_offsets[column], u, i);
+        }
+        y = band_extent;
+        if band_is_balanced {
+            y = y.max(content_bottom.min(full_bottom));
         }
     }
-    if !work_page_is_empty(&page) || pages.is_empty() {
+    let final_run = &run_layouts[run_layouts.len() - 1];
+    let empty_final_run_starts_page = section_runs.len() > 1
+        && final_run.unit_start == final_run.unit_end
+        && section_runs[section_runs.len() - 1].sect.sect_type != SectType::Continuous;
+    if !work_page_is_empty(&page) || pages.is_empty() || empty_final_run_starts_page {
         pages.push(page);
     }
     pages
+}
+
+fn parity_blank_needed(next_page_number: usize, sect_type: SectType) -> bool {
+    match sect_type {
+        SectType::OddPage => next_page_number.is_multiple_of(2),
+        SectType::EvenPage => !next_page_number.is_multiple_of(2),
+        SectType::NextPage | SectType::Continuous => false,
+    }
+}
+
+fn column_band_bottom(
+    units: &[Unit],
+    start: usize,
+    end: usize,
+    band_top: f64,
+    full_bottom: f64,
+    column_count: usize,
+    should_balance: bool,
+) -> (f64, bool) {
+    let total_height: f64 = units[start..end]
+        .iter()
+        .map(|unit| unit.gap_before + unit.float_leading + unit.height)
+        .sum();
+    let available_height = (full_bottom - band_top).max(0.0);
+    let balanced = should_balance
+        && total_height > 0.0
+        && total_height <= available_height * column_count as f64;
+    if balanced {
+        let balanced_height = balanced_column_height(units, start, end, column_count);
+        (band_top + balanced_height.ceil() + 0.5, true)
+    } else {
+        (full_bottom, false)
+    }
+}
+
+fn balanced_column_height(units: &[Unit], start: usize, end: usize, column_count: usize) -> f64 {
+    let group_heights = coalesce_runs(units, start, end)
+        .into_iter()
+        .map(|run| {
+            run.into_iter()
+                .map(|index| {
+                    let unit = &units[index];
+                    unit.gap_before + unit.float_leading + unit.height
+                })
+                .sum::<f64>()
+        })
+        .collect::<Vec<_>>();
+    let total = group_heights.iter().sum::<f64>();
+    let largest = group_heights.iter().copied().fold(0.0, f64::max);
+    let mut low = (total / column_count as f64).max(largest);
+    let mut high = total.max(low);
+    for _ in 0..32 {
+        let candidate = (low + high) / 2.0;
+        let mut used_columns = 1usize;
+        let mut column_height = 0.0;
+        for height in &group_heights {
+            if column_height > 0.0 && column_height + height > candidate + 0.001 {
+                used_columns += 1;
+                column_height = 0.0;
+            }
+            column_height += height;
+        }
+        if used_columns <= column_count {
+            high = candidate;
+        } else {
+            low = candidate;
+        }
+    }
+    high
 }
 
 fn page_band_schedule(units: &[Unit], pages: &[WorkPage], geo: &PageGeometry) -> PageBandSchedule {
@@ -1513,9 +1653,9 @@ fn validate_page_bands(pages: &[WorkPage], content_width: f64) -> Result<()> {
 }
 
 /// Groups consecutive units sharing a group id into atomic runs.
-fn coalesce_runs(units: &[Unit]) -> Vec<Vec<usize>> {
+fn coalesce_runs(units: &[Unit], start: usize, end: usize) -> Vec<Vec<usize>> {
     let mut runs: Vec<Vec<usize>> = Vec::new();
-    for i in 0..units.len() {
+    for i in start..end {
         if let Some(last) = runs.last_mut()
             && units[*last.last().unwrap()].group == units[i].group
             && !units[i].break_before
@@ -1758,8 +1898,9 @@ fn floating_table_origin(
     (x, y)
 }
 
-fn new_page(geo: &PageGeometry) -> WorkPage {
+fn new_page(geo: &PageGeometry, governing_run: usize) -> WorkPage {
     WorkPage {
+        governing_run,
         page: Page {
             width_pt: geo.width_pt,
             height_pt: geo.height_pt,
@@ -1782,6 +1923,7 @@ fn work_page_is_empty(page: &WorkPage) -> bool {
         && page.overlays.is_empty()
         && page.page_underlays.is_empty()
         && page.page_overlays.is_empty()
+        && page.unit_ys.is_empty()
 }
 
 fn finish_work_page(mut work: WorkPage) -> Page {
@@ -1801,7 +1943,7 @@ fn finish_work_page(mut work: WorkPage) -> Page {
 fn place_footnotes(
     doc: &WordDoc,
     warnings: &mut Vec<Warning>,
-    geo: &PageGeometry,
+    run_layouts: &[RunLayout],
     pages: &mut Vec<WorkPage>,
 ) -> Result<()> {
     let mut page_index = 0usize;
@@ -1816,10 +1958,13 @@ fn place_footnotes(
             page_index += 1;
             continue;
         }
+        let governing_run = pages[page_index].governing_run;
+        let geo = &run_layouts[governing_run].geo;
 
         let mut note_units = Vec::new();
         let mut counters = ListCounters::default();
         let mut table_headers = HashMap::new();
+        let mut build_state = UnitBuildState::default();
         for (kind, id) in refs {
             let Some((blocks, rels)) = doc.note_content(kind, id) else {
                 return Err(OfficeError::unsupported(
@@ -1859,6 +2004,7 @@ fn place_footnotes(
                 },
                 None,
                 None,
+                &mut build_state,
             )?);
         }
 
@@ -1870,7 +2016,7 @@ fn place_footnotes(
             let needed = effective_gap_before(unit, y, note_top) + unit.height;
             if y + needed > geo.content_bottom_pt && y > note_top {
                 target += 1;
-                pages.insert(target, new_page(geo));
+                pages.insert(target, new_page(geo, governing_run));
                 y = note_top;
                 add_note_separator(&mut pages[target], geo, true);
             }
@@ -1901,12 +2047,18 @@ fn add_note_separator(page: &mut WorkPage, geo: &PageGeometry, continuation: boo
 fn append_endnotes(
     doc: &WordDoc,
     warnings: &mut Vec<Warning>,
-    geo: &PageGeometry,
+    run_layouts: &[RunLayout],
     refs: &[(NoteKind, i64)],
     pages: &mut Vec<WorkPage>,
 ) -> Result<()> {
+    let governing_run = pages
+        .last()
+        .map(|page| page.governing_run)
+        .unwrap_or(run_layouts.len() - 1);
+    let geo = &run_layouts[governing_run].geo;
     let mut counters = ListCounters::default();
     let mut table_headers = HashMap::new();
+    let mut build_state = UnitBuildState::default();
     let mut units = Vec::new();
     for &(kind, id) in refs {
         let Some((blocks, rels)) = doc.note_content(kind, id) else {
@@ -1947,16 +2099,17 @@ fn append_endnotes(
             },
             None,
             None,
+            &mut build_state,
         )?);
     }
-    let mut page = new_page(geo);
+    let mut page = new_page(geo, governing_run);
     let mut y = geo.content_top_pt;
     for unit in &units {
         if y + effective_gap_before(unit, y, geo.content_top_pt) + unit.height
             > geo.content_bottom_pt
             && !work_page_is_empty(&page)
         {
-            pages.push(std::mem::replace(&mut page, new_page(geo)));
+            pages.push(std::mem::replace(&mut page, new_page(geo, governing_run)));
             y = geo.content_top_pt;
         }
         place_unit(&mut page, &mut y, geo, 0.0, unit, usize::MAX);
@@ -1970,28 +2123,44 @@ fn append_endnotes(
 fn render_headers_footers(
     doc: &WordDoc,
     warnings: &mut Vec<Warning>,
-    sect: &SectPr,
-    geo: &PageGeometry,
+    section_runs: &[SectionRun<'_>],
+    run_layouts: &[RunLayout],
     pages: &mut [WorkPage],
     total: u32,
-    page_offset: u32,
 ) -> Result<()> {
-    let content_w = geo.content_width_pt();
+    let mut page_number = 0u32;
+    let mut previous_run = None;
+    let mut pages_per_run = vec![0usize; section_runs.len()];
     for (idx, wp) in pages.iter_mut().enumerate() {
+        let run_index = wp.governing_run;
+        let run = &section_runs[run_index];
+        let sect = run.sect;
+        let geo = &run_layouts[run_index].geo;
+        let content_w = geo.content_width_pt();
         let body_item_count = wp.page.items.len();
-        let page_no = sect.page_num_start.unwrap_or(page_offset + 1) + idx as u32;
-        let page_label = format_number(&NumFmt::parse(&sect.page_num_fmt), i64::from(page_no))?;
+        if idx == 0 {
+            page_number = sect.page_num_start.unwrap_or(1);
+        } else if previous_run != Some(run_index) {
+            page_number = sect.page_num_start.unwrap_or(page_number + 1);
+        } else {
+            page_number += 1;
+        }
+        previous_run = Some(run_index);
+        let section_page_index = pages_per_run[run_index];
+        pages_per_run[run_index] += 1;
+        let page_label = format_number(&NumFmt::parse(&sect.page_num_fmt), i64::from(page_number))?;
         let ctx = FieldContext {
-            page: page_no,
+            page: page_number,
             total,
             page_label,
         };
 
         // Header band (top).
         if let Some(rel_id) = select_hf(
-            &sect.header_refs,
+            run.effective_header_refs,
             sect,
-            idx,
+            section_page_index,
+            idx + 1,
             doc.settings.even_and_odd_headers,
         ) {
             place_hf(
@@ -2007,9 +2176,10 @@ fn render_headers_footers(
         }
         // Footer band (bottom).
         if let Some(rel_id) = select_hf(
-            &sect.footer_refs,
+            run.effective_footer_refs,
             sect,
-            idx,
+            section_page_index,
+            idx + 1,
             doc.settings.even_and_odd_headers,
         ) {
             place_hf(
@@ -2084,11 +2254,12 @@ fn place_page_borders(sect: &SectPr, geo: &PageGeometry, page: &mut WorkPage) {
 fn select_hf<'a>(
     refs: &'a [crate::oxml::wml::HdrFtrRef],
     sect: &SectPr,
-    page_idx: usize,
+    section_page_idx: usize,
+    physical_page_number: usize,
     even_and_odd_headers: bool,
 ) -> Option<&'a str> {
-    let is_first = page_idx == 0 && sect.title_pg;
-    let is_even = (page_idx + 1).is_multiple_of(2);
+    let is_first = section_page_idx == 0 && sect.title_pg;
+    let is_even = physical_page_number.is_multiple_of(2);
     let pick = |kind: HdrFtrKind| {
         refs.iter()
             .find(|r| r.kind == kind)
@@ -2185,7 +2356,7 @@ fn place_hf(
 
 // --- Outline ----------------------------------------------------------------
 
-fn collect_outline(units: &[Unit], pages: &[WorkPage], _geo: &PageGeometry) -> Vec<OutlineEntry> {
+fn collect_outline(units: &[Unit], pages: &[WorkPage]) -> Vec<OutlineEntry> {
     let mut entries = Vec::new();
     for (page_idx, wp) in pages.iter().enumerate() {
         for &(unit_idx, y) in &wp.unit_ys {
