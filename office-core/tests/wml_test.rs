@@ -22,24 +22,25 @@ fn run_text(run: &office_core::oxml::wml::Run) -> String {
 
 /// Concatenates all visible text in a paragraph's runs (top-level runs only).
 fn para_text(p: &office_core::oxml::wml::Paragraph) -> String {
-    let mut s = String::new();
-    for inline in &p.runs {
-        match inline {
-            InlineContent::Run(r) => s.push_str(&run_text(r)),
-            InlineContent::Hyperlink { runs, .. } => {
-                for r in runs {
-                    s.push_str(&run_text(r));
+    fn inline_text(inlines: &[InlineContent], output: &mut String) {
+        for inline in inlines {
+            match inline {
+                InlineContent::Run(run) => output.push_str(&run_text(run)),
+                InlineContent::Hyperlink { runs, .. } => {
+                    for run in runs {
+                        output.push_str(&run_text(run));
+                    }
                 }
-            }
-            InlineContent::SimpleField(f) | InlineContent::ComplexFieldRegion(f) => {
-                for r in &f.cached_runs {
-                    s.push_str(&run_text(r));
+                InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                    inline_text(&field.content, output);
                 }
+                InlineContent::Math(math) => output.push_str(&math.source_text()),
             }
-            InlineContent::Math(math) => s.push_str(&math.source_text()),
         }
     }
-    s
+    let mut output = String::new();
+    inline_text(&p.runs, &mut output);
+    output
 }
 
 /// Every real mock `.docx` main part parses without error.
@@ -173,6 +174,34 @@ fn table_gridspan_vmerge() {
     assert_eq!(r1c0.props.v_merge, Some(VMerge::Continue));
 }
 
+#[test]
+fn decimal_twip_measurements_preserve_table_grid_and_paragraph_indent() {
+    let xml = wrap_document(
+        r#"
+        <w:tbl>
+          <w:tblGrid><w:gridCol w:w="1200.5"/></w:tblGrid>
+          <w:tr><w:tc><w:p/></w:tc></w:tr>
+        </w:tbl>
+        <w:p><w:pPr><w:ind w:firstLine="192.00000000000003" w:hanging="-108.0"/></w:pPr></w:p>
+        "#,
+    );
+    let doc = parse_document(&xml).unwrap();
+    let BlockContent::Table(table) = &doc.body[0] else {
+        panic!("expected table");
+    };
+    assert_eq!(table.grid.len(), 1);
+    assert!(
+        (table.grid[0] - 60.025).abs() < 1e-12,
+        "grid={:?}",
+        table.grid
+    );
+    let BlockContent::Paragraph(paragraph) = &doc.body[1] else {
+        panic!("expected paragraph");
+    };
+    assert!((paragraph.props.indent.first_line_pt.unwrap() - 9.6).abs() < 1e-12);
+    assert_eq!(paragraph.props.indent.hanging_pt, Some(-5.4));
+}
+
 /// Fixture: a complex field (fldChar begin/separate/end) assembles into one
 /// field with instruction text and cached result runs.
 #[test]
@@ -201,8 +230,54 @@ fn complex_field_assembly() {
         })
         .expect("complex field region");
     assert_eq!(field.instruction.trim(), "PAGE");
-    assert_eq!(field.cached_runs.len(), 1);
-    assert_eq!(run_text(&field.cached_runs[0]), "7");
+    assert_eq!(field.content.len(), 1);
+    let InlineContent::Run(run) = &field.content[0] else {
+        panic!("expected cached field run");
+    };
+    assert_eq!(run_text(run), "7");
+    assert!(!field.starved);
+}
+
+#[test]
+fn complex_field_result_hyperlink_is_segmented_across_paragraphs() {
+    let xml = wrap_document(
+        r#"
+        <w:p>
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+          <w:r><w:instrText xml:space="preserve"> TOC \h </w:instrText></w:r>
+          <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        </w:p>
+        <w:p><w:hyperlink w:anchor="heading-1"><w:r><w:t>Heading 1	3</w:t></w:r></w:hyperlink></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        "#,
+    );
+    let doc = parse_document(&xml).unwrap();
+    let BlockContent::Paragraph(entry) = &doc.body[1] else {
+        panic!("expected the TOC entry paragraph");
+    };
+    assert!(
+        entry
+            .runs
+            .iter()
+            .any(|inline| matches!(inline, InlineContent::ComplexFieldRegion(_))),
+        "the hyperlink result must remain inside a complex-field segment: {:?}",
+        entry.runs
+    );
+    assert_eq!(para_text(entry), "Heading 1\t3");
+}
+
+#[test]
+fn paragraph_mark_empty_run_properties_are_parsed_as_supported_bookkeeping() {
+    let xml = wrap_document(r#"<w:p><w:pPr><w:rPr/></w:pPr></w:p>"#);
+    let doc = parse_document(&xml).unwrap();
+    let BlockContent::Paragraph(paragraph) = &doc.body[0] else {
+        panic!("expected a paragraph");
+    };
+    assert!(
+        paragraph.props.visible_unsupported.is_empty(),
+        "empty paragraph-mark properties must not poison the paragraph: {:?}",
+        paragraph.props.visible_unsupported
+    );
 }
 
 /// Fixture: a final section with header references and custom page geometry.

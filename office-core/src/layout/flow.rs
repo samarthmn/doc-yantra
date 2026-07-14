@@ -429,15 +429,19 @@ fn blocks_contain_anchors(blocks: &[BlockContent]) -> bool {
         })
     }
 
-    blocks.iter().any(|block| match block {
-        BlockContent::Paragraph(paragraph) => paragraph.runs.iter().any(|inline| match inline {
+    fn inline_has_anchor(inline: &InlineContent) -> bool {
+        match inline {
             InlineContent::Run(run) => run_has_anchor(run),
             InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_anchor),
             InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
-                field.cached_runs.iter().any(run_has_anchor)
+                field.content.iter().any(inline_has_anchor)
             }
             InlineContent::Math(_) => false,
-        }),
+        }
+    }
+
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => paragraph.runs.iter().any(inline_has_anchor),
         BlockContent::Table(table) => table
             .rows
             .iter()

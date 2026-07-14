@@ -287,7 +287,16 @@ pub(crate) fn layout_paragraph_with_wrap(
         .or(label_left)
         .unwrap_or(0.0)
         .max(0.0);
-    let right = eff_para.indent.right_pt.unwrap_or(0.0).max(0.0);
+    let right_indent = eff_para.indent.right_pt.unwrap_or(0.0).max(0.0);
+    let right_border = eff_para
+        .borders
+        .right
+        .as_ref()
+        .filter(|border| !matches!(border.val.as_str(), "nil" | "none"));
+    let right_border_reserve = right_border
+        .map(|border| border.space_pt + border.size_pt)
+        .unwrap_or(0.0);
+    let right = right_indent + right_border_reserve;
     let hanging = eff_para.indent.hanging_pt.or(label_hanging).unwrap_or(0.0);
     let first_line = eff_para.indent.first_line_pt.unwrap_or(0.0);
     let first_offset = (first_line - hanging).max(-left);
@@ -325,7 +334,7 @@ pub(crate) fn layout_paragraph_with_wrap(
         })
         .chain(label.as_ref().map(|value| value.line_height_pt))
         .fold(0.0_f64, f64::max)
-        .max(para_mark_height(doc, para));
+        .max(para_mark_height(doc, para, false));
     let nominal_line_height = apply_line_spacing(line_spacing, nominal_natural_height).max(0.01);
     let nominal_baseline_offset = atoms
         .iter()
@@ -486,7 +495,7 @@ pub(crate) fn layout_paragraph_with_wrap(
     }
 
     if lines.is_empty() {
-        let h = para_mark_height(doc, para);
+        let h = para_mark_height(doc, para, true);
         lines.push(Line {
             height_pt: apply_line_spacing(line_spacing, h),
             items: Vec::new(),
@@ -518,7 +527,7 @@ pub(crate) fn layout_paragraph_with_wrap(
             x_pt: left,
             y_pt: border_y,
             item: Item::Line {
-                dx_pt: (avail_width_pt - left - right).max(0.0),
+                dx_pt: (avail_width_pt - left - right_indent).max(0.0),
                 dy_pt: 0.0,
                 stroke: Stroke {
                     width_pt,
@@ -532,6 +541,31 @@ pub(crate) fn layout_paragraph_with_wrap(
             },
         });
         last_line.height_pt += border.space_pt + width_pt;
+    }
+
+    if let Some(border) = right_border {
+        let paragraph_height: f64 = lines.iter().map(|line| line.height_pt).sum();
+        let width_pt = border.size_pt;
+        let border_x = (avail_width_pt - right_indent - width_pt / 2.0).max(0.0);
+        if let Some(first_line) = lines.first_mut() {
+            first_line.items.push(LineItem {
+                x_pt: border_x,
+                y_pt: 0.0,
+                item: Item::Line {
+                    dx_pt: 0.0,
+                    dy_pt: paragraph_height,
+                    stroke: Stroke {
+                        width_pt,
+                        color: Rgba::opaque(
+                            border
+                                .resolved_color(&doc.theme)
+                                .unwrap_or(Rgb::new(0, 0, 0)),
+                        ),
+                        dash: None,
+                    },
+                },
+            });
+        }
     }
 
     let occupied_height: f64 = lines.iter().map(|line| line.height_pt).sum();
@@ -574,16 +608,19 @@ fn paragraph_note_refs(para: &Paragraph) -> Vec<(NoteKind, i64)> {
             }
         }
     };
-    for inline in &para.runs {
-        match inline {
-            InlineContent::Run(run) => scan_run(run),
-            InlineContent::Hyperlink { runs, .. } => runs.iter().for_each(&mut scan_run),
-            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
-                field.cached_runs.iter().for_each(&mut scan_run);
+    fn scan_inlines(inlines: &[InlineContent], scan_run: &mut impl FnMut(&Run)) {
+        for inline in inlines {
+            match inline {
+                InlineContent::Run(run) => scan_run(run),
+                InlineContent::Hyperlink { runs, .. } => runs.iter().for_each(&mut *scan_run),
+                InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                    scan_inlines(&field.content, scan_run);
+                }
+                InlineContent::Math(_) => {}
             }
-            InlineContent::Math(_) => {}
         }
     }
+    scan_inlines(&para.runs, &mut scan_run);
     refs
 }
 
@@ -625,9 +662,23 @@ fn flatten(
     field_ctx: Option<FieldContext>,
 ) -> Result<Vec<Atom>> {
     let mut atoms = Vec::new();
-    for inline in &para.runs {
+    flatten_inlines(doc, warnings, para, &para.runs, rels, field_ctx, &mut atoms)?;
+    Ok(atoms)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten_inlines(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    para: &Paragraph,
+    inlines: &[InlineContent],
+    rels: &HashMap<String, String>,
+    field_ctx: Option<FieldContext>,
+    atoms: &mut Vec<Atom>,
+) -> Result<()> {
+    for inline in inlines {
         match inline {
-            InlineContent::Run(r) => flatten_run(doc, warnings, para, r, None, rels, &mut atoms)?,
+            InlineContent::Run(r) => flatten_run(doc, warnings, para, r, None, rels, atoms)?,
             InlineContent::Hyperlink {
                 rel_id,
                 anchor,
@@ -635,48 +686,72 @@ fn flatten(
             } => {
                 let target = link_target(doc, rels, rel_id.as_deref(), anchor.as_deref());
                 for r in runs {
-                    flatten_run(doc, warnings, para, r, target.clone(), rels, &mut atoms)?;
+                    flatten_run(doc, warnings, para, r, target.clone(), rels, atoms)?;
                 }
             }
             InlineContent::SimpleField(f) | InlineContent::ComplexFieldRegion(f) => {
-                for r in &field_runs(f, field_ctx.clone()) {
-                    flatten_run(doc, warnings, para, r, None, rels, &mut atoms)?;
+                if let Some(run) = substituted_field_run(f, field_ctx.clone()) {
+                    flatten_run(doc, warnings, para, &run, None, rels, atoms)?;
+                } else {
+                    flatten_inlines(
+                        doc,
+                        warnings,
+                        para,
+                        &f.content,
+                        rels,
+                        field_ctx.clone(),
+                        atoms,
+                    )?;
                 }
             }
-            InlineContent::Math(math) => push_math_atom(doc, math, &mut atoms)?,
+            InlineContent::Math(math) => push_math_atom(doc, math, atoms)?,
         }
     }
-    Ok(atoms)
+    Ok(())
 }
 
-/// Resolves a field to the runs to lay out: a substituted PAGE/NUMPAGES number
-/// (when a field context is present), else the cached result runs.
-fn field_runs(field: &Field, ctx: Option<FieldContext>) -> Vec<Run> {
+/// Resolves PAGE/NUMPAGES to a substituted run when a field context is present.
+/// Every other field renders its cached inline content directly.
+fn substituted_field_run(field: &Field, ctx: Option<FieldContext>) -> Option<Run> {
     let first = field
         .instruction
         .split_whitespace()
         .next()
         .unwrap_or("")
         .to_ascii_uppercase();
-    if let Some(ctx) = ctx {
-        let num = match first.as_str() {
-            "PAGE" => Some(ctx.page_label),
-            "NUMPAGES" => Some(ctx.total.to_string()),
-            _ => None,
-        };
-        if let Some(num) = num {
-            let props = field
-                .cached_runs
-                .first()
-                .map(|r| r.props.clone())
-                .unwrap_or_default();
-            return vec![Run {
-                props,
-                content: vec![RunContent::Text(num)],
-            }];
+    let ctx = ctx?;
+    let text = match first.as_str() {
+        "PAGE" => ctx.page_label,
+        "NUMPAGES" => ctx.total.to_string(),
+        _ => return None,
+    };
+    let props = first_field_run(&field.content)
+        .map(|run| run.props.clone())
+        .unwrap_or_default();
+    Some(Run {
+        props,
+        content: vec![RunContent::Text(text)],
+    })
+}
+
+fn first_field_run(inlines: &[InlineContent]) -> Option<&Run> {
+    for inline in inlines {
+        match inline {
+            InlineContent::Run(run) => return Some(run),
+            InlineContent::Hyperlink { runs, .. } => {
+                if let Some(run) = runs.first() {
+                    return Some(run);
+                }
+            }
+            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                if let Some(run) = first_field_run(&field.content) {
+                    return Some(run);
+                }
+            }
+            InlineContent::Math(_) => {}
         }
     }
-    field.cached_runs.clone()
+    None
 }
 
 fn link_target(
@@ -1946,8 +2021,12 @@ fn build_run(style: &RunStyle, glyphs: Vec<PlacedGlyph>, rtl: bool) -> GlyphRun 
     }
 }
 
-fn para_mark_height(doc: &WordDoc, para: &Paragraph) -> f64 {
-    let eff = doc.styles.run_props(&para.props, &RunProps::default());
+fn para_mark_height(doc: &WordDoc, para: &Paragraph, use_mark_rpr: bool) -> f64 {
+    let mark = use_mark_rpr
+        .then(|| doc.styles.para_props(&para.props).mark_rpr)
+        .flatten()
+        .unwrap_or_default();
+    let eff = doc.styles.run_props(&para.props, &mark);
     let size = eff.size_pt.unwrap_or(DEFAULT_SIZE_PT);
     // Use the resolved face's metrics when available.
     let family = eff

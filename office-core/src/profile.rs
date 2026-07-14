@@ -1204,18 +1204,18 @@ fn paragraph_anchor_count(paragraph: &Paragraph) -> usize {
             .count()
     }
 
-    paragraph
-        .runs
-        .iter()
-        .map(|inline| match inline {
+    fn inline_count(inline: &InlineContent) -> usize {
+        match inline {
             InlineContent::Run(run) => run_count(run),
             InlineContent::Hyperlink { runs, .. } => runs.iter().map(run_count).sum(),
             InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
-                field.cached_runs.iter().map(run_count).sum()
+                field.content.iter().map(inline_count).sum()
             }
             InlineContent::Math(_) => 0,
-        })
-        .sum()
+        }
+    }
+
+    paragraph.runs.iter().map(inline_count).sum()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1345,6 +1345,11 @@ impl<'a> Collector<'a> {
         for detail in &eff_para.visible_unsupported {
             profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
         }
+        if let Some(mark) = &eff_para.mark_rpr {
+            for detail in &mark.visible_unsupported {
+                profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
+            }
+        }
         if let Some(detail) = eff_para.borders.unsupported_detail(self.theme) {
             profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail);
         }
@@ -1407,26 +1412,38 @@ impl<'a> Collector<'a> {
             );
         }
         for inline in &p.runs {
-            match inline {
-                InlineContent::Run(r) => self.run(&p.props, r, pkg, rels, profile, context),
-                InlineContent::Hyperlink { runs, .. } => {
-                    for r in runs {
-                        self.run(&p.props, r, pkg, rels, profile, context);
-                    }
+            self.inline(&p.props, inline, pkg, rels, profile, context);
+        }
+    }
+
+    fn inline(
+        &mut self,
+        para: &ParaProps,
+        inline: &InlineContent,
+        pkg: &Package,
+        rels: &HashMap<String, String>,
+        profile: &mut DocProfile,
+        context: StoryContext,
+    ) {
+        match inline {
+            InlineContent::Run(run) => self.run(para, run, pkg, rels, profile, context),
+            InlineContent::Hyperlink { runs, .. } => {
+                for run in runs {
+                    self.run(para, run, pkg, rels, profile, context);
                 }
-                InlineContent::SimpleField(f) | InlineContent::ComplexFieldRegion(f) => {
-                    if f.cached_runs.is_empty() && !f.instruction.trim().is_empty() {
-                        profile.add_reason_deduped(
-                            UnsupportedCode::FieldUnsupported,
-                            format!("field without cached result: {}", f.instruction.trim()),
-                        );
-                    }
-                    for r in &f.cached_runs {
-                        self.run(&p.props, r, pkg, rels, profile, context);
-                    }
-                }
-                InlineContent::Math(math) => self.math(math, profile),
             }
+            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                if field.starved && !field.instruction.trim().is_empty() {
+                    profile.add_reason_deduped(
+                        UnsupportedCode::FieldUnsupported,
+                        format!("field without cached result: {}", field.instruction.trim()),
+                    );
+                }
+                for content in &field.content {
+                    self.inline(para, content, pkg, rels, profile, context);
+                }
+            }
+            InlineContent::Math(math) => self.math(math, profile),
         }
     }
 
@@ -1854,7 +1871,7 @@ fn header_footer_refs(document: &wml::Document) -> Vec<&wml::HdrFtrRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{minimal_docx, wrap_document};
+    use crate::testkit::{gdocs_paragraph_docx, minimal_docx, wrap_document};
 
     fn profile_body(body: &str) -> DocProfile {
         let bytes = minimal_docx(body);
@@ -1872,6 +1889,156 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"engineVersion\""));
         assert!(json.contains("\"fontsUsed\""));
+    }
+
+    #[test]
+    fn google_docs_conformance_battery_is_supported() {
+        let p = run(&gdocs_paragraph_docx(), OfficeFormat::Docx).expect("profile battery");
+        assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
+        assert!(p.reasons.is_empty());
+        assert_eq!(p.stats.tables, 1);
+    }
+
+    #[test]
+    fn google_docs_battery_negative_controls_remain_unknown_elements() {
+        for (body, detail) in [
+            (r#"<w:p><w:r><w:ptab/></w:r></w:p>"#, "w:ptab"),
+            (
+                r#"<w:p><w:pPr><w:rPr><w:del/></w:rPr></w:pPr></w:p>"#,
+                "w:del in w:rPr",
+            ),
+            (
+                r#"<w:p><mc:AlternateContent><mc:Choice Requires="w14"><w:r><w:t>x</w:t></w:r></mc:Choice></mc:AlternateContent></w:p>"#,
+                "mc:AlternateContent without mc:Fallback",
+            ),
+        ] {
+            let bytes = minimal_docx(body);
+            let profile = match run(&bytes, OfficeFormat::Docx) {
+                Ok(profile) => profile,
+                Err(error) => DocProfile::from_error(OfficeFormat::Docx, &error),
+            };
+            assert!(
+                profile.reasons.iter().any(|reason| {
+                    reason.code == UnsupportedCode::UnknownElement && reason.detail == detail
+                }),
+                "detail={detail}, reasons={:?}",
+                profile.reasons
+            );
+        }
+    }
+
+    #[test]
+    fn empty_paragraph_mark_run_properties_are_supported() {
+        let p = profile_body(r#"<w:p><w:pPr><w:rPr/></w:pPr></w:p>"#);
+        assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
+        assert!(p.reasons.is_empty());
+    }
+
+    #[test]
+    fn visible_paragraph_mark_deletion_stays_fail_closed() {
+        let p = profile_body(r#"<w:p><w:pPr><w:rPr><w:del/></w:rPr></w:pPr></w:p>"#);
+        assert!(!p.supported);
+        assert!(
+            p.reasons.iter().any(|reason| {
+                reason.code == UnsupportedCode::UnknownElement && reason.detail == "w:del in w:rPr"
+            }),
+            "reasons: {:?}",
+            p.reasons
+        );
+    }
+
+    #[test]
+    fn complex_field_cached_hyperlink_across_paragraphs_is_supported() {
+        let p = profile_body(
+            r#"
+            <w:p>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> TOC \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+            </w:p>
+            <w:p><w:hyperlink w:anchor="heading-1"><w:r><w:t>Heading 1	3</w:t></w:r></w:hyperlink></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+            "#,
+        );
+        assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
+        assert!(
+            !p.reasons
+                .iter()
+                .any(|reason| reason.code == UnsupportedCode::FieldUnsupported)
+        );
+    }
+
+    #[test]
+    fn complex_field_whitespace_only_result_is_starved() {
+        let p = profile_body(
+            r#"<w:p>
+                <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+                <w:r><w:instrText> TOC </w:instrText></w:r>
+                <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+                <w:r><w:t xml:space="preserve">   </w:t></w:r>
+                <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            </w:p>"#,
+        );
+        assert!(
+            p.reasons.iter().any(|reason| {
+                reason.code == UnsupportedCode::FieldUnsupported
+                    && reason.detail == "field without cached result: TOC"
+            }),
+            "reasons: {:?}",
+            p.reasons
+        );
+    }
+
+    #[test]
+    fn unterminated_complex_field_is_starved_at_story_end() {
+        let p = profile_body(
+            r#"<w:p>
+                <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+                <w:r><w:instrText> TOC </w:instrText></w:r>
+            </w:p>"#,
+        );
+        assert!(
+            p.reasons.iter().any(|reason| {
+                reason.code == UnsupportedCode::FieldUnsupported
+                    && reason.detail == "field without cached result: TOC"
+            }),
+            "reasons: {:?}",
+            p.reasons
+        );
+    }
+
+    #[test]
+    fn text_box_field_state_is_isolated_from_an_open_body_field() {
+        let p = profile_body(
+            r#"
+            <w:p>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText> TOC </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>
+                <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                  <wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                    <wps:txbx><w:txbxContent><w:p>
+                      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+                      <w:r><w:instrText> PAGE </w:instrText></w:r>
+                      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+                      <w:r><w:t>Box result</w:t></w:r>
+                      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+                    </w:p></w:txbxContent></wps:txbx>
+                  </wps:wsp>
+                </a:graphicData></a:graphic>
+              </wp:inline></w:drawing></w:r>
+            </w:p>
+            <w:p><w:r><w:t>Body result</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+            "#,
+        );
+        assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
+        assert!(
+            !p.reasons
+                .iter()
+                .any(|reason| reason.code == UnsupportedCode::FieldUnsupported)
+        );
     }
 
     #[test]

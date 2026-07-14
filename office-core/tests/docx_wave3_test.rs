@@ -477,7 +477,6 @@ fn visible_wml_properties_never_disappear_through_property_catch_alls() {
         "textDirection",
         "textAlignment",
         "textboxTightWrap",
-        "rPr",
         "unknownVisibleParagraphProperty",
     ] {
         assert_refused(
@@ -1374,14 +1373,132 @@ fn style_backed_bottom_paragraph_border_is_painted_and_measured() {
 }
 
 #[test]
+fn single_right_paragraph_border_is_supported_and_painted() {
+    let body = r#"<w:p><w:pPr><w:pBdr><w:right w:val="single" w:sz="4" w:space="4" w:color="112233"/></w:pBdr></w:pPr><w:r><w:t>Right bordered</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p>"#;
+    let bytes = minimal_docx(body);
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile right border");
+    assert!(
+        predicted.supported,
+        "unexpected reasons: {:?}",
+        predicted.reasons
+    );
+    assert!(convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()).is_ok());
+
+    let document = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&document).unwrap().0;
+    let (x, y, dx, dy, width, color) = laid.pages[0]
+        .items
+        .iter()
+        .find_map(|positioned| match &positioned.item {
+            Item::Line {
+                dx_pt,
+                dy_pt,
+                stroke,
+            } if dy_pt.abs() > 0.01 => Some((
+                positioned.x_pt,
+                positioned.y_pt,
+                *dx_pt,
+                *dy_pt,
+                stroke.width_pt,
+                (stroke.color.r, stroke.color.g, stroke.color.b),
+            )),
+            _ => None,
+        })
+        .expect("right paragraph border");
+    assert!((x - 539.75).abs() <= 0.01, "x={x}");
+    assert!((y - 72.0).abs() <= 0.01, "y={y}");
+    assert!(dx.abs() <= 0.01, "dx={dx}");
+    assert!(dy > 10.0, "dy={dy}");
+    assert!((width - 0.5).abs() <= 0.01, "width={width}");
+    assert_eq!(color, (0x11, 0x22, 0x33));
+
+    let text_end = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) => {
+                Some(positioned.x_pt + run.glyphs.iter().map(|glyph| glyph.advance_pt).sum::<f64>())
+            }
+            _ => None,
+        })
+        .next()
+        .expect("bordered text run");
+    assert!(
+        text_end <= x - width / 2.0 - 4.0 + 0.01,
+        "text_end={text_end}, border_x={x}"
+    );
+
+    let plain = minimal_docx(
+        r#"<w:p><w:r><w:t>Right bordered</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p>"#,
+    );
+    let plain_doc = WordDoc::open(&plain, &ConvertOptions::default()).unwrap();
+    let plain_laid = layout_docx(&plain_doc).unwrap().0;
+    let following_baseline = |page: &Page| {
+        page.items
+            .iter()
+            .filter_map(|positioned| {
+                matches!(positioned.item, Item::Glyphs(_)).then_some(positioned.y_pt)
+            })
+            .nth(1)
+            .expect("following baseline")
+    };
+    assert!(
+        (following_baseline(&laid.pages[0]) - following_baseline(&plain_laid.pages[0])).abs()
+            <= 0.01,
+        "a right border must not add vertical height"
+    );
+}
+
+#[test]
+fn right_paragraph_border_spans_the_complete_multiline_box() {
+    let text = "multiline paragraph content ".repeat(80);
+    let body = format!(
+        r#"<w:p><w:pPr><w:pBdr><w:right w:val="single" w:sz="4" w:space="4" w:color="000000"/></w:pBdr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+    );
+    let bytes = minimal_docx(&body);
+    let document = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&document).unwrap().0;
+    let page = &laid.pages[0];
+    let mut baselines: Vec<f64> = page
+        .items
+        .iter()
+        .filter_map(|positioned| {
+            matches!(positioned.item, Item::Glyphs(_)).then_some(positioned.y_pt)
+        })
+        .collect();
+    baselines.sort_by(|left, right| left.total_cmp(right));
+    let border_height = page
+        .items
+        .iter()
+        .find_map(|positioned| match positioned.item {
+            Item::Line { dx_pt, dy_pt, .. } if dx_pt.abs() <= 0.01 && dy_pt > 0.01 => Some(dy_pt),
+            _ => None,
+        })
+        .expect("right paragraph border");
+    let text_span = baselines.last().unwrap() - baselines.first().unwrap();
+    assert!(baselines.len() > 2, "expected wrapped lines: {baselines:?}");
+    assert!(
+        border_height > text_span + 5.0,
+        "border={border_height}, text_span={text_span}"
+    );
+}
+
+#[test]
 fn unsupported_paragraph_border_edges_and_styles_fail_typed() {
     for borders in [
         r#"<w:top w:val="single" w:sz="8" w:color="000000"/>"#,
+        r#"<w:left w:val="single" w:sz="8" w:color="000000"/>"#,
+        r#"<w:between w:val="single" w:sz="8" w:color="000000"/>"#,
         r#"<w:bottom w:val="double" w:sz="8" w:color="000000"/>"#,
         r#"<w:bottom w:val="single" w:sz="bad" w:space="0" w:color="000000"/>"#,
         r#"<w:bottom w:val="single" w:sz="8" w:space="0"/>"#,
         r#"<w:bottom w:val="single" w:sz="8" w:space="0" w:color="000000" w:themeColor="accent1"/>"#,
         r#"<w:bottom w:val="single" w:sz="8" w:space="0" w:color="000000" w:shadow="1"/>"#,
+        r#"<w:right w:val="double" w:sz="8" w:space="0" w:color="000000"/>"#,
+        r#"<w:right w:val="single" w:sz="bad" w:space="0" w:color="000000"/>"#,
+        r#"<w:right w:val="single" w:sz="8" w:space="0"/>"#,
+        r#"<w:right w:val="single" w:sz="8" w:space="0" w:color="000000" w:themeColor="accent1"/>"#,
+        r#"<w:right w:val="single" w:sz="8" w:space="0" w:color="000000" w:shadow="1"/>"#,
     ] {
         let body = format!(
             r#"<w:p><w:pPr><w:pBdr>{borders}</w:pBdr></w:pPr><w:r><w:t>Bordered paragraph</w:t></w:r></w:p>"#

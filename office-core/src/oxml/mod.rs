@@ -381,6 +381,19 @@ pub fn parse_i64(v: Option<&str>) -> Option<i64> {
     v.and_then(|s| s.trim().parse::<i64>().ok())
 }
 
+/// Parses a signed measurement attribute that mainstream producers may write
+/// with a fractional part (Google Docs: `w:w="-108.0"`, `w:firstLine=
+/// "192.00000000000003"`). Counts and ids stay on [`parse_i64`].
+pub fn parse_measure(v: Option<&str>) -> Option<f64> {
+    v.and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+}
+
+/// [`parse_measure`] in twips converted to points.
+pub fn measure_twip_to_pt(v: Option<&str>) -> Option<f64> {
+    parse_measure(v).map(|twips| twips / 20.0)
+}
+
 /// Parses a floating-point attribute value.
 pub fn parse_f64(v: Option<&str>) -> Option<f64> {
     v.and_then(|s| s.trim().parse::<f64>().ok())
@@ -453,6 +466,16 @@ mod tests {
         assert_eq!(twip_to_pt(720), 36.0);
         assert_eq!(half_point_to_pt(22), 11.0);
         assert_eq!(eighth_point_to_pt(8), 1.0);
+    }
+
+    #[test]
+    fn decimal_measurements_parse_to_points_and_reject_non_finite_values() {
+        let positive = measure_twip_to_pt(Some("192.00000000000003")).unwrap();
+        assert!((positive - 9.6).abs() < 1e-12, "positive={positive}");
+        assert_eq!(measure_twip_to_pt(Some("-108.0")), Some(-5.4));
+        for invalid in ["abc", "NaN", "inf", "-inf"] {
+            assert_eq!(parse_measure(Some(invalid)), None, "invalid={invalid}");
+        }
     }
 
     #[test]

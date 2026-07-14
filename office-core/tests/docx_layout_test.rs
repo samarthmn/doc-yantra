@@ -193,6 +193,49 @@ fn long_text_wraps_to_multiple_lines() {
 }
 
 #[test]
+fn paragraph_mark_size_controls_empty_paragraph_line_height_only() {
+    let following_baseline = |body: &str| {
+        let laid = layout_body(body);
+        laid.pages[0]
+            .items
+            .iter()
+            .find_map(|positioned| {
+                matches!(positioned.item, Item::Glyphs(_)).then_some(positioned.y_pt)
+            })
+            .expect("following paragraph baseline")
+    };
+    let default =
+        following_baseline(r#"<w:p/><w:p><w:r><w:t>Following paragraph</w:t></w:r></w:p>"#);
+    let marked = following_baseline(
+        r#"<w:p><w:pPr><w:rPr><w:sz w:val="56"/></w:rPr></w:pPr></w:p><w:p><w:r><w:t>Following paragraph</w:t></w:r></w:p>"#,
+    );
+    assert!(
+        marked > default + 10.0,
+        "28pt paragraph mark must make the empty line taller: default={default}, marked={marked}"
+    );
+}
+
+#[test]
+fn complex_field_cached_hyperlink_across_paragraphs_converts_and_renders() {
+    let bytes = minimal_docx(
+        r#"
+        <w:p>
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+          <w:r><w:instrText xml:space="preserve"> TOC \h </w:instrText></w:r>
+          <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        </w:p>
+        <w:p><w:hyperlink w:anchor="heading-1"><w:r><w:t>Heading 1	3</w:t></w:r></w:hyperlink></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        "#,
+    );
+    let output = convert(&bytes, OfficeFormat::Docx, &opts()).expect("convert cached TOC result");
+    assert!(output.page_count >= 1);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    assert!(page_text(&laid.pages[0]).contains("Heading 1\t3"));
+}
+
+#[test]
 fn explicit_page_break_starts_new_page() {
     let body = r#"<w:p><w:r><w:t>Page one</w:t></w:r></w:p>
         <w:p><w:r><w:br w:type="page"/></w:r></w:p>

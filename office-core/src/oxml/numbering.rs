@@ -3,7 +3,7 @@
 //! uses to render counters.
 
 use super::wml::{Indent, RunProps, parse_run_props};
-use super::{Node, W, attr, child, children, parse_i64, twip_to_pt};
+use super::{Node, W, attr, child, children, measure_twip_to_pt, parse_i64};
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
 
@@ -230,7 +230,7 @@ fn parse_level(lvl: Node) -> LevelDef {
 fn parse_level_indent(ppr: Node) -> Indent {
     let mut indent = Indent::default();
     if let Some(ind) = child(ppr, W, "ind") {
-        let g = |a: &str| parse_i64(attr(ind, W, a)).map(twip_to_pt);
+        let g = |a: &str| measure_twip_to_pt(attr(ind, W, a));
         indent.left_pt = g("left").or_else(|| g("start"));
         indent.right_pt = g("right").or_else(|| g("end"));
         indent.first_line_pt = g("firstLine");

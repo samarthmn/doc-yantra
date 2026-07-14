@@ -1,7 +1,7 @@
 //! `word/settings.xml`: the handful of document-wide settings that affect
 //! layout or the profile verdict.
 
-use super::{M, W, attr, children, parse_i64, toggle, twip_to_pt};
+use super::{M, W, attr, children, measure_twip_to_pt, parse_i64, toggle};
 use crate::Result;
 
 /// Document-wide settings.
@@ -54,8 +54,8 @@ impl Settings {
             }
             match c.tag_name().name() {
                 "defaultTabStop" => {
-                    if let Some(v) = parse_i64(attr(c, W, "val")) {
-                        settings.default_tab_stop_pt = twip_to_pt(v);
+                    if let Some(value) = measure_twip_to_pt(attr(c, W, "val")) {
+                        settings.default_tab_stop_pt = value;
                     }
                 }
                 "evenAndOddHeaders" => settings.even_and_odd_headers = toggle(c),

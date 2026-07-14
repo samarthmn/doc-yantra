@@ -85,6 +85,71 @@ pub fn minimal_docx(body_inner: &str) -> Vec<u8> {
     ])
 }
 
+/// Builds a compact Google-Docs-style DOCX conformance fixture.
+///
+/// The package intentionally combines producer idioms that are individually
+/// invisible or supported in final view, so parser regressions cannot silently
+/// shrink the profile envelope again.
+pub fn gdocs_paragraph_docx() -> Vec<u8> {
+    let document = wrap_document(
+        r#"
+        <w:p><w:pPr><w:rPr/></w:pPr><w:r><w:t>GDocs paragraph probe</w:t></w:r></w:p>
+        <w:p>
+          <w:pPr>
+            <w:jc w:val="left"/>
+            <w:ind w:firstLine="192.00000000000003"/>
+            <w:rPr><w:color w:val="336699"/><w:sz w:val="22.0"/><w:vertAlign w:val="baseline"/></w:rPr>
+          </w:pPr>
+          <w:r>
+            <w:rPr>
+              <w:b w:val="0"/><w:i w:val="0"/><w:smallCaps w:val="0"/>
+              <w:strike w:val="0"/><w:u w:val="none"/><w:rtl w:val="0"/>
+            </w:rPr>
+            <w:t>GDocs toggles probe</w:t>
+          </w:r>
+        </w:p>
+        <w:tbl>
+          <w:tblPr><w:tblInd w:w="-108.0" w:type="dxa"/></w:tblPr>
+          <w:tblGrid>
+            <w:gridCol w:w="2400.5"/>
+            <w:tblGridChange w:id="1"><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid></w:tblGridChange>
+          </w:tblGrid>
+          <w:tr>
+            <w:trPr><w:tblHeader w:val="0"/><w:cantSplit w:val="0"/></w:trPr>
+            <w:tc><w:tcPr/><w:p><w:r><w:t>GDocs table probe</w:t></w:r></w:p></w:tc>
+          </w:tr>
+        </w:tbl>
+        <w:sectPr>
+          <w:footerReference w:type="default" r:id="rIdFooter"/>
+          <w:pgNumType w:start="1" w:fmt="decimal"/>
+        </w:sectPr>
+        "#,
+    );
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+</Types>"#;
+    let document_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>"#;
+    let footer = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr{ns}><w:p><w:r><w:t>GDocs footer probe</w:t></w:r></w:p></w:ftr>"#,
+        ns = DOC_NAMESPACES,
+    );
+    zip_package(&[
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", ROOT_RELS.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", document_rels),
+        ("word/footer1.xml", footer.as_bytes()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

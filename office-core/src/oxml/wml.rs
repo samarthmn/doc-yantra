@@ -8,7 +8,7 @@
 use super::dml::{self, Drawing};
 use super::{
     M, MC, Node, R, Rgb, TblWidth, VML, W, alternate_content_fallback, attr, child, children,
-    eighth_point_to_pt, emu_to_pt, half_point_to_pt, is, on_off, parse_i64, twip_to_pt,
+    eighth_point_to_pt, is, measure_twip_to_pt, on_off, parse_i64, parse_measure, twip_to_pt,
     unknown_child, wml_ignorable,
 };
 use crate::{OfficeError, Result};
@@ -142,6 +142,9 @@ pub struct ParaProps {
     pub outline_lvl: Option<u8>,
     /// Floating paragraph frame (`w:framePr`) in the supported common subset.
     pub frame: Option<FrameProps>,
+    /// Run properties of the paragraph mark (`w:pPr/w:rPr`). Affects the height
+    /// of an empty paragraph's line and the pilcrow; never the runs' own props.
+    pub mark_rpr: Option<RunProps>,
     /// The table style's contribution to this paragraph's cascade, for
     /// paragraphs inside a table cell. Not parsed from `w:pPr`: it is resolved
     /// from the enclosing table's style by [`super::table_style`] and consumed
@@ -347,13 +350,16 @@ pub enum InlineContent {
     Math(super::omml::MathContent),
 }
 
-/// A field: its instruction text plus the cached result runs Word last rendered.
+/// A field: its instruction text plus the cached result Word last rendered.
 #[derive(Debug, Clone, Default)]
 pub struct Field {
     /// The field instruction (e.g. ` PAGE `, ` HYPERLINK "url" `).
     pub instruction: String,
-    /// Cached result runs (between `separate` and `end`).
-    pub cached_runs: Vec<Run>,
+    /// Cached result content (between `separate` and `end`).
+    pub content: Vec<InlineContent>,
+    /// True only on the terminal segment when the whole field produced no
+    /// visible cached result content.
+    pub starved: bool,
 }
 
 /// A run: run properties plus a sequence of run content.
@@ -756,6 +762,7 @@ impl ParaProps {
             contextual_spacing: self.contextual_spacing || base.contextual_spacing,
             outline_lvl: self.outline_lvl.or(base.outline_lvl),
             frame: self.frame.or(base.frame),
+            mark_rpr: self.mark_rpr.clone().or_else(|| base.mark_rpr.clone()),
             tbl_style: self.tbl_style.clone().or_else(|| base.tbl_style.clone()),
             visible_unsupported: merge_reason_lists(
                 &base.visible_unsupported,
@@ -819,38 +826,43 @@ pub struct ParaBorders {
 
 impl ParaBorders {
     /// Returns the stable reason when paragraph borders exceed the faithfully
-    /// rendered bottom-single subset. Non-visible `nil`/`none` edges are safe.
+    /// rendered bottom/right-single subset. Non-visible `nil`/`none` edges are safe.
     pub fn unsupported_detail(&self, theme: &super::theme::Theme) -> Option<&'static str> {
         let visible = |border: &Option<Border>| {
             border
                 .as_ref()
                 .is_some_and(|border| !matches!(border.val.as_str(), "nil" | "none"))
         };
-        if visible(&self.top)
-            || visible(&self.left)
-            || visible(&self.right)
-            || visible(&self.between)
-        {
+        if visible(&self.top) || visible(&self.left) || visible(&self.between) {
             return Some("paragraph border edge outside bottom-single subset");
         }
-        let bottom = self.bottom.as_ref()?;
-        if !matches!(bottom.val.as_str(), "nil" | "none" | "single") {
-            return Some("paragraph bottom border style outside single subset");
-        }
-        if matches!(bottom.val.as_str(), "nil" | "none") {
-            return None;
-        }
-        if let Some(detail) = bottom.unsupported {
-            return Some(detail);
-        }
-        if bottom
-            .theme_color
-            .as_deref()
-            .is_some_and(|slot| theme.color(slot).is_none())
-        {
-            return Some("paragraph bottom border references an unresolved theme color");
-        }
-        None
+        let validate = |border: &Option<Border>, edge: &str| {
+            let border = border.as_ref()?;
+            if !matches!(border.val.as_str(), "nil" | "none" | "single") {
+                return Some(match edge {
+                    "right" => "paragraph right border style outside single subset",
+                    _ => "paragraph bottom border style outside single subset",
+                });
+            }
+            if matches!(border.val.as_str(), "nil" | "none") {
+                return None;
+            }
+            if let Some(detail) = border.unsupported {
+                return Some(detail);
+            }
+            if border
+                .theme_color
+                .as_deref()
+                .is_some_and(|slot| theme.color(slot).is_none())
+            {
+                return Some(match edge {
+                    "right" => "paragraph right border references an unresolved theme color",
+                    _ => "paragraph bottom border references an unresolved theme color",
+                });
+            }
+            None
+        };
+        validate(&self.bottom, "bottom").or_else(|| validate(&self.right, "right"))
     }
 }
 
@@ -1340,7 +1352,8 @@ pub fn parse_document(xml: &str) -> Result<Document> {
         .ok_or_else(|| OfficeError::Invalid("document.xml has no w:body".into()))?;
 
     let mut p = WmlParser::default();
-    let content = p.block_level(body, "w:body")?;
+    let mut content = p.block_level(body, "w:body")?;
+    p.finish_story(&mut content);
 
     // The trailing direct-child w:sectPr is the final section.
     let final_sect = match child(body, W, "sectPr") {
@@ -1365,7 +1378,8 @@ pub fn parse_hdr_ftr_with_flags(xml: &str) -> Result<(Vec<BlockContent>, DocFlag
     let doc = super::parse_xml(xml, "header/footer")?;
     let root = doc.root_element(); // w:hdr or w:ftr
     let mut p = WmlParser::default();
-    let blocks = p.block_level(root, "w:hdr/ftr")?;
+    let mut blocks = p.block_level(root, "w:hdr/ftr")?;
+    p.finish_story(&mut blocks);
     Ok((blocks, p.flags))
 }
 
@@ -1392,7 +1406,8 @@ pub fn parse_notes(xml: &str, kind: NoteKind) -> Result<NotesPart> {
         let Some(id) = parse_i64(attr(node, W, "id")) else {
             continue;
         };
-        let blocks = parser.block_level(node, element)?;
+        let mut blocks = parser.block_level(node, element)?;
+        parser.finish_story(&mut blocks);
         match id {
             -1 => part.separator = blocks,
             -2 => part.continuation_separator = blocks,
@@ -1409,9 +1424,35 @@ pub fn parse_notes(xml: &str, kind: NoteKind) -> Result<NotesPart> {
 #[derive(Default)]
 struct WmlParser {
     flags: DocFlags,
+    field: Option<FieldBuild>,
 }
 
 impl WmlParser {
+    /// Flushes an open complex field at the end of one independent story.
+    fn finish_story(&mut self, blocks: &mut [BlockContent]) {
+        let Some(field) = self.field.take() else {
+            return;
+        };
+        if let Some(paragraph) = last_paragraph_mut(blocks) {
+            paragraph
+                .runs
+                .push(InlineContent::ComplexFieldRegion(field.finish(true)));
+        }
+    }
+
+    /// Parses a text-box story without leaking the enclosing story's field state.
+    fn text_box_story(&mut self, content: Node) -> Result<Vec<BlockContent>> {
+        let outer = std::mem::take(&mut self.field);
+        let parsed = self
+            .block_level(content, "w:txbxContent")
+            .map(|mut blocks| {
+                self.finish_story(&mut blocks);
+                blocks
+            });
+        self.field = outer;
+        parsed
+    }
+
     /// Walks a container's block-level children (paragraphs, tables, sdt, sectPr).
     fn block_level(&mut self, container: Node, parent: &str) -> Result<Vec<BlockContent>> {
         let mut out = Vec::new();
@@ -1489,102 +1530,108 @@ impl WmlParser {
         Ok((props, sect))
     }
 
-    /// Walks inline-level children of `w:p` (or `w:hyperlink`), assembling
-    /// complex fields spanning multiple runs.
+    /// Walks inline-level children of one paragraph, assembling field segments.
     fn inline_level(&mut self, container: Node) -> Result<Vec<InlineContent>> {
         let mut out = Vec::new();
-        let mut field: Option<FieldBuild> = None;
-        for node in children(container) {
-            if is(node, W, "pPr") || wml_ignorable(node) {
-                continue;
-            }
-            if is(node, W, "r") {
-                self.run_into_field(node, &mut field, &mut out)?;
-            } else if is(node, W, "hyperlink") {
-                let rel_id = attr(node, R, "id").map(str::to_string);
-                let anchor = attr(node, W, "anchor").map(str::to_string);
-                let mut runs = Vec::new();
-                for r in children(node) {
-                    if is(r, W, "r") {
-                        runs.push(self.run(r)?);
-                    }
-                }
-                out.push(InlineContent::Hyperlink {
-                    rel_id,
-                    anchor,
-                    runs,
-                });
-            } else if is(node, W, "fldSimple") {
-                let instruction = attr(node, W, "instr").unwrap_or_default().to_string();
-                let mut cached_runs = Vec::new();
-                for r in children(node) {
-                    if is(r, W, "r") {
-                        cached_runs.push(self.run(r)?);
-                    }
-                }
-                out.push(InlineContent::SimpleField(Field {
-                    instruction,
-                    cached_runs,
-                }));
-            } else if is(node, M, "oMath") || is(node, M, "oMathPara") {
-                out.push(InlineContent::Math(super::omml::MathContent::parse(
-                    node,
-                    is(node, M, "oMathPara"),
-                )));
-            } else if is(node, W, "ins") {
-                // Inserted tracked text: unwrap, render runs normally.
-                for r in children(node) {
-                    if is(r, W, "r") {
-                        self.run_into_field(r, &mut field, &mut out)?;
-                    }
-                }
-            } else if is(node, W, "sdt") {
-                if let Some(sc) = child(node, W, "sdtContent") {
-                    out.extend(self.inline_level(sc)?);
-                }
-            } else if is(node, MC, "AlternateContent") {
-                for fb in alternate_content_fallback(node)? {
-                    if is(fb, W, "r") {
-                        self.run_into_field(fb, &mut field, &mut out)?;
-                    } else {
-                        return Err(unknown_child("mc:Fallback in w:p", fb));
-                    }
-                }
-            } else {
-                return Err(unknown_child("w:p", node));
-            }
-        }
-        // An unterminated field: flush whatever we have as a region.
-        if let Some(fb) = field {
-            out.push(InlineContent::ComplexFieldRegion(fb.finish()));
+        self.inline_children(container, &mut out)?;
+        if let Some(field) = self.field.as_mut() {
+            out.push(InlineContent::ComplexFieldRegion(field.segment()));
         }
         Ok(out)
     }
 
+    fn inline_children(&mut self, container: Node, out: &mut Vec<InlineContent>) -> Result<()> {
+        for node in children(container) {
+            self.inline_child(node, out)?;
+        }
+        Ok(())
+    }
+
+    fn inline_child(&mut self, node: Node, out: &mut Vec<InlineContent>) -> Result<()> {
+        if is(node, W, "pPr") || wml_ignorable(node) {
+            return Ok(());
+        }
+        if is(node, W, "r") {
+            self.run_into_field(node, out)?;
+        } else if is(node, W, "hyperlink") {
+            let rel_id = attr(node, R, "id").map(str::to_string);
+            let anchor = attr(node, W, "anchor").map(str::to_string);
+            let mut runs = Vec::new();
+            for run in children(node).filter(|child| is(*child, W, "r")) {
+                runs.push(self.run(run)?);
+            }
+            self.push_inline(
+                InlineContent::Hyperlink {
+                    rel_id,
+                    anchor,
+                    runs,
+                },
+                out,
+            );
+        } else if is(node, W, "fldSimple") {
+            let instruction = attr(node, W, "instr").unwrap_or_default().to_string();
+            let mut content = Vec::new();
+            for run in children(node).filter(|child| is(*child, W, "r")) {
+                content.push(InlineContent::Run(self.run(run)?));
+            }
+            let starved = !content.iter().any(inline_has_result_content);
+            self.push_inline(
+                InlineContent::SimpleField(Field {
+                    instruction,
+                    content,
+                    starved,
+                }),
+                out,
+            );
+        } else if is(node, M, "oMath") || is(node, M, "oMathPara") {
+            self.push_inline(
+                InlineContent::Math(super::omml::MathContent::parse(
+                    node,
+                    is(node, M, "oMathPara"),
+                )),
+                out,
+            );
+        } else if is(node, W, "ins") {
+            // Inserted tracked text: unwrap, render runs normally.
+            for run in children(node).filter(|child| is(*child, W, "r")) {
+                self.run_into_field(run, out)?;
+            }
+        } else if is(node, W, "sdt") {
+            if let Some(content) = child(node, W, "sdtContent") {
+                self.inline_children(content, out)?;
+            }
+        } else if is(node, MC, "AlternateContent") {
+            for fallback in alternate_content_fallback(node)? {
+                self.inline_child(fallback, out)?;
+            }
+        } else {
+            return Err(unknown_child("w:p", node));
+        }
+        Ok(())
+    }
+
     /// Routes a run through the complex-field state machine, or emits it plainly.
-    fn run_into_field(
-        &mut self,
-        r: Node,
-        field: &mut Option<FieldBuild>,
-        out: &mut Vec<InlineContent>,
-    ) -> Result<()> {
+    fn run_into_field(&mut self, r: Node, out: &mut Vec<InlineContent>) -> Result<()> {
         let fld_char = child(r, W, "fldChar").and_then(|f| attr(f, W, "fldCharType"));
-        match (fld_char, field.as_mut()) {
+        match (fld_char, self.field.as_mut()) {
             (Some("begin"), _) => {
-                if let Some(prev) = field.take() {
-                    out.push(InlineContent::ComplexFieldRegion(prev.finish()));
+                // TODO(nested fields): v1 keeps final-view order by terminating
+                // the outer segment before opening the inner field.
+                if let Some(prev) = self.field.take() {
+                    out.push(InlineContent::ComplexFieldRegion(prev.finish(true)));
                 }
-                *field = Some(FieldBuild::default());
+                self.field = Some(FieldBuild::default());
             }
             (Some("separate"), Some(fb)) => fb.in_result = true,
             (Some("end"), _) => {
-                if let Some(fb) = field.take() {
-                    out.push(InlineContent::ComplexFieldRegion(fb.finish()));
+                if let Some(fb) = self.field.take() {
+                    out.push(InlineContent::ComplexFieldRegion(fb.finish(true)));
                 }
             }
             (_, Some(fb)) => {
                 if fb.in_result {
-                    fb.cached_runs.push(self.run(r)?);
+                    let run = self.run(r)?;
+                    self.push_inline(InlineContent::Run(run), out);
                 } else {
                     for it in children(r) {
                         if is(it, W, "instrText") {
@@ -1596,6 +1643,16 @@ impl WmlParser {
             (_, None) => out.push(InlineContent::Run(self.run(r)?)),
         }
         Ok(())
+    }
+
+    fn push_inline(&mut self, item: InlineContent, out: &mut Vec<InlineContent>) {
+        let has_content = inline_has_result_content(&item);
+        if let Some(field) = self.field.as_mut().filter(|field| field.in_result) {
+            field.any_content |= has_content;
+            field.content.push(item);
+        } else {
+            out.push(item);
+        }
     }
 
     fn run(&mut self, r: Node) -> Result<Run> {
@@ -1739,7 +1796,7 @@ impl WmlParser {
             .descendants()
             .find(|candidate| is(*candidate, W, "txbxContent"))
             .map(|content| {
-                let blocks = self.block_level(content, "w:txbxContent")?;
+                let blocks = self.text_box_story(content)?;
                 let (width_pt, height_pt) = drawing.extent_pt.unwrap_or((144.0, 72.0));
                 Ok(TextBox {
                     width_pt,
@@ -1795,7 +1852,7 @@ impl WmlParser {
             let text_box = node
                 .descendants()
                 .find(|candidate| is(*candidate, W, "txbxContent"))
-                .map(|content| self.block_level(content, "w:txbxContent"))
+                .map(|content| self.text_box_story(content))
                 .transpose()?
                 .unwrap_or_default();
             let image_rel_id = node
@@ -1832,8 +1889,8 @@ impl WmlParser {
                 "tblGrid" => {
                     for gc in children(c) {
                         if is(gc, W, "gridCol") {
-                            let w = parse_i64(attr(gc, W, "w")).unwrap_or(0);
-                            table.grid.push(twip_to_pt(w));
+                            let width = measure_twip_to_pt(attr(gc, W, "w")).unwrap_or(0.0);
+                            table.grid.push(width);
                         }
                     }
                 }
@@ -1902,11 +1959,11 @@ impl WmlParser {
         for c in children(node) {
             match c.tag_name().name() {
                 "pgSz" => {
-                    if let Some(w) = parse_i64(attr(c, W, "w")) {
-                        sect.page_w_pt = twip_to_pt(w);
+                    if let Some(width) = measure_twip_to_pt(attr(c, W, "w")) {
+                        sect.page_w_pt = width;
                     }
-                    if let Some(h) = parse_i64(attr(c, W, "h")) {
-                        sect.page_h_pt = twip_to_pt(h);
+                    if let Some(height) = measure_twip_to_pt(attr(c, W, "h")) {
+                        sect.page_h_pt = height;
                     }
                     match attr(c, W, "orient") {
                         None | Some("portrait") => {}
@@ -2035,17 +2092,63 @@ impl WmlParser {
 #[derive(Default)]
 struct FieldBuild {
     instruction: String,
-    cached_runs: Vec<Run>,
+    content: Vec<InlineContent>,
     in_result: bool,
+    any_content: bool,
 }
 
 impl FieldBuild {
-    fn finish(self) -> Field {
+    fn segment(&mut self) -> Field {
         Field {
-            instruction: self.instruction,
-            cached_runs: self.cached_runs,
+            instruction: self.instruction.clone(),
+            content: std::mem::take(&mut self.content),
+            starved: false,
         }
     }
+
+    fn finish(self, terminal: bool) -> Field {
+        Field {
+            instruction: self.instruction,
+            content: self.content,
+            starved: terminal && !self.any_content,
+        }
+    }
+}
+
+fn inline_has_result_content(inline: &InlineContent) -> bool {
+    fn run_has_content(run: &Run) -> bool {
+        run.content.iter().any(|content| match content {
+            RunContent::Text(text) => !text.trim().is_empty(),
+            _ => true,
+        })
+    }
+
+    match inline {
+        InlineContent::Run(run) => run_has_content(run),
+        InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_content),
+        InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+            field.content.iter().any(inline_has_result_content)
+        }
+        InlineContent::Math(math) => !math.source_text().trim().is_empty(),
+    }
+}
+
+fn last_paragraph_mut(blocks: &mut [BlockContent]) -> Option<&mut Paragraph> {
+    for block in blocks.iter_mut().rev() {
+        match block {
+            BlockContent::Paragraph(paragraph) => return Some(paragraph),
+            BlockContent::Table(table) => {
+                for row in table.rows.iter_mut().rev() {
+                    for cell in row.cells.iter_mut().rev() {
+                        if let Some(paragraph) = last_paragraph_mut(&mut cell.content) {
+                            return Some(paragraph);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 // --- Small parse helpers ----------------------------------------------------
@@ -2115,7 +2218,8 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
     }
     if simple.is_none()
         || simple.is_some_and(|value| {
-            parse_i64(value.attribute("x")).is_none() || parse_i64(value.attribute("y")).is_none()
+            parse_measure(value.attribute("x")).is_none()
+                || parse_measure(value.attribute("y")).is_none()
         })
     {
         reject("wp:anchor has an invalid or missing wp:simplePos child");
@@ -2158,8 +2262,8 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
             let offset = offsets
                 .first()
                 .and_then(|value| value.text())
-                .and_then(|value| value.trim().parse::<i64>().ok())
-                .map(emu_to_pt);
+                .and_then(|value| parse_measure(Some(value)))
+                .map(|emu| emu / 12_700.0);
             if !offsets.is_empty() && offset.is_none() {
                 reject(if horizontal_axis {
                     "wp:positionH has an invalid posOffset"
@@ -2253,9 +2357,9 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
     let distances_pt =
         ["distT", "distB", "distL", "distR"].map(|name| match node.attribute(name) {
             None => 0.0,
-            Some(value) => match value.trim().parse::<u64>() {
-                Ok(value) if value <= i64::MAX as u64 => emu_to_pt(value as i64),
-                _ => {
+            Some(value) => match parse_measure(Some(value)).filter(|value| *value >= 0.0) {
+                Some(value) => value / 12_700.0,
+                None => {
                     reject("wp:anchor has an invalid wrap distance");
                     0.0
                 }
@@ -2407,14 +2511,14 @@ fn parse_sym(node: Node) -> Option<RunContent> {
 }
 
 fn parse_spacing(node: Node) -> Spacing {
-    let before = parse_i64(attr(node, W, "before")).map(twip_to_pt);
-    let after = parse_i64(attr(node, W, "after")).map(twip_to_pt);
-    let line = parse_i64(attr(node, W, "line"));
+    let before = measure_twip_to_pt(attr(node, W, "before"));
+    let after = measure_twip_to_pt(attr(node, W, "after"));
+    let line = parse_measure(attr(node, W, "line"));
     let rule = attr(node, W, "lineRule");
     let line = line.map(|l| match rule {
-        Some("exact") => LineSpacing::Exact(twip_to_pt(l)),
-        Some("atLeast") => LineSpacing::AtLeast(twip_to_pt(l)),
-        _ => LineSpacing::Auto(l as f64 / 240.0),
+        Some("exact") => LineSpacing::Exact(l / 20.0),
+        Some("atLeast") => LineSpacing::AtLeast(l / 20.0),
+        _ => LineSpacing::Auto(l / 240.0),
     });
     Spacing {
         before_pt: before,
@@ -2424,7 +2528,7 @@ fn parse_spacing(node: Node) -> Spacing {
 }
 
 fn parse_indent(node: Node) -> Indent {
-    let g = |a: &str| parse_i64(attr(node, W, a)).map(twip_to_pt);
+    let g = |a: &str| measure_twip_to_pt(attr(node, W, a));
     Indent {
         left_pt: g("left").or_else(|| g("start")),
         right_pt: g("right").or_else(|| g("end")),
@@ -2439,7 +2543,7 @@ fn parse_tabs(node: Node) -> Vec<TabStop> {
         if !is(c, W, "tab") {
             continue;
         }
-        let Some(pos) = parse_i64(attr(c, W, "pos")) else {
+        let Some(pos_pt) = measure_twip_to_pt(attr(c, W, "pos")) else {
             continue;
         };
         let alignment = match attr(c, W, "val") {
@@ -2457,7 +2561,7 @@ fn parse_tabs(node: Node) -> Vec<TabStop> {
             _ => TabLeader::None,
         };
         tabs.push(TabStop {
-            pos_pt: twip_to_pt(pos),
+            pos_pt,
             alignment,
             leader,
         });
@@ -2682,7 +2786,7 @@ pub fn parse_row_props(node: Node) -> RowProps {
                 props.width_after = Some(TblWidth::parse(attr(c, W, "w"), attr(c, W, "type")))
             }
             "trHeight" => {
-                let height = parse_i64(attr(c, W, "val")).map(twip_to_pt);
+                let height = measure_twip_to_pt(attr(c, W, "val"));
                 match (attr(c, W, "hRule"), height) {
                     (Some("auto"), _) => props.height = None,
                     (None | Some("atLeast"), Some(height)) => {
@@ -2768,7 +2872,7 @@ pub fn parse_cell_props(node: Node) -> CellProps {
 }
 
 fn parse_margins(node: Node) -> Margins {
-    let g = |a: &str, d: f64| parse_i64(attr(node, W, a)).map(twip_to_pt).unwrap_or(d);
+    let g = |a: &str, d: f64| measure_twip_to_pt(attr(node, W, a)).unwrap_or(d);
     Margins {
         top: g("top", 72.0),
         right: g("right", 72.0),
@@ -2782,17 +2886,16 @@ fn parse_margins(node: Node) -> Margins {
 
 fn parse_cols(node: Node) -> ColumnSpec {
     let num = parse_i64(attr(node, W, "num")).unwrap_or(1).max(0) as u32;
-    let space_pt = parse_i64(attr(node, W, "space")).map(twip_to_pt);
+    let space_pt = measure_twip_to_pt(attr(node, W, "space"));
     let mut cols = Vec::new();
     let mut spaces = Vec::new();
     for c in children(node) {
         if is(c, W, "col")
-            && let Some(w) = parse_i64(attr(c, W, "w"))
+            && let Some(width) = measure_twip_to_pt(attr(c, W, "w"))
         {
-            cols.push(twip_to_pt(w));
+            cols.push(width);
             spaces.push(
-                parse_i64(attr(c, W, "space"))
-                    .map(twip_to_pt)
+                measure_twip_to_pt(attr(c, W, "space"))
                     .or(space_pt)
                     .unwrap_or(36.0),
             );
@@ -2855,6 +2958,7 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
                 props.outline_lvl = parse_i64(attr(c, W, "val")).map(|v| v.clamp(0, 8) as u8)
             }
             "framePr" => props.frame = Some(parse_frame_props(c)),
+            "rPr" => props.mark_rpr = Some(parse_run_props(c)),
             "suppressLineNumbers"
             | "suppressAutoHyphens"
             | "kinsoku"
@@ -2869,8 +2973,7 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
             | "suppressOverlap"
             | "textDirection"
             | "textAlignment"
-            | "textboxTightWrap"
-            | "rPr" => props
+            | "textboxTightWrap" => props
                 .visible_unsupported
                 .push(format!("w:{} in w:pPr", c.tag_name().name())),
             // Section properties are parsed by the section walker. `divId` is
@@ -2888,11 +2991,7 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
 }
 
 fn parse_frame_props(node: Node) -> FrameProps {
-    let twips = |name| {
-        attr(node, W, name)
-            .and_then(|value| value.parse::<i64>().ok())
-            .map(twip_to_pt)
-    };
+    let twips = |name| measure_twip_to_pt(attr(node, W, name));
     let mut unsupported = None;
     let x_pt = twips("x");
     let y_pt = twips("y");
@@ -3012,10 +3111,10 @@ pub fn parse_run_props(rpr: Node) -> RunProps {
             }
             "highlight" => props.highlight = attr(c, W, "val").and_then(named_highlight),
             "shd" => props.shading = parse_shd_fill(c),
-            "sz" => props.size_pt = parse_i64(attr(c, W, "val")).map(half_point_to_pt),
+            "sz" => props.size_pt = parse_measure(attr(c, W, "val")).map(|value| value / 2.0),
             "szCs" => {
                 saw_size_cs = true;
-                size_cs = parse_i64(attr(c, W, "val")).map(half_point_to_pt);
+                size_cs = parse_measure(attr(c, W, "val")).map(|value| value / 2.0);
             }
             "rFonts" => props.fonts = parse_run_fonts(c),
             "vertAlign" => {
@@ -3026,13 +3125,13 @@ pub fn parse_run_props(rpr: Node) -> RunProps {
                     _ => None,
                 }
             }
-            "spacing" => props.spacing_pt = parse_i64(attr(c, W, "val")).map(twip_to_pt),
+            "spacing" => props.spacing_pt = measure_twip_to_pt(attr(c, W, "val")),
             // `w:kern` present enables kerning at sizes >= val (half-points → points);
             // a missing val defaults to 0 (kern at any size).
             "kern" => {
                 props.kern_min_pt = Some(
-                    parse_i64(attr(c, W, "val"))
-                        .map(half_point_to_pt)
+                    parse_measure(attr(c, W, "val"))
+                        .map(|value| value / 2.0)
                         .unwrap_or(0.0),
                 )
             }
