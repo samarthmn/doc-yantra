@@ -1152,6 +1152,14 @@ fn tab_leaders_are_extraction_visible_glyphs_and_require_a_positive_gap() {
         let body = format!(
             r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="{leader}" w:pos="8640"/></w:tabs></w:pPr><w:r><w:t>Entry</w:t><w:tab/><w:t>12</w:t></w:r></w:p>"#
         );
+        let bytes = minimal_docx(&body);
+        let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile normal leader");
+        assert!(
+            predicted.supported,
+            "{leader} reasons: {:?}",
+            predicted.reasons
+        );
+        convert(&bytes, OfficeFormat::Docx, &opts()).expect("normal leader converts");
         let laid = layout_body(&body);
         let runs = glyph_runs(&laid.pages[0]);
         let leader_run = runs
@@ -1170,6 +1178,34 @@ fn tab_leaders_are_extraction_visible_glyphs_and_require_a_positive_gap() {
             .all(|(text, ..)| text.is_empty() || !text.chars().all(|ch| ch == '.')),
         "no leader may be painted without a positive authored-stop gap"
     );
+}
+
+#[test]
+fn tiny_positive_tracked_tab_leader_has_profile_convert_resource_parity() {
+    // Carlito's 11pt dot advance minus 50 twips of finite negative tracking is
+    // still positive, but narrow enough that a 1440pt stop would need more
+    // than the bounded 4096 extraction-visible leader glyphs.
+    let bytes = minimal_docx(
+        r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="28800"/></w:tabs></w:pPr><w:r><w:rPr><w:spacing w:val="-50"/></w:rPr><w:t>x</w:t><w:tab/><w:t>y</w:t></w:r></w:p>"#,
+    );
+    let expected = "tab leader glyph count exceeds 4096 safety limit";
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &opts()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::InputTooLarge,
+            detail,
+        }) if detail == expected
+    ));
+
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile tracked leader");
+    assert_eq!(
+        predicted.reasons.len(),
+        1,
+        "reasons: {:?}",
+        predicted.reasons
+    );
+    assert_eq!(predicted.reasons[0].code, UnsupportedCode::InputTooLarge);
+    assert_eq!(predicted.reasons[0].detail, expected);
 }
 
 #[test]

@@ -987,6 +987,7 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
             || body_has_page_float
             || body_has_floating_table
             || has_footnote_references
+            || collector.has_tab_leaders
             || has_multi_section_columns)
     {
         let layout_doc = crate::layout::WordDoc::open(bytes, opts)?;
@@ -1304,6 +1305,27 @@ fn paragraph_anchor_count(paragraph: &Paragraph) -> usize {
     paragraph.runs.iter().map(inline_count).sum()
 }
 
+fn paragraph_has_tab(paragraph: &Paragraph) -> bool {
+    fn run_has_tab(run: &wml::Run) -> bool {
+        run.content
+            .iter()
+            .any(|content| matches!(content, RunContent::Tab))
+    }
+
+    fn inline_has_tab(inline: &InlineContent) -> bool {
+        match inline {
+            InlineContent::Bookmark(_) | InlineContent::Math(_) => false,
+            InlineContent::Run(run) => run_has_tab(run),
+            InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_tab),
+            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                field.content.iter().any(inline_has_tab)
+            }
+        }
+    }
+
+    paragraph.runs.iter().any(inline_has_tab)
+}
+
 fn paragraph_has_page_float(paragraph: &Paragraph) -> bool {
     fn run_has_page_float(run: &wml::Run) -> bool {
         run.content.iter().any(|content| {
@@ -1369,6 +1391,7 @@ struct Collector<'a> {
     validated_images: BTreeSet<String>,
     total_image_pixels: u64,
     has_math: bool,
+    has_tab_leaders: bool,
     note_refs: Vec<(wml::NoteKind, i64)>,
 }
 
@@ -1395,6 +1418,7 @@ impl<'a> Collector<'a> {
             validated_images: BTreeSet::new(),
             total_image_pixels: 0,
             has_math: false,
+            has_tab_leaders: false,
             note_refs: Vec::new(),
         }
     }
@@ -1456,6 +1480,11 @@ impl<'a> Collector<'a> {
     ) {
         self.paragraphs += 1;
         let eff_para = self.styles.para_props(&p.props);
+        self.has_tab_leaders |= eff_para
+            .tabs
+            .iter()
+            .any(|stop| stop.leader != wml::TabLeader::None)
+            && paragraph_has_tab(p);
         if let Err(OfficeError::Unsupported { code, detail }) =
             crate::layout::paragraph::validate_tab_leader_stops(&eff_para.tabs)
         {
