@@ -1116,6 +1116,98 @@ fn note_markers_follow_first_reference_order_per_kind() {
 }
 
 #[test]
+fn table_note_references_participate_in_mixed_first_reference_order() {
+    let body = r#"
+        <w:p><w:r><w:t>Before</w:t><w:footnoteReference w:id="90"/></w:r></w:p>
+        <w:tbl><w:tblGrid><w:gridCol w:w="2500"/><w:gridCol w:w="2500"/></w:tblGrid><w:tr>
+          <w:tc><w:tcPr/><w:p><w:r><w:t>CellA</w:t><w:footnoteReference w:id="7"/><w:t>E</w:t><w:endnoteReference w:id="42"/></w:r></w:p></w:tc>
+          <w:tc><w:tcPr/><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>Nested</w:t><w:footnoteReference w:id="33"/><w:t>E</w:t><w:endnoteReference w:id="17"/></w:r></w:p></w:tc></w:tr></w:tbl></w:tc>
+        </w:tr></w:tbl>
+        <w:p><w:r><w:t>After</w:t><w:footnoteReference w:id="1"/><w:t>E</w:t><w:endnoteReference w:id="99"/></w:r></w:p>
+    "#;
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="90"><w:p><w:r><w:t>Foot ninety</w:t></w:r></w:p></w:footnote><w:footnote w:id="7"><w:p><w:r><w:t>Foot seven</w:t></w:r></w:p></w:footnote><w:footnote w:id="33"><w:p><w:r><w:t>Foot thirty-three</w:t></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:t>Foot one</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let endnotes = format!(
+        r#"<?xml version="1.0"?><w:endnotes{DOC_NAMESPACES}><w:endnote w:id="42"><w:p><w:r><w:t>End forty-two</w:t></w:r></w:p></w:endnote><w:endnote w:id="17"><w:p><w:r><w:t>End seventeen</w:t></w:r></w:p></w:endnote><w:endnote w:id="99"><w:p><w:r><w:t>End ninety-nine</w:t></w:r></w:p></w:endnote></w:endnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let bytes = package_with_parts(
+        body,
+        rels,
+        vec![
+            ("word/footnotes.xml", footnotes.into_bytes()),
+            ("word/endnotes.xml", endnotes.into_bytes()),
+        ],
+    );
+
+    assert_profile_convert_agree(&bytes);
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let first_page = page_text(&laid.pages[0]);
+    let all_text = laid.pages.iter().map(page_text).collect::<String>();
+    assert!(
+        first_page.contains("Before1"),
+        "before marker: {first_page:?}"
+    );
+    assert!(
+        first_page.contains("CellA2E1"),
+        "cell markers: {first_page:?}"
+    );
+    assert!(
+        first_page.contains("Nested3E2"),
+        "nested markers: {first_page:?}"
+    );
+    assert!(
+        first_page.contains("After4E3"),
+        "after markers: {first_page:?}"
+    );
+    for expected in [
+        "1 Foot ninety",
+        "2 Foot seven",
+        "3 Foot thirty-three",
+        "4 Foot one",
+        "1 End forty-two",
+        "2 End seventeen",
+        "3 End ninety-nine",
+    ] {
+        assert!(
+            all_text.contains(expected),
+            "missing {expected:?}: {all_text:?}"
+        );
+    }
+}
+
+#[test]
+fn repeated_table_headers_do_not_duplicate_logical_note_references() {
+    let rows = (0..80)
+        .map(|index| {
+            format!(r#"<w:tr><w:trPr><w:trHeight w:val="360" w:hRule="atLeast"/></w:trPr><w:tc><w:tcPr/><w:p><w:r><w:t>Row {index}</w:t></w:r></w:p></w:tc></w:tr>"#)
+        })
+        .collect::<String>();
+    let body = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:tcPr/><w:p><w:r><w:t>Header</w:t><w:footnoteReference w:id="7"/></w:r></w:p></w:tc></w:tr>{rows}</w:tbl>"#
+    );
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="7"><w:p><w:r><w:t>Header body</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let bytes = package_with_parts(
+        &body,
+        rels,
+        vec![("word/footnotes.xml", footnotes.into_bytes())],
+    );
+
+    assert_profile_convert_agree(&bytes);
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    assert!(laid.pages.len() >= 3, "pages={}", laid.pages.len());
+    let all_text = laid.pages.iter().map(page_text).collect::<String>();
+    assert_eq!(all_text.matches("Header body").count(), 1, "{all_text:?}");
+    assert!(all_text.contains("1 Header body"), "{all_text:?}");
+}
+
+#[test]
 fn fixture_footnote_overflow_continues_on_following_page() {
     let body = r#"<w:p><w:r><w:t>Body</w:t><w:footnoteReference w:id="1"/></w:r></w:p>"#;
     let note_body = (0..80)

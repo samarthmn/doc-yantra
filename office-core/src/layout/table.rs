@@ -8,7 +8,9 @@
 
 use super::assemble::WordDoc;
 use super::numbering_layout::ListCounters;
-use super::paragraph::{LineItem, NoteSequence, layout_paragraph_with_note_sequence};
+use super::paragraph::{
+    InternalLinkRect, LineItem, NoteSequence, layout_paragraph_with_note_sequence,
+};
 use super::{FillRule, Item, PathCommand, Positioned, Stroke};
 use crate::Result;
 use crate::oxml::TblWidth;
@@ -39,7 +41,15 @@ pub(crate) struct TableLayout {
     /// Resolved table width in points.
     pub(crate) width_pt: f64,
     /// Rows positioned relative to the table's left edge.
-    pub(crate) rows: Vec<RowLayout>,
+    pub(crate) rows: Vec<TableRowLayout>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TableRowLayout {
+    pub(crate) layout: RowLayout,
+    pub(crate) bookmarks: Vec<(String, f64)>,
+    pub(crate) note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
+    pub(crate) internal_links: Vec<InternalLinkRect>,
 }
 
 /// Lays out `table` into rows within `avail_width_pt`, starting at `table_left`
@@ -59,7 +69,13 @@ pub fn layout_table(
         table_left,
         note_sequence: None,
     };
-    Ok(layout_table_with_width(doc, warnings, table, &options, counters)?.rows)
+    Ok(
+        layout_table_with_width(doc, warnings, table, &options, counters)?
+            .rows
+            .into_iter()
+            .map(|row| row.layout)
+            .collect(),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -125,8 +141,8 @@ pub(crate) fn layout_table_with_width(
             let content_w = (width - m_l - m_r).max(1.0);
 
             let is_continue = cell.props.v_merge == Some(VMerge::Continue);
-            let (items, height) = if is_continue {
-                (Vec::new(), 0.0)
+            let content = if is_continue {
+                CellLayout::default()
             } else {
                 layout_cell(
                     doc,
@@ -141,7 +157,8 @@ pub(crate) fn layout_table_with_width(
             let border_top = horizontal_boundaries[row_index].half_width_for_span(col, col + span);
             let border_bottom =
                 horizontal_boundaries[row_index + 1].half_width_for_span(col, col + span);
-            row_content_h = row_content_h.max(height + m_t + m_b + border_top + border_bottom);
+            row_content_h =
+                row_content_h.max(content.height_pt + m_t + m_b + border_top + border_bottom);
 
             cell_boxes.push(CellBox {
                 x,
@@ -156,8 +173,7 @@ pub(crate) fn layout_table_with_width(
                 v_align: cell.props.v_align,
                 shading: cell.props.shading.map(Rgba::opaque),
                 borders: resolve_cell_borders(doc, cell, table, col == 0, col + span == cols.len()),
-                content: items,
-                content_h: height,
+                content,
                 clip_content: matches!(row.props.height, Some(RowHeight::Exact(_))),
             });
             col += span;
@@ -170,17 +186,32 @@ pub(crate) fn layout_table_with_width(
         );
         let height = apply_row_height(row.props.height, row_content_h);
         let mut items = Vec::new();
+        let mut bookmarks = Vec::new();
+        let mut note_refs = Vec::new();
+        let mut internal_links = Vec::new();
         for cb in &cell_boxes {
             emit_cell(cb, height, &mut items);
+            place_cell_metadata(
+                cb,
+                height,
+                &mut bookmarks,
+                &mut note_refs,
+                &mut internal_links,
+            );
         }
         if row_index == 0 {
             emit_horizontal_boundary(&horizontal_boundaries[0], 0.0, &mut items);
         }
         emit_horizontal_boundary(&horizontal_boundaries[row_index + 1], height, &mut items);
-        rows.push(RowLayout {
-            height_pt: height,
-            is_header: row.props.header,
-            items,
+        rows.push(TableRowLayout {
+            layout: RowLayout {
+                height_pt: height,
+                is_header: row.props.header,
+                items,
+            },
+            bookmarks,
+            note_refs,
+            internal_links,
         });
     }
 
@@ -195,13 +226,19 @@ pub(crate) fn layout_table_with_width(
         .last()
         .map_or(0.0, |boundary| boundary.max_width_pt / 2.0);
     if let Some(first) = rows.first_mut() {
-        for item in &mut first.items {
+        for item in &mut first.layout.items {
             item.y_pt += leading;
         }
-        first.height_pt += leading;
+        for (_, y_pt) in &mut first.bookmarks {
+            *y_pt += leading;
+        }
+        for link in &mut first.internal_links {
+            link.y_pt += leading;
+        }
+        first.layout.height_pt += leading;
     }
     if let Some(last) = rows.last_mut() {
-        last.height_pt += trailing;
+        last.layout.height_pt += trailing;
     }
     Ok(TableLayout {
         width_pt: table_width,
@@ -222,9 +259,17 @@ struct CellBox {
     v_align: VAlign,
     shading: Option<Rgba>,
     borders: [Option<Stroke>; 4], // top, right, bottom, left
-    content: Vec<LineItem>,
-    content_h: f64,
+    content: CellLayout,
     clip_content: bool,
+}
+
+#[derive(Debug, Default)]
+struct CellLayout {
+    items: Vec<LineItem>,
+    height_pt: f64,
+    bookmarks: Vec<(String, f64)>,
+    note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
+    internal_links: Vec<InternalLinkRect>,
 }
 
 /// Emits a cell's shading, content, and borders into the row's item list.
@@ -264,7 +309,7 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
     let content_top = (cb.border_top + cb.m_t).min(row_height);
     let content_bottom = (row_height - cb.border_bottom - cb.m_b).max(content_top);
     let content_height = content_bottom - content_top;
-    let free = (content_height - cb.content_h).max(0.0);
+    let free = (content_height - cb.content.height_pt).max(0.0);
     let dy = match cb.v_align {
         VAlign::Center => free / 2.0,
         VAlign::Bottom => free,
@@ -273,7 +318,7 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
     let content_y = content_top + dy;
     if cb.clip_content {
         let mut clipped = Vec::new();
-        for li in &cb.content {
+        for li in &cb.content.items {
             match &li.item {
                 Item::Link { w_pt, h_pt, target } => {
                     let left = (cb.m_l + li.x_pt).max(content_left);
@@ -314,7 +359,7 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
             },
         });
     } else {
-        for li in &cb.content {
+        for li in &cb.content.items {
             items.push(LineItem {
                 x_pt: cb.x + cb.m_l + li.x_pt,
                 y_pt: content_y + li.y_pt,
@@ -334,6 +379,65 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
         row_height,
     );
     push_border(items, cb, 3, cb.x, 0.0, cb.x, row_height);
+}
+
+fn place_cell_metadata(
+    cb: &CellBox,
+    row_height: f64,
+    bookmarks: &mut Vec<(String, f64)>,
+    note_refs: &mut Vec<(crate::oxml::wml::NoteKind, i64)>,
+    internal_links: &mut Vec<InternalLinkRect>,
+) {
+    if cb.is_continue {
+        return;
+    }
+    let content_left = cb.m_l.min(cb.width);
+    let content_right = (cb.width - cb.m_r).max(content_left);
+    let content_top = (cb.border_top + cb.m_t).min(row_height);
+    let content_bottom = (row_height - cb.border_bottom - cb.m_b).max(content_top);
+    let free = (content_bottom - content_top - cb.content.height_pt).max(0.0);
+    let content_y = content_top
+        + match cb.v_align {
+            VAlign::Center => free / 2.0,
+            VAlign::Bottom => free,
+            VAlign::Top => 0.0,
+        };
+    for note_ref in &cb.content.note_refs {
+        if !note_refs.contains(note_ref) {
+            note_refs.push(*note_ref);
+        }
+    }
+    for (name, y_pt) in &cb.content.bookmarks {
+        let y_pt = content_y + y_pt;
+        if !cb.clip_content || (content_top..content_bottom).contains(&y_pt) {
+            bookmarks.push((name.clone(), y_pt));
+        }
+    }
+    for link in &cb.content.internal_links {
+        let left = cb.m_l + link.x_pt;
+        let top = content_y + link.y_pt;
+        let right = left + link.w_pt;
+        let bottom = top + link.h_pt;
+        let (left, top, right, bottom) = if cb.clip_content {
+            (
+                left.max(content_left),
+                top.max(content_top),
+                right.min(content_right),
+                bottom.min(content_bottom),
+            )
+        } else {
+            (left, top, right, bottom)
+        };
+        if right > left && bottom > top {
+            internal_links.push(InternalLinkRect {
+                x_pt: cb.x + left,
+                y_pt: top,
+                w_pt: right - left,
+                h_pt: bottom - top,
+                target: link.target.clone(),
+            });
+        }
+    }
 }
 
 fn rectangle_path(left: f64, top: f64, width: f64, height: f64) -> Vec<PathCommand> {
@@ -383,9 +487,12 @@ fn layout_cell(
     width: f64,
     counters: &mut ListCounters,
     note_sequence: Option<&NoteSequence>,
-) -> Result<(Vec<LineItem>, f64)> {
+) -> Result<CellLayout> {
     let mut items = Vec::new();
     let mut y = 0.0_f64;
+    let mut bookmarks = Vec::new();
+    let mut note_refs = Vec::new();
+    let mut internal_links = Vec::new();
     for block in blocks {
         match block {
             BlockContent::Paragraph(p) => {
@@ -411,8 +518,18 @@ fn layout_cell(
                         "anchored drawing in a table cell",
                     ));
                 }
+                for note_ref in &layout.note_refs {
+                    if !note_refs.contains(note_ref) {
+                        note_refs.push(*note_ref);
+                    }
+                }
                 y += layout.space_before_pt;
                 for line in &layout.lines {
+                    bookmarks.extend(line.bookmarks.iter().cloned().map(|name| (name, y)));
+                    internal_links.extend(line.internal_links.iter().cloned().map(|mut link| {
+                        link.y_pt += y;
+                        link
+                    }));
                     for li in &line.items {
                         items.push(LineItem {
                             x_pt: li.x_pt,
@@ -434,19 +551,39 @@ fn layout_cell(
                 for row in
                     layout_table_with_width(doc, warnings, t, &nested_options, counters)?.rows
                 {
-                    for li in &row.items {
+                    for note_ref in row.note_refs {
+                        if !note_refs.contains(&note_ref) {
+                            note_refs.push(note_ref);
+                        }
+                    }
+                    bookmarks.extend(
+                        row.bookmarks
+                            .into_iter()
+                            .map(|(name, y_pt)| (name, y + y_pt)),
+                    );
+                    internal_links.extend(row.internal_links.into_iter().map(|mut link| {
+                        link.y_pt += y;
+                        link
+                    }));
+                    for li in &row.layout.items {
                         items.push(LineItem {
                             x_pt: li.x_pt,
                             y_pt: y + li.y_pt,
                             item: li.item.clone(),
                         });
                     }
-                    y += row.height_pt;
+                    y += row.layout.height_pt;
                 }
             }
         }
     }
-    Ok((items, y))
+    Ok(CellLayout {
+        items,
+        height_pt: y,
+        bookmarks,
+        note_refs,
+        internal_links,
+    })
 }
 
 /// Computes a list label from the counters for a paragraph (if numbered).

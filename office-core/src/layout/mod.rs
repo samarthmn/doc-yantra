@@ -27,8 +27,6 @@ pub struct LaidOutDocument {
     pub images: Vec<EncodedImage>,
     /// Outline (bookmark) entries from heading paragraphs.
     pub outline: Vec<OutlineEntry>,
-    /// Internal bookmark destinations resolved during pagination.
-    pub anchors: Vec<AnchorPosition>,
     /// `(created, modified)` PDF date strings for deterministic metadata.
     pub dates: DocDates,
 }
@@ -295,21 +293,21 @@ pub struct Decor {
 pub enum LinkTarget {
     /// An external URL.
     Url(String),
-    /// An internal Word bookmark name.
-    Anchor(String),
     /// An internal page (0-based).
     Page(u32),
 }
 
-/// A named internal-link destination in physical page coordinates.
+/// Fully resolved DOCX-internal annotation metadata. It remains private so the
+/// legacy public layout primitives keep their exhaustive shape.
 #[derive(Debug, Clone)]
-pub struct AnchorPosition {
-    /// Bookmark name from `w:bookmarkStart/@w:name`.
-    pub name: String,
-    /// Zero-based physical page index.
-    pub page: u32,
-    /// Y position from the top of the page, in points.
-    pub y_pt: f64,
+pub(crate) struct ResolvedInternalLink {
+    pub(crate) source_page: usize,
+    pub(crate) x_pt: f64,
+    pub(crate) y_pt: f64,
+    pub(crate) w_pt: f64,
+    pub(crate) h_pt: f64,
+    pub(crate) target_page: usize,
+    pub(crate) target_y_pt: f64,
 }
 
 /// An index into [`LaidOutDocument::images`].

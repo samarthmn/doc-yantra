@@ -102,6 +102,23 @@ fn pdf_goto_destination_object(pdf: &[u8]) -> Option<i32> {
     })
 }
 
+fn pdf_goto_destinations(pdf: &[u8]) -> Vec<(i32, f64)> {
+    String::from_utf8_lossy(pdf)
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line
+                .trim()
+                .strip_prefix("/D [")?
+                .split_whitespace()
+                .collect();
+            let page = fields.first()?.parse().ok()?;
+            let xyz = fields.iter().position(|field| *field == "/XYZ")?;
+            let top = fields.get(xyz + 2)?.parse().ok()?;
+            Some((page, top))
+        })
+        .collect()
+}
+
 fn assert_anchor_rejection_parity(bytes: &[u8], detail: &str) {
     let predicted = profile(bytes, OfficeFormat::Docx).expect("profile");
     assert!(
@@ -1103,6 +1120,33 @@ fn internal_anchor_link_targets_bookmark_page_and_dangling_anchor_is_not_annotat
 }
 
 #[test]
+fn internal_links_cross_table_boundaries_with_exact_page_and_vertical_destination() {
+    let bytes = minimal_docx(
+        r#"
+        <w:p><w:bookmarkStart w:id="1" w:name="outside"/><w:r><w:t>Outside target </w:t></w:r><w:hyperlink w:anchor="inside"><w:r><w:t>Jump into table</w:t></w:r></w:hyperlink><w:bookmarkEnd w:id="1"/><w:r><w:br w:type="page"/></w:r></w:p>
+        <w:tbl><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>First cell line</w:t></w:r></w:p><w:p><w:bookmarkStart w:id="2" w:name="inside"/><w:r><w:t>Inside target </w:t></w:r><w:hyperlink w:anchor="outside"><w:r><w:t>Jump outside</w:t></w:r></w:hyperlink><w:hyperlink w:anchor="missing"><w:r><w:t> Dangling table link</w:t></w:r></w:hyperlink><w:bookmarkEnd w:id="2"/></w:p></w:tc></w:tr></w:tbl>
+        "#,
+    );
+    let output = convert(&bytes, OfficeFormat::Docx, &opts()).expect("cross-table links convert");
+    let pages = pdf_page_object_ids(&output.pdf);
+    assert_eq!(pages.len(), 2, "page objects: {pages:?}");
+    let destinations = pdf_goto_destinations(&output.pdf);
+    assert_eq!(destinations.len(), 2, "destinations: {destinations:?}");
+    assert_eq!(
+        destinations[0].0, pages[1],
+        "outside source -> table target"
+    );
+    assert_eq!(
+        destinations[1].0, pages[0],
+        "table source -> outside target"
+    );
+    assert!(
+        destinations[0].1 < destinations[1].1 - 10.0,
+        "the second cell paragraph needs its own lower XYZ target: {destinations:?}"
+    );
+}
+
+#[test]
 fn tab_leaders_are_extraction_visible_glyphs_and_require_a_positive_gap() {
     for (leader, expected) in [("dot", '.'), ("hyphen", '-'), ("underscore", '_')] {
         let body = format!(
@@ -1126,6 +1170,45 @@ fn tab_leaders_are_extraction_visible_glyphs_and_require_a_positive_gap() {
             .all(|(text, ..)| text.is_empty() || !text.chars().all(|ch| ch == '.')),
         "no leader may be painted without a positive authored-stop gap"
     );
+}
+
+#[test]
+fn hostile_tab_leader_gap_fails_closed_before_glyph_materialization() {
+    // This finite stop would make the old float-to-usize path derive a
+    // saturating, attacker-sized repeat count before collecting the glyph Vec.
+    let bytes = minimal_docx(
+        r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="100000000000000000000"/></w:tabs></w:pPr><w:r><w:t>x</w:t><w:tab/><w:t>y</w:t></w:r></w:p>"#,
+    );
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile hostile tab");
+    assert_eq!(
+        predicted.reasons.len(),
+        1,
+        "reasons: {:?}",
+        predicted.reasons
+    );
+    assert_eq!(predicted.reasons[0].code, UnsupportedCode::InputTooLarge);
+    assert_eq!(
+        predicted.reasons[0].detail,
+        "tab leader gap exceeds 1440pt safety limit"
+    );
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &opts()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::InputTooLarge,
+            detail,
+        }) if detail == "tab leader gap exceeds 1440pt safety limit"
+    ));
+
+    let negative = minimal_docx(
+        r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="-100000000000000000000"/></w:tabs></w:pPr><w:r><w:t>negative</w:t><w:tab/><w:t>safe</w:t></w:r></w:p>"#,
+    );
+    let negative_profile = profile(&negative, OfficeFormat::Docx).expect("profile negative tab");
+    assert!(
+        negative_profile.supported,
+        "reasons: {:?}",
+        negative_profile.reasons
+    );
+    convert(&negative, OfficeFormat::Docx, &opts()).expect("negative stop converts safely");
 }
 
 #[test]

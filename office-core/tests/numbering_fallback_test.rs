@@ -28,7 +28,7 @@ fn options() -> ConvertOptions {
     }
 }
 
-fn bullet_docx(label: char, items: usize) -> Vec<u8> {
+fn bullet_docx_with_fonts(label: char, items: usize, r_fonts: &str) -> Vec<u8> {
     let paragraphs = (0..items)
         .map(|index| {
             format!(r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item {index}</w:t></w:r></w:p>"#)
@@ -38,7 +38,7 @@ fn bullet_docx(label: char, items: usize) -> Vec<u8> {
         r#"<?xml version="1.0"?><w:document{DOC_NAMESPACES}><w:body>{paragraphs}</w:body></w:document>"#
     );
     let numbering = format!(
-        r#"<?xml version="1.0"?><w:numbering{DOC_NAMESPACES}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="{label}"/><w:rPr><w:rFonts w:ascii="Noto Sans Symbols"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        r#"<?xml version="1.0"?><w:numbering{DOC_NAMESPACES}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="{label}"/><w:rPr><w:rFonts {r_fonts}/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
     );
     let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
     let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
@@ -48,6 +48,23 @@ fn bullet_docx(label: char, items: usize) -> Vec<u8> {
         ("word/document.xml", document.as_bytes()),
         ("word/numbering.xml", numbering.as_bytes()),
     ])
+}
+
+fn bullet_docx(label: char, items: usize) -> Vec<u8> {
+    bullet_docx_with_fonts(label, items, r#"w:ascii="Noto Sans Symbols""#)
+}
+
+fn extracted_layout_text(bytes: &[u8]) -> String {
+    let doc = WordDoc::open(bytes, &ConvertOptions::default()).expect("open bullet fixture");
+    let (laid, _) = layout_docx(&doc).expect("layout bullet fixture");
+    laid.pages
+        .iter()
+        .flat_map(|page| &page.items)
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) => Some(run.glyphs.iter().map(|glyph| glyph.ch).collect::<String>()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -117,6 +134,63 @@ fn exotic_bullet_substitution_warns_in_profile_and_convert_once() {
             _ => None,
         })
         .collect();
+    assert!(
+        extracted.contains('\u{25BA}'),
+        "substituted label: {extracted:?}"
+    );
+    assert!(
+        !extracted.contains('\u{2B9A}'),
+        "raw label survived: {extracted:?}"
+    );
+}
+
+#[test]
+fn hansi_only_symbol_and_wingdings_bullets_use_the_same_family_in_profile_and_layout() {
+    for (family, authored, expected) in [
+        ("Symbol", '\u{00B7}', '\u{2022}'),
+        ("Wingdings", '\u{00A7}', '\u{25AA}'),
+    ] {
+        let bytes = bullet_docx_with_fonts(authored, 1, &format!(r#"w:hAnsi="{family}""#));
+        let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile hAnsi bullet");
+        assert!(
+            predicted.supported,
+            "{family} reasons: {:?}",
+            predicted.reasons
+        );
+        let output = convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
+            .expect("convert hAnsi bullet");
+        assert_eq!(
+            output.warnings, predicted.warnings,
+            "{family} profile/layout warning parity"
+        );
+        let extracted = extracted_layout_text(&bytes);
+        assert!(
+            extracted.contains(expected),
+            "{family} expected U+{:04X}: {extracted:?}",
+            expected as u32
+        );
+        assert!(
+            !extracted.contains(authored),
+            "{family} raw U+{:04X} survived: {extracted:?}",
+            authored as u32
+        );
+    }
+}
+
+#[test]
+fn hansi_only_exotic_bullet_has_exact_profile_convert_warning_parity() {
+    let bytes = bullet_docx_with_fonts('\u{2B9A}', 2, r#"w:hAnsi="Noto Sans Symbols""#);
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile hAnsi exotic bullet");
+    let output = convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
+        .expect("convert hAnsi exotic bullet");
+    assert_eq!(output.warnings, predicted.warnings);
+    assert!(
+        predicted
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "bullet_substituted")
+    );
+    let extracted = extracted_layout_text(&bytes);
     assert!(
         extracted.contains('\u{25BA}'),
         "substituted label: {extracted:?}"

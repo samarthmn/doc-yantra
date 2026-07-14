@@ -6,7 +6,7 @@ use crate::fonts::subset::{SubsetFont, subset_for_pdf};
 use crate::fonts::{FaceId, FontDb};
 use crate::layout::{
     EncodedImage, FillRule, Item, LaidOutDocument, LinkTarget, Page, PathCommand, PathPaint,
-    Positioned, Stroke,
+    Positioned, ResolvedInternalLink, Stroke,
 };
 use crate::oxml::Rgba;
 use crate::profile::Warning;
@@ -15,6 +15,12 @@ use pdf_writer::types::{ActionType, AnnotationType, CidFontType, SystemInfo, Tex
 use pdf_writer::{Content, Date, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use std::collections::{BTreeMap, BTreeSet};
 use ttf_parser::{GlyphId, OutlineBuilder};
+
+#[derive(Debug, Clone)]
+enum AnnotationTarget {
+    Public(LinkTarget),
+    Internal { page: usize, y_pt: f64 },
+}
 
 /// Emits the laid-out document to deterministic PDF bytes.
 ///
@@ -25,6 +31,16 @@ pub fn emit(
     fonts: &FontDb,
     doc_id: [u8; 16],
     warnings: &mut Vec<Warning>,
+) -> Result<Vec<u8>> {
+    emit_with_internal_links(laid, fonts, doc_id, warnings, &[])
+}
+
+pub(crate) fn emit_with_internal_links(
+    laid: &LaidOutDocument,
+    fonts: &FontDb,
+    doc_id: [u8; 16],
+    warnings: &mut Vec<Warning>,
+    internal_links: &[ResolvedInternalLink],
 ) -> Result<Vec<u8>> {
     // Defense in depth: a 0-page PDF is invalid per spec and treated as corrupt
     // by viewers. The format converters already reject mismatched inputs before
@@ -89,15 +105,11 @@ pub fn emit(
     let content_ids: Vec<Ref> = laid.pages.iter().map(|_| alloc()).collect();
 
     // Link annotations, allocated per page.
-    let mut page_annots: Vec<Vec<(Ref, Rect, LinkTarget)>> = Vec::new();
-    for page in &laid.pages {
+    let mut page_annots: Vec<Vec<(Ref, Rect, AnnotationTarget)>> = Vec::new();
+    for (page_index, page) in laid.pages.iter().enumerate() {
         let mut annots = Vec::new();
         for pos in &page.items {
             if let Item::Link { w_pt, h_pt, target } = &pos.item {
-                if matches!(target, LinkTarget::Anchor(name) if !laid.anchors.iter().any(|anchor| anchor.name == *name))
-                {
-                    continue;
-                }
                 let y0 = page.height_pt - (pos.y_pt + h_pt);
                 let rect = Rect::new(
                     pos.x_pt as f32,
@@ -105,8 +117,27 @@ pub fn emit(
                     (pos.x_pt + w_pt) as f32,
                     (page.height_pt - pos.y_pt) as f32,
                 );
-                annots.push((alloc(), rect, target.clone()));
+                annots.push((alloc(), rect, AnnotationTarget::Public(target.clone())));
             }
+        }
+        for link in internal_links
+            .iter()
+            .filter(|link| link.source_page == page_index)
+        {
+            let y0 = page.height_pt - (link.y_pt + link.h_pt);
+            annots.push((
+                alloc(),
+                Rect::new(
+                    link.x_pt as f32,
+                    y0 as f32,
+                    (link.x_pt + link.w_pt) as f32,
+                    (page.height_pt - link.y_pt) as f32,
+                ),
+                AnnotationTarget::Internal {
+                    page: link.target_page,
+                    y_pt: link.target_y_pt,
+                },
+            ));
         }
         page_annots.push(annots);
     }
@@ -190,25 +221,12 @@ pub fn emit(
             let mut a = pdf.annotation(*aref);
             a.subtype(AnnotationType::Link).rect(*rect);
             match target {
-                LinkTarget::Url(url) => {
+                AnnotationTarget::Public(LinkTarget::Url(url)) => {
                     a.action()
                         .action_type(ActionType::Uri)
                         .uri(Str(url.as_bytes()));
                 }
-                LinkTarget::Anchor(name) => {
-                    let Some(anchor) = laid.anchors.iter().find(|anchor| anchor.name == *name)
-                    else {
-                        continue;
-                    };
-                    let target_page = (anchor.page as usize).min(page_ids.len().saturating_sub(1));
-                    let top = laid.pages[target_page].height_pt - anchor.y_pt;
-                    a.action()
-                        .action_type(ActionType::GoTo)
-                        .destination()
-                        .page(page_ids[target_page])
-                        .xyz(0.0, top as f32, None);
-                }
-                LinkTarget::Page(p) => {
+                AnnotationTarget::Public(LinkTarget::Page(p)) => {
                     let target_page = (*p as usize).min(page_ids.len().saturating_sub(1));
                     let _ = page_idx;
                     a.action()
@@ -216,6 +234,15 @@ pub fn emit(
                         .destination()
                         .page(page_ids[target_page])
                         .xyz(0.0, laid.pages[target_page].height_pt as f32, None);
+                }
+                AnnotationTarget::Internal { page, y_pt } => {
+                    let target_page = (*page).min(page_ids.len().saturating_sub(1));
+                    let top = laid.pages[target_page].height_pt - y_pt;
+                    a.action()
+                        .action_type(ActionType::GoTo)
+                        .destination()
+                        .page(page_ids[target_page])
+                        .xyz(0.0, top as f32, None);
                 }
             }
             a.finish();

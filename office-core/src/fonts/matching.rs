@@ -212,6 +212,20 @@ fn fallback_class(family: &str) -> &'static str {
     }
 }
 
+/// Exact OOXML numbering-label family cascade shared by profile and layout.
+/// Symbol normalization must observe the same authored face in both paths.
+pub fn numbering_label_family(
+    ascii: Option<&str>,
+    h_ansi: Option<&str>,
+    theme_minor_latin: Option<&str>,
+) -> String {
+    ascii
+        .or(h_ansi)
+        .or(theme_minor_latin)
+        .unwrap_or("Calibri")
+        .to_string()
+}
+
 /// Maps a symbol-font code point (Symbol/Wingdings/Webdings, commonly in the
 /// U+F0xx PUA range) to a Unicode equivalent for bullets. Returns `None` for a
 /// non-symbol font or an unmapped code (caller fails closed).

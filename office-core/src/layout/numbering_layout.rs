@@ -108,12 +108,11 @@ pub fn build_label(
     let eff = doc.styles.run_props(&para.props, &level.rpr);
     let size = eff.size_pt.unwrap_or(11.0);
     let color = Rgba::opaque(Rgb::new(0, 0, 0));
-    let family = eff
-        .fonts
-        .ascii
-        .clone()
-        .or_else(|| doc.theme.minor_latin.clone())
-        .unwrap_or_else(|| "Calibri".to_string());
+    let family = matching::numbering_label_family(
+        eff.fonts.ascii.as_deref(),
+        eff.fonts.h_ansi.as_deref(),
+        doc.theme.minor_latin.as_deref(),
+    );
 
     // Symbol/Wingdings mapping is the first normalization layer.
     let symbol_mapped: String = label_text

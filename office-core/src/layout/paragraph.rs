@@ -42,6 +42,16 @@ const DEFAULT_SIZE_PT: f64 = 11.0;
 const SCRIPT_SCALE: f64 = 0.65;
 /// Super/subscript baseline rise (fraction of size).
 const SCRIPT_RISE: f64 = 0.35;
+/// Security envelope for authored tab-leader gaps. This is an allocation cap,
+/// not a visual calibration constant: a ten-page horizontal gap is never a
+/// useful paragraph layout request.
+pub(crate) const MAX_TAB_LEADER_GAP_PT: f64 = 1440.0;
+/// Defense-in-depth cap for the number of extraction-visible leader glyphs in
+/// one tab. Kept separate from the physical-gap envelope for unusually narrow
+/// authored fonts.
+const MAX_TAB_LEADER_GLYPHS: usize = 4096;
+
+pub(crate) const TAB_LEADER_GAP_LIMIT_DETAIL: &str = "tab leader gap exceeds 1440pt safety limit";
 
 /// The laid-out lines of one paragraph, plus flow-control flags.
 #[derive(Debug, Default)]
@@ -259,6 +269,8 @@ pub struct Line {
     pub(crate) anchored_items: Vec<AnchoredLineItem>,
     /// Internal bookmark names whose zero-width marker falls on this line.
     pub(crate) bookmarks: Vec<String>,
+    /// Internal hyperlink rectangles whose targets are resolved after pagination.
+    pub(crate) internal_links: Vec<InternalLinkRect>,
     /// An explicit page break (`<w:br w:type="page"/>`) ends this line — the flow
     /// must start the next line on a new page.
     pub page_break_after: bool,
@@ -286,6 +298,16 @@ pub(crate) struct AnchoredLineItem {
     pub(crate) behind_doc: bool,
     pub(crate) relative_height: u32,
     pub(crate) item: Item,
+}
+
+/// A line-local internal hyperlink, deliberately kept out of public [`Item`].
+#[derive(Debug, Clone)]
+pub(crate) struct InternalLinkRect {
+    pub(crate) x_pt: f64,
+    pub(crate) y_pt: f64,
+    pub(crate) w_pt: f64,
+    pub(crate) h_pt: f64,
+    pub(crate) target: String,
 }
 
 /// A margin/page-relative float whose placement is resolved during pagination.
@@ -318,7 +340,13 @@ struct RunStyle {
     rise_pt: f64,
     ascent_pt: f64,
     line_height_pt: f64,
-    link: Option<LinkTarget>,
+    link: Option<RunLink>,
+}
+
+#[derive(Debug, Clone)]
+enum RunLink {
+    Public(LinkTarget),
+    Internal(String),
 }
 
 #[derive(Debug, Clone)]
@@ -361,7 +389,7 @@ enum Atom {
         image_id: ImageId,
         w_pt: f64,
         h_pt: f64,
-        link: Option<LinkTarget>,
+        link: Option<RunLink>,
     },
     Composite {
         w_pt: f64,
@@ -509,6 +537,7 @@ fn layout_paragraph_with_wrap_context(
     note_sequence: Option<&NoteSequence>,
 ) -> Result<ParaLayout> {
     let eff_para = doc.styles.para_props(&para.props);
+    validate_tab_leader_stops(&eff_para.tabs)?;
     if let Some(detail) = eff_para.borders.unsupported_detail(&doc.theme) {
         return Err(OfficeError::unsupported(
             UnsupportedCode::UnknownElement,
@@ -817,7 +846,7 @@ fn layout_paragraph_with_wrap_context(
             this_label,
             rtl,
             page_horizontal,
-        );
+        )?;
         prepend_line_clearance(std::slice::from_mut(&mut line), clearance_pt);
         lines.push(line);
     }
@@ -829,6 +858,7 @@ fn layout_paragraph_with_wrap_context(
             items: Vec::new(),
             anchored_items: Vec::new(),
             bookmarks: Vec::new(),
+            internal_links: Vec::new(),
             page_break_after: false,
             column_break_after: false,
         });
@@ -973,6 +1003,50 @@ fn layout_paragraph_with_wrap_context(
         float_leading_pt,
         page_floats,
     })
+}
+
+/// Rejects authored positive leader stops outside the bounded layout envelope.
+/// Negative/no-leader/clear stops cannot cause leader materialization.
+pub(crate) fn validate_tab_leader_stops(tab_stops: &[TabStop]) -> Result<()> {
+    if tab_stops.iter().any(|stop| {
+        stop.leader != TabLeader::None
+            && stop.alignment != TabAlign::Clear
+            && stop.pos_pt.is_finite()
+            && stop.pos_pt > MAX_TAB_LEADER_GAP_PT
+    }) {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::InputTooLarge,
+            TAB_LEADER_GAP_LIMIT_DETAIL,
+        ));
+    }
+    Ok(())
+}
+
+fn tab_leader_count(gap_pt: f64, advance_pt: f64) -> Result<usize> {
+    if !gap_pt.is_finite() || gap_pt > MAX_TAB_LEADER_GAP_PT {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::InputTooLarge,
+            TAB_LEADER_GAP_LIMIT_DETAIL,
+        ));
+    }
+    if gap_pt <= 0.0 || !advance_pt.is_finite() || advance_pt <= 0.0 {
+        return Ok(0);
+    }
+    let mut count = 0usize;
+    let mut width = advance_pt;
+    while width <= gap_pt {
+        count = count.checked_add(1).ok_or_else(|| {
+            OfficeError::unsupported(UnsupportedCode::InputTooLarge, TAB_LEADER_GAP_LIMIT_DETAIL)
+        })?;
+        if count > MAX_TAB_LEADER_GLYPHS {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::InputTooLarge,
+                "tab leader glyph count exceeds 4096 safety limit",
+            ));
+        }
+        width += advance_pt;
+    }
+    Ok(count)
 }
 
 fn prepend_line_clearance(lines: &mut [Line], clearance_pt: f64) {
@@ -1164,10 +1238,13 @@ fn link_target(
     rels: &HashMap<String, String>,
     rel_id: Option<&str>,
     anchor: Option<&str>,
-) -> Option<LinkTarget> {
+) -> Option<RunLink> {
     match rel_id {
-        Some(rid) => doc.hyperlink_url(rels, rid).map(LinkTarget::Url),
-        None => anchor.map(|name| LinkTarget::Anchor(name.to_string())),
+        Some(rid) => doc
+            .hyperlink_url(rels, rid)
+            .map(LinkTarget::Url)
+            .map(RunLink::Public),
+        None => anchor.map(|name| RunLink::Internal(name.to_string())),
     }
 }
 
@@ -1176,7 +1253,7 @@ fn flatten_run(
     warnings: &mut Vec<Warning>,
     para: &Paragraph,
     run: &Run,
-    link: Option<LinkTarget>,
+    link: Option<RunLink>,
     context: &FlattenContext<'_>,
     atoms: &mut Vec<Atom>,
 ) -> Result<()> {
@@ -1994,7 +2071,7 @@ fn place_line(
     label: Option<&PlacedLabel>,
     rtl: bool,
     page_horizontal: Option<PageHorizontalContext>,
-) -> Line {
+) -> Result<Line> {
     let visual_indices = visual_run_order(atoms, indices, rtl);
     let indices = visual_indices.as_slice();
     // Natural width and expandable space count.
@@ -2143,7 +2220,8 @@ fn place_line(
     let mut pending_style: Option<Rc<RunStyle>> = None;
     let mut pending_order: Option<usize> = None;
     let mut pending_x = x;
-    let mut link_start: Option<(f64, LinkTarget)> = None;
+    let mut link_start: Option<(f64, RunLink)> = None;
+    let mut internal_links = Vec::new();
     let mut line_semantics: BTreeMap<usize, Vec<(f64, AtomSemanticCluster)>> = BTreeMap::new();
 
     let flush = |pending: &mut Vec<PlacedGlyph>,
@@ -2198,7 +2276,14 @@ fn place_line(
                     pending_order =
                         Some(pending_order.unwrap_or(usize::MAX).min(k.saturating_add(1)));
                 }
-                update_link(&mut link_start, style.link.as_ref(), x, height, &mut items);
+                update_link(
+                    &mut link_start,
+                    style.link.as_ref(),
+                    x,
+                    height,
+                    &mut items,
+                    &mut internal_links,
+                );
                 let adv = advance_pt + if *is_space { space_extra } else { 0.0 };
                 let advance_end = x + adv;
                 for owned in semantic {
@@ -2274,7 +2359,7 @@ fn place_line(
                             leaders.iter().find(|(kind, _)| *kind == stop.leader)
                         && leader.advance_pt > 0.0
                     {
-                        let count = ((aligned - relative_x) / leader.advance_pt).floor() as usize;
+                        let count = tab_leader_count(aligned - relative_x, leader.advance_pt)?;
                         if count > 0 {
                             let leader_width = count as f64 * leader.advance_pt;
                             let glyphs = (0..count)
@@ -2313,7 +2398,14 @@ fn place_line(
                     pending_x,
                     &mut text_items,
                 );
-                update_link(&mut link_start, link.as_ref(), x, height, &mut items);
+                update_link(
+                    &mut link_start,
+                    link.as_ref(),
+                    x,
+                    height,
+                    &mut items,
+                    &mut internal_links,
+                );
                 items.push(LineItem {
                     x_pt: x,
                     y_pt: (ascent - h_pt).max(0.0),
@@ -2391,7 +2483,14 @@ fn place_line(
         pending_x,
         &mut text_items,
     );
-    update_link(&mut link_start, None, x, height, &mut items);
+    update_link(
+        &mut link_start,
+        None,
+        x,
+        height,
+        &mut items,
+        &mut internal_links,
+    );
     for (_, mut semantic) in line_semantics {
         semantic.sort_by_key(|(_, owned)| owned.source_order);
         let Some((_, first)) = semantic.first() else {
@@ -2432,14 +2531,15 @@ fn place_line(
     let column_break_after = indices
         .iter()
         .any(|&k| matches!(atoms[k], Atom::Break(BreakKind::Column)));
-    Line {
+    Ok(Line {
         height_pt: height,
         items,
         anchored_items,
         bookmarks,
+        internal_links,
         page_break_after,
         column_break_after,
-    }
+    })
 }
 
 fn visual_run_order(atoms: &[Atom], indices: &[usize], rtl: bool) -> Vec<usize> {
@@ -2467,11 +2567,12 @@ fn visual_run_order(atoms: &[Atom], indices: &[usize], rtl: bool) -> Vec<usize> 
 
 /// Opens/closes link rectangles as the current link target changes.
 fn update_link(
-    link_start: &mut Option<(f64, LinkTarget)>,
-    now: Option<&LinkTarget>,
+    link_start: &mut Option<(f64, RunLink)>,
+    now: Option<&RunLink>,
     x: f64,
     height: f64,
     items: &mut Vec<LineItem>,
+    internal_links: &mut Vec<InternalLinkRect>,
 ) {
     let changed = link_key(link_start.as_ref().map(|(_, t)| t)) != link_key(now);
     if !changed {
@@ -2480,27 +2581,36 @@ fn update_link(
     if let Some((sx, target)) = link_start.take()
         && x > sx
     {
-        items.push(LineItem {
-            x_pt: sx,
-            y_pt: 0.0,
-            item: Item::Link {
+        match target {
+            RunLink::Public(target) => items.push(LineItem {
+                x_pt: sx,
+                y_pt: 0.0,
+                item: Item::Link {
+                    w_pt: x - sx,
+                    h_pt: height,
+                    target,
+                },
+            }),
+            RunLink::Internal(target) => internal_links.push(InternalLinkRect {
+                x_pt: sx,
+                y_pt: 0.0,
                 w_pt: x - sx,
                 h_pt: height,
                 target,
-            },
-        });
+            }),
+        }
     }
     if let Some(t) = now {
         *link_start = Some((x, t.clone()));
     }
 }
 
-fn link_key(l: Option<&LinkTarget>) -> String {
+fn link_key(l: Option<&RunLink>) -> String {
     match l {
         None => String::new(),
-        Some(LinkTarget::Url(u)) => format!("u:{u}"),
-        Some(LinkTarget::Anchor(name)) => format!("a:{name}"),
-        Some(LinkTarget::Page(p)) => format!("p:{p}"),
+        Some(RunLink::Public(LinkTarget::Url(u))) => format!("u:{u}"),
+        Some(RunLink::Public(LinkTarget::Page(p))) => format!("p:{p}"),
+        Some(RunLink::Internal(name)) => format!("a:{name}"),
     }
 }
 

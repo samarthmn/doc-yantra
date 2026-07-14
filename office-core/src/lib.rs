@@ -203,10 +203,16 @@ fn convert_docx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
     }
 
     let doc = layout::WordDoc::open(bytes, opts)?;
-    let (laid, mut warnings) = layout::layout_docx(&doc)?;
+    let (laid, mut warnings, internal_links) = layout::flow::layout_docx_with_internal_links(&doc)?;
     guard_page_count(laid.pages.len())?;
     let page_count = laid.pages.len() as u32;
-    let pdf = emit::pdf::emit(&laid, &doc.fonts, document_id(bytes), &mut warnings)?;
+    let pdf = emit::pdf::emit_with_internal_links(
+        &laid,
+        &doc.fonts,
+        document_id(bytes),
+        &mut warnings,
+        &internal_links,
+    )?;
     Ok(ConvertOutput {
         pdf,
         page_count,

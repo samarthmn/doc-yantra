@@ -1456,6 +1456,11 @@ impl<'a> Collector<'a> {
     ) {
         self.paragraphs += 1;
         let eff_para = self.styles.para_props(&p.props);
+        if let Err(OfficeError::Unsupported { code, detail }) =
+            crate::layout::paragraph::validate_tab_leader_stops(&eff_para.tabs)
+        {
+            profile.add_reason_deduped(code, detail);
+        }
         for detail in &eff_para.visible_unsupported {
             profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
         }
@@ -1492,12 +1497,11 @@ impl<'a> Collector<'a> {
             }
             if level.num_fmt == NumFmt::Bullet {
                 let eff = self.styles.run_props(&p.props, &level.rpr);
-                let family = eff
-                    .fonts
-                    .ascii
-                    .or(eff.fonts.h_ansi)
-                    .or_else(|| self.theme.minor_latin.clone())
-                    .unwrap_or_else(|| "Calibri".to_string());
+                let family = matching::numbering_label_family(
+                    eff.fonts.ascii.as_deref(),
+                    eff.fonts.h_ansi.as_deref(),
+                    self.theme.minor_latin.as_deref(),
+                );
                 let symbol_mapped: String = level
                     .lvl_text
                     .chars()

@@ -9,14 +9,14 @@ use super::assemble::WordDoc;
 use super::numbering_layout::{ListCounters, PlacedLabel, build_label};
 use super::page::PageGeometry;
 use super::paragraph::{
-    AnchoredLineItem, ExclusionBand, FieldContext, LineItem, NoteSequence, PageFloat,
-    PageHorizontalContext, ParaLayout, WrapExclusion, layout_paragraph,
+    AnchoredLineItem, ExclusionBand, FieldContext, InternalLinkRect, LineItem, NoteSequence,
+    PageFloat, PageHorizontalContext, ParaLayout, WrapExclusion, layout_paragraph,
     layout_paragraph_with_page_wrap,
 };
 use super::table::{TableLayoutOptions, layout_table, layout_table_with_width};
 use super::{
-    AnchorPosition, EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCommand,
-    Positioned,
+    EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned,
+    ResolvedInternalLink,
 };
 use crate::oxml::numbering::{NumFmt, format_number};
 use crate::oxml::wml::{
@@ -49,7 +49,8 @@ struct Unit {
     table_id: Option<usize>,
     is_header_row: bool,
     outline: Option<(String, u8)>,
-    bookmarks: Vec<String>,
+    bookmarks: Vec<(String, f64)>,
+    internal_links: Vec<InternalLinkRect>,
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
     frame: Option<FramePlacement>,
     block_index: usize,
@@ -361,6 +362,14 @@ fn wrap_remaining(wrap: WrapExclusion) -> f64 {
 
 /// Lays out a resolved document into pages plus emitter resources.
 pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
+    let (laid, warnings, _) = layout_docx_with_internal_links(doc)?;
+    Ok((laid, warnings))
+}
+
+/// DOCX conversion-only layout path retaining private resolved internal links.
+pub(crate) fn layout_docx_with_internal_links(
+    doc: &WordDoc,
+) -> Result<(LaidOutDocument, Vec<Warning>, Vec<ResolvedInternalLink>)> {
     let boundaries: Vec<(usize, &SectPr)> = doc
         .document
         .body
@@ -455,16 +464,15 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         total_pages,
     )?;
     let outline = collect_outline(&units, &pages);
-    let anchors = collect_bookmarks(&units, &pages);
+    let internal_links = resolve_internal_links(&pages);
 
     let laid = LaidOutDocument {
         pages: pages.into_iter().map(finish_work_page).collect(),
         images: clone_images(&doc.images),
         outline,
-        anchors,
         dates: doc.dates.clone(),
     };
-    Ok((laid, warnings))
+    Ok((laid, warnings, internal_links))
 }
 
 fn build_section_runs<'a>(
@@ -543,6 +551,12 @@ fn align_body_vertically(
         }
         for (_, y) in &mut page.unit_ys {
             *y += shift;
+        }
+        for (_, y) in &mut page.bookmarks {
+            *y += shift;
+        }
+        for link in &mut page.internal_links {
+            link.y_pt += shift;
         }
     }
 }
@@ -631,6 +645,8 @@ struct WorkPage {
     page_overlays: Vec<(u32, Positioned)>,
     /// The set of (unit index) placed, for outline mapping.
     unit_ys: Vec<(usize, f64)>,
+    bookmarks: Vec<(String, f64)>,
+    internal_links: Vec<InternalLinkRect>,
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
     float_bands: Vec<ResolvedPageBand>,
     float_carriers: Vec<FloatCarrier>,
@@ -828,16 +844,33 @@ fn build_units(
                     layout_table_with_width(doc, warnings, t, &table_options, counters)?;
                 if let Some(floating) = t.props.floating {
                     let mut items = Vec::new();
+                    let mut bookmarks = Vec::new();
+                    let mut note_refs = Vec::new();
+                    let mut internal_links = Vec::new();
                     let mut row_y = 0.0;
                     for row in table_layout.rows {
-                        for item in row.items {
+                        bookmarks.extend(
+                            row.bookmarks
+                                .into_iter()
+                                .map(|(name, y_pt)| (name, row_y + y_pt)),
+                        );
+                        for note_ref in row.note_refs {
+                            if !note_refs.contains(&note_ref) {
+                                note_refs.push(note_ref);
+                            }
+                        }
+                        internal_links.extend(row.internal_links.into_iter().map(|mut link| {
+                            link.y_pt += row_y;
+                            link
+                        }));
+                        for item in row.layout.items {
                             items.push(LineItem {
                                 x_pt: item.x_pt,
                                 y_pt: row_y + item.y_pt,
                                 item: item.item,
                             });
                         }
-                        row_y += row.height_pt;
+                        row_y += row.layout.height_pt;
                     }
                     let distances = doc.floating_table_distances(Some(source_block_index), t);
                     // Resolve the authored origin into content-relative physical
@@ -916,8 +949,9 @@ fn build_units(
                         table_id: None,
                         is_header_row: false,
                         outline: None,
-                        bookmarks: Vec::new(),
-                        note_refs: Vec::new(),
+                        bookmarks,
+                        internal_links,
+                        note_refs,
                         frame: None,
                         block_index: source_block_index,
                         block_unit_index: 0,
@@ -935,27 +969,29 @@ fn build_units(
                 let mut headers = Vec::new();
                 let mut first_row = true;
                 for (row_index, row) in table_layout.rows.into_iter().enumerate() {
+                    let row_layout = row.layout;
                     let unit = Unit {
-                        height: row.height_pt,
+                        height: row_layout.height_pt,
                         gap_before: if first_row { table_gap } else { 0.0 },
                         float_leading: 0.0,
-                        items: row.items,
+                        items: row_layout.items,
                         anchored_items: Vec::new(),
                         page_floats: Vec::new(),
                         break_before: first_row && std::mem::take(&mut pending_break),
                         column_break_before: first_row && std::mem::take(&mut pending_column_break),
                         group: next_group(),
                         table_id: Some(table_id),
-                        is_header_row: row.is_header,
+                        is_header_row: row_layout.is_header,
                         outline: None,
-                        bookmarks: Vec::new(),
-                        note_refs: Vec::new(),
+                        bookmarks: row.bookmarks,
+                        internal_links: row.internal_links,
+                        note_refs: row.note_refs,
                         frame: None,
                         block_index: source_block_index,
                         block_unit_index: row_index,
                         floating_table: None,
                     };
-                    if row.is_header {
+                    if row_layout.is_header {
                         let mut repeated = clone_unit(&unit);
                         repeated.gap_before = 0.0;
                         repeated.break_before = false;
@@ -1032,6 +1068,7 @@ fn clone_unit(u: &Unit) -> Unit {
         is_header_row: u.is_header_row,
         outline: u.outline.clone(),
         bookmarks: u.bookmarks.clone(),
+        internal_links: u.internal_links.clone(),
         note_refs: u.note_refs.clone(),
         frame: u.frame,
         block_index: u.block_index,
@@ -1130,7 +1167,8 @@ fn push_paragraph_units(
             table_id: None,
             is_header_row: false,
             outline,
-            bookmarks: line.bookmarks,
+            bookmarks: line.bookmarks.into_iter().map(|name| (name, 0.0)).collect(),
+            internal_links: line.internal_links,
             note_refs: if i == 0 {
                 note_refs.clone()
             } else {
@@ -1178,12 +1216,18 @@ fn push_frame_unit(
     }
     let mut items = Vec::new();
     let mut content_height = 0.0;
-    let bookmarks = layout
-        .lines
-        .iter()
-        .flat_map(|line| line.bookmarks.iter().cloned())
-        .collect();
+    let mut bookmarks = Vec::new();
+    let mut internal_links = Vec::new();
     for line in layout.lines {
+        bookmarks.extend(
+            line.bookmarks
+                .into_iter()
+                .map(|name| (name, content_height)),
+        );
+        internal_links.extend(line.internal_links.into_iter().map(|mut link| {
+            link.y_pt += content_height;
+            link
+        }));
         for item in line.items {
             items.push(LineItem {
                 x_pt: item.x_pt,
@@ -1282,6 +1326,7 @@ fn push_frame_unit(
             .outline_level
             .map(|level| (layout.text.clone(), level)),
         bookmarks,
+        internal_links,
         note_refs: layout.note_refs,
         frame: Some(FramePlacement {
             props: frame,
@@ -1832,12 +1877,33 @@ fn place_unit(
     if index != usize::MAX {
         page.unit_ys.push((index, unit_top));
     }
+    place_logical_unit_metadata(page, unit, index, frame_y);
+    page.internal_links
+        .extend(unit.internal_links.iter().cloned().map(|mut link| {
+            link.x_pt += frame_x;
+            link.y_pt += frame_y;
+            link
+        }));
+    *y += unit.height;
+}
+
+fn place_logical_unit_metadata(page: &mut WorkPage, unit: &Unit, index: usize, origin_y: f64) {
+    // Repeated table-header clones use the sentinel index: paint and hyperlink
+    // sources repeat, but bookmark destinations and note references stay tied
+    // to the original logical row.
+    if index == usize::MAX {
+        return;
+    }
+    for (name, y_pt) in &unit.bookmarks {
+        if !page.bookmarks.iter().any(|(existing, _)| existing == name) {
+            page.bookmarks.push((name.clone(), origin_y + y_pt));
+        }
+    }
     for note_ref in &unit.note_refs {
         if !page.note_refs.contains(note_ref) {
             page.note_refs.push(*note_ref);
         }
     }
-    *y += unit.height;
 }
 
 fn place_page_float(
@@ -2025,6 +2091,8 @@ fn new_page(geo: &PageGeometry, governing_run: usize) -> WorkPage {
         page_underlays: Vec::new(),
         page_overlays: Vec::new(),
         unit_ys: Vec::new(),
+        bookmarks: Vec::new(),
+        internal_links: Vec::new(),
         note_refs: Vec::new(),
         float_bands: Vec::new(),
         float_carriers: Vec::new(),
@@ -2487,6 +2555,12 @@ fn place_hf(
             for (_, y) in &mut wp.unit_ys {
                 *y += overlap;
             }
+            for (_, y) in &mut wp.bookmarks {
+                *y += overlap;
+            }
+            for link in &mut wp.internal_links {
+                link.y_pt += overlap;
+            }
         }
     }
     for (y, item) in placed {
@@ -2518,24 +2592,81 @@ fn collect_outline(units: &[Unit], pages: &[WorkPage]) -> Vec<OutlineEntry> {
     entries
 }
 
-fn collect_bookmarks(units: &[Unit], pages: &[WorkPage]) -> Vec<AnchorPosition> {
-    let mut anchors = Vec::new();
-    for (page_idx, page) in pages.iter().enumerate() {
-        for &(unit_idx, y_pt) in &page.unit_ys {
-            for name in &units[unit_idx].bookmarks {
-                if anchors
-                    .iter()
-                    .any(|anchor: &AnchorPosition| anchor.name == *name)
-                {
-                    continue;
-                }
-                anchors.push(AnchorPosition {
-                    name: name.clone(),
-                    page: page_idx as u32,
-                    y_pt,
-                });
-            }
+fn resolve_internal_links(pages: &[WorkPage]) -> Vec<ResolvedInternalLink> {
+    let mut bookmarks = HashMap::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        for (name, y_pt) in &page.bookmarks {
+            bookmarks
+                .entry(name.as_str())
+                .or_insert((page_index, *y_pt));
         }
     }
-    anchors
+    let mut resolved = Vec::new();
+    for (source_page, page) in pages.iter().enumerate() {
+        for link in &page.internal_links {
+            let Some(&(target_page, target_y_pt)) = bookmarks.get(link.target.as_str()) else {
+                continue;
+            };
+            resolved.push(ResolvedInternalLink {
+                source_page,
+                x_pt: link.x_pt,
+                y_pt: link.y_pt,
+                w_pt: link.w_pt,
+                h_pt: link.h_pt,
+                target_page,
+                target_y_pt,
+            });
+        }
+    }
+    resolved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_table_header_clone_does_not_repeat_logical_bookmarks_or_notes() {
+        let unit = Unit {
+            height: 12.0,
+            gap_before: 0.0,
+            float_leading: 0.0,
+            items: Vec::new(),
+            anchored_items: Vec::new(),
+            page_floats: Vec::new(),
+            break_before: false,
+            column_break_before: false,
+            group: 1,
+            table_id: Some(1),
+            is_header_row: true,
+            outline: None,
+            bookmarks: vec![("header-target".to_string(), 3.0)],
+            internal_links: Vec::new(),
+            note_refs: vec![(NoteKind::Footnote, 77)],
+            frame: None,
+            block_index: 0,
+            block_unit_index: 0,
+            floating_table: None,
+        };
+        let mut page = WorkPage {
+            governing_run: 0,
+            page: Page::default(),
+            underlays: Vec::new(),
+            overlays: Vec::new(),
+            page_underlays: Vec::new(),
+            page_overlays: Vec::new(),
+            unit_ys: Vec::new(),
+            bookmarks: Vec::new(),
+            internal_links: Vec::new(),
+            note_refs: Vec::new(),
+            float_bands: Vec::new(),
+            float_carriers: Vec::new(),
+        };
+
+        place_logical_unit_metadata(&mut page, &unit, 4, 100.0);
+        place_logical_unit_metadata(&mut page, &unit, usize::MAX, 200.0);
+
+        assert_eq!(page.bookmarks, [("header-target".to_string(), 103.0)]);
+        assert_eq!(page.note_refs, [(NoteKind::Footnote, 77)]);
+    }
 }
