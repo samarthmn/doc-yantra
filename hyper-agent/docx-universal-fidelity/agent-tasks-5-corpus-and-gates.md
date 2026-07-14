@@ -12,18 +12,18 @@ title = "Google Docs export: TOC field, internal links, page-anchored images, fl
 tier = "core"
 ssim_threshold = 0.90
 max_page_count_delta = 0
-word_version = "<H2 string, e.g. Microsoft Word (online export service)>"
-ground_truth_exported_at = "2026-07-14"   # confirm against PDF CreationDate (H2)
+word_version = "Microsoft Word (online export service)"   # H2: exported via word.cloud.microsoft; exporter stamps no version — requires T5.2's matcher branch
+ground_truth_exported_at = "2026-07-14"                    # H2: ~18:00 IST; matches the PDF's embedded CreationDate
 input_sha256 = "1e68879b7bd7b161ed320fa5f203cfe3709cb300a4c4476941bc2ea60b47ca91"
 golden_sha256 = "8b42f556073a3a2e251664abc6a65ac247975124072d658a2920406bee2533c1"
-notes = "Public sample document (Sample-Files.com); Word-exported ground truth. Committed-only case (not in corpus.rs cases()); freezes the docx-universal-fidelity envelope expansion. Expected 10 pages."
+notes = "Public sample document (Sample-Files.com); ground truth exported via Microsoft Word for the web (word.cloud.microsoft) on 2026-07-14 — bare 'Microsoft Word' Creator metadata, no version stamped (see T5.2). Committed-only case (not in corpus.rs cases()); freezes the docx-universal-fidelity envelope expansion. Expected 10 pages."
 ```
 
-Same shape for `gdocs-tables-longdoc` (input `5ea1a2c4…`, golden `0edeb20b…`, notes: "44 pages; page-count parity is the primary gate; tables + list indents") and `gdocs-columns` (input `4fcfc62f…`, golden `5f731bda…`, notes: "3 pages; continuous 2-column bands with balancing; footer inherited across sections").
+Same shape for `gdocs-tables-longdoc` (input `5ea1a2c4…`, golden `0edeb20b…`, notes: "44 pages; page-count parity is the primary gate; tables + list indents") and `gdocs-columns` (input `4fcfc62f…`, golden `5f731bda…`, notes: "3 pages; continuous 2-column bands with balancing; footer inherited across sections"). `word_version`, `ground_truth_exported_at`, and the word.cloud.microsoft provenance sentence are identical for all three (one H2 export batch); before committing, re-verify each PDF's embedded Creator/CreationDate per H2 item 3.
 
 Threshold policy: start every case at the harness minimum `ssim_threshold = 0.90`, `tier = "core"` (they gate releases — that is the point). After H3 review, ratchet thresholds up to observed-minus-margin (like `complex/` at 0.90 with observed 0.9276) in a follow-up commit; never down without an H3 note.
 
-## T5.2 — Provenance matcher for online-service exports (skip if H2 chose re-export)
+## T5.2 — Provenance matcher for online-service exports (REQUIRED — H2 recorded word.cloud.microsoft exports; re-export declined)
 
 > May be executed **early, during phase 1** — it is independent and test-covered. Doing so (plus staging T5.1's manifests) unlocks full-corpus fidelity runs with heatmaps for the gdocs cases while phases 2–4 are still in flight; see the README's "fidelity runs while fixtures are staged" note.
 

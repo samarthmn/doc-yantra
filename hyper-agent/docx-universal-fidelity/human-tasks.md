@@ -31,17 +31,15 @@ You hold the six original files (`1.docx` … `3.pdf`) locally — this step is 
 5. Commit on the implementation branch. Agent task 5.1 authors the three `manifest.toml` files; it needs these binaries in place to validate hashes.
 6. Expected outcome: `cargo run -p fidelity -- missing-ground-truth` no longer lists the three new cases.
 
-## H2. Record ground-truth provenance (WITH H1; ~10 min)
+## H2. Ground-truth provenance — RECORDED 2026-07-14 (nothing left to do)
 
-The harness (`office-core/fidelity/src/main.rs::validate_provenance`) verifies `manifest.toml`'s `word_version` against the PDF's embedded Producer/Creator and `ground_truth_exported_at` against its CreationDate.
+**Recorded from the plan owner:** all three ground truths were exported with **Microsoft Word for the web** (https://word.cloud.microsoft/ — the online exporter stamps no version) on **2026-07-14, ~18:00 IST**. This matches the planning-time metadata read of the PDFs: Producer absent, `Creator: "Microsoft Word"` (bare family string), embedded `CreationDate: 2026-07-14`.
 
-1. Read the actual metadata of each of the three PDFs, e.g. `exiftool 1.pdf | grep -iE 'producer|creator|createdate'` (or any PDF inspector).
-2. Planning-time reading of the attached PDFs found: Producer absent / `Creator: "Microsoft Word"` (the bare family string that Word's *online export service* writes) and `CreationDate: 2026-07-14` for all three. The current `word_producer_matches` accepts only LTSC / "for Microsoft 365" / 4-digit-year variants, so bare-family metadata **cannot pass today** — agent task 5.2 extends the matcher. Your job: record what the metadata *actually* says.
-3. Tell the implementing agent (or edit the manifests after task 5.1) the exact strings:
-   - `word_version` = the Producer/Creator string you observed (e.g. `"Microsoft Word (online export service)"` if bare).
-   - `ground_truth_exported_at` = the CreationDate date (expected `"2026-07-14"`).
-4. Decision point (yours): if you prefer *not* to loosen the provenance matcher, re-export the three ground truths from a desktop Word build that stamps `Microsoft® Word LTSC`/`2021`/`365` metadata — then task 5.2 shrinks to tests only. Re-export means new PDF hashes: update `golden_sha256` in the manifests and re-verify page counts (expected 10/44/3).
-5. Expected outcome: `cargo run -p fidelity -- run --format docx` passes provenance validation for all three cases (it may still fail SSIM until phases 2–4 land — that is the point of the gate).
+Consequences (already reflected in the agent tasks — no further human action):
+1. Task 5.1's manifests use `word_version = "Microsoft Word (online export service)"` and `ground_truth_exported_at = "2026-07-14"` for all three cases, with the word.cloud.microsoft detail in `notes`.
+2. The current `word_producer_matches` accepts only LTSC / "for Microsoft 365" / 4-digit-year variants, so this bare-family metadata cannot pass today — **task 5.2 (matcher extension) is REQUIRED**; the re-export alternative was declined.
+3. The implementing agent re-verifies the embedded metadata when authoring the manifests (`exiftool <ground-truth.pdf> | grep -iE 'producer|creator|createdate'` or `pdf_core::meta::get_metadata`); if any PDF disagrees with the above, stop and reconcile with the plan owner.
+4. Expected outcome once tasks 5.1 + 5.2 land: `cargo run -p fidelity -- run --format docx` passes provenance validation for all three cases (SSIM gates may stay red until phases 2–4 complete — that is the point of the gate).
 
 ## H3. Review gates (AFTER phase 3, and again AFTER phase 5; ~30 min each)
 
