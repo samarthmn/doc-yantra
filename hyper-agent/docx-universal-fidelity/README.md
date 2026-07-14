@@ -45,6 +45,11 @@ Five agent phases plus human tasks. Phase 1 alone brings **all three files insid
 
 **Execution order:** H1 (fixtures) + H2 (provenance) can happen any time before phase 5 → agent phase 1 → agent phases 2 ∥ 3 → H3 review gate (fidelity run on gdocs cases, expect layout-level convergence) → agent phase 4 → agent phase 5 → H3 final review gate → H4 release + DocKosha pin bump. Log every layout-constant adjustment in `office-core/LAYOUT_CALIBRATION.md` per its invariant.
 
+**Note — fidelity runs while the gdocs fixtures are staged without manifests (H1 done early, phases 1–4):** the harness hard-fails a FULL `cargo run -p fidelity -- run --format docx` on any case directory missing its `manifest.toml` (`main.rs::run` bails before writing reports), and — even with manifests — `validate_provenance` rejects the gdocs ground truths' bare online-export metadata until T5.2's matcher extension lands. Therefore, while phases 1–4 are in flight:
+- verify existing-case health with per-case runs: `cargo run -p fidelity -- run --case <name>` (filtering happens before manifest reads, so manifest-less gdocs dirs don't affect scoped runs);
+- if mid-plan heatmaps of the gdocs cases are wanted (the H3 gate after phases 2 ∥ 3), execute **T5.2 early** — it is independent and test-covered — and stage the three T5.1 manifests; the full run then writes `report.json`/`index.html` before failing the (expectedly red) gates, which is exactly what the review needs;
+- do NOT merge the staged fixtures/manifests to `main` ahead of the engine work — `pdf-core/scripts/release.sh`'s blocking corpus gate would fail for unrelated releases.
+
 ## Envelope policy (decision, please review)
 
 - Constructs that are **invisible bookkeeping** (paragraph-mark rPr with no visible effect, explicit `val="0"` toggles, `tblGridChange`) are *parsed or ignored*, never `unknown_element`.

@@ -25,6 +25,8 @@ Threshold policy: start every case at the harness minimum `ssim_threshold = 0.90
 
 ## T5.2 — Provenance matcher for online-service exports (skip if H2 chose re-export)
 
+> May be executed **early, during phase 1** — it is independent and test-covered. Doing so (plus staging T5.1's manifests) unlocks full-corpus fidelity runs with heatmaps for the gdocs cases while phases 2–4 are still in flight; see the README's "fidelity runs while fixtures are staged" note.
+
 `office-core/fidelity/src/main.rs::word_producer_matches` accepts only LTSC / "for Microsoft 365" / 4-digit-year declared strings. The attached ground truths carry bare `Creator: "Microsoft Word"` (Word's online export service stamps no Producer/version). Extend, keeping strictness:
 
 ```rust
