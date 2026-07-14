@@ -1079,8 +1079,8 @@ pub struct FloatingTableProps {
     pub horizontal: AnchorOrigin,
     /// Vertical anchor origin.
     pub vertical: AnchorOrigin,
-    /// Text distance on the left/right, used as wrap padding.
-    pub wrap_padding_pt: f64,
+    /// Text clearance above, below, left, and right of the table.
+    pub distances_pt: [f64; 4],
 }
 
 /// A table row.
@@ -2242,11 +2242,6 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
 
     let parse_position =
         |position: Option<Node>, horizontal_axis: bool, reject: &mut dyn FnMut(&str)| {
-            let axis = if horizontal_axis {
-                "horizontal"
-            } else {
-                "vertical"
-            };
             let Some(position) = position else {
                 reject(if horizontal_axis {
                     "wp:anchor is missing wp:positionH"
@@ -2271,7 +2266,7 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
                 reject(if horizontal_axis {
                     "wp:positionH must contain exactly one align or posOffset"
                 } else {
-                    "wp:positionV must contain exactly one posOffset"
+                    "wp:positionV must contain exactly one align or posOffset"
                 });
             }
             let offset = offsets
@@ -2291,6 +2286,9 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
                     (true, "left") => Some(FrameAlign::Start),
                     (true, "center") => Some(FrameAlign::Center),
                     (true, "right") => Some(FrameAlign::End),
+                    (false, "top") => Some(FrameAlign::Start),
+                    (false, "center") => Some(FrameAlign::Center),
+                    (false, "bottom") => Some(FrameAlign::End),
                     _ => {
                         reject(if horizontal_axis {
                             "wp:positionH has an unsupported alignment"
@@ -2309,21 +2307,33 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
                     None
                 }
             });
-            if !horizontal_axis && !aligns.is_empty() {
-                reject("wp:positionV alignment is outside the supported subset");
-            }
-            let _ = axis;
             (offset.unwrap_or(0.0), align)
         };
 
     let (x_pt, x_align) = parse_position(horizontal, true, &mut reject);
     let (y_pt, y_align) = parse_position(vertical, false, &mut reject);
-    if horizontal.and_then(|value| value.attribute("relativeFrom")) != Some("margin") {
-        reject("wp:positionH relativeFrom is outside the supported margin subset");
-    }
-    if vertical.and_then(|value| value.attribute("relativeFrom")) != Some("paragraph") {
-        reject("wp:positionV relativeFrom is outside the supported paragraph subset");
-    }
+    let h_origin = match horizontal.and_then(|value| value.attribute("relativeFrom")) {
+        Some("margin") => AnchorOrigin::Margin,
+        Some("page") => AnchorOrigin::Page,
+        Some("column") => AnchorOrigin::Paragraph,
+        other => {
+            reject(&format!(
+                "wp:positionH relativeFrom {other:?} is outside the supported subset"
+            ));
+            AnchorOrigin::Margin
+        }
+    };
+    let v_origin = match vertical.and_then(|value| value.attribute("relativeFrom")) {
+        Some("paragraph") => AnchorOrigin::Paragraph,
+        Some("margin") => AnchorOrigin::Margin,
+        Some("page") => AnchorOrigin::Page,
+        other => {
+            reject(&format!(
+                "wp:positionV relativeFrom {other:?} is outside the supported subset"
+            ));
+            AnchorOrigin::Paragraph
+        }
+    };
 
     let wraps: Vec<_> = children(node)
         .filter(|child| {
@@ -2342,7 +2352,8 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
             match wrap_node.and_then(|value| value.attribute("wrapText")) {
                 Some("largest") => {}
                 Some("bothSides")
-                    if matches!(x_align, Some(FrameAlign::Start | FrameAlign::End)) => {}
+                    if matches!(x_align, Some(FrameAlign::Start | FrameAlign::End))
+                        || h_origin != AnchorOrigin::Paragraph => {}
                 _ => reject("wp:wrapSquare wrapText/position is outside the rendered subset"),
             }
             WrapMode::Square
@@ -2351,7 +2362,8 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
             match wrap_node.and_then(|value| value.attribute("wrapText")) {
                 Some("largest") => {}
                 Some("bothSides")
-                    if matches!(x_align, Some(FrameAlign::Start | FrameAlign::End)) => {}
+                    if matches!(x_align, Some(FrameAlign::Start | FrameAlign::End))
+                        || h_origin != AnchorOrigin::Paragraph => {}
                 _ => reject("wp:wrapTight wrapText/position is outside the rendered subset"),
             }
             if !wrap_node.is_some_and(tight_polygon_is_full_rectangle) {
@@ -2410,8 +2422,8 @@ fn parse_anchor(node: Node) -> ParsedAnchor {
             x_align,
             y_pt,
             y_align,
-            relative_from_h: AnchorOrigin::Margin,
-            relative_from_v: AnchorOrigin::Paragraph,
+            relative_from_h: h_origin,
+            relative_from_v: v_origin,
             wrap,
             distances_pt,
             behind_doc,
@@ -2779,14 +2791,18 @@ pub fn parse_tbl_props(node: Node) -> TblProps {
                         .unwrap_or(0.0),
                     horizontal: origin(attr(c, W, "horzAnchor")),
                     vertical: origin(attr(c, W, "vertAnchor")),
-                    wrap_padding_pt: parse_i64(attr(c, W, "leftFromText"))
-                        .map(twip_to_pt)
-                        .unwrap_or(0.0)
-                        .max(
-                            parse_i64(attr(c, W, "rightFromText"))
-                                .map(twip_to_pt)
-                                .unwrap_or(0.0),
-                        ),
+                    distances_pt: [
+                        "topFromText",
+                        "bottomFromText",
+                        "leftFromText",
+                        "rightFromText",
+                    ]
+                    .map(|name| {
+                        parse_i64(attr(c, W, name))
+                            .map(twip_to_pt)
+                            .unwrap_or(0.0)
+                            .max(0.0)
+                    }),
                 });
             }
             "shd" | "bidiVisual" | "tblOverlap" | "tblCellSpacing" => props

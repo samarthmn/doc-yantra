@@ -85,6 +85,277 @@ pub fn minimal_docx(body_inner: &str) -> Vec<u8> {
     ])
 }
 
+const IMAGE_CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#;
+
+const IMAGE_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>"#;
+
+fn image_docx(body_inner: &str) -> Vec<u8> {
+    let document = wrap_document(body_inner);
+    zip_package(&[
+        ("[Content_Types].xml", IMAGE_CONTENT_TYPES.as_bytes()),
+        ("_rels/.rels", ROOT_RELS.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", IMAGE_RELS.as_bytes()),
+        (
+            "word/media/image1.png",
+            include_bytes!("../../mock-files/png/file1.png"),
+        ),
+    ])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn picture_anchor(
+    horizontal_origin: &str,
+    horizontal_position: &str,
+    vertical_origin: &str,
+    vertical_position: &str,
+    width_emu: i64,
+    height_emu: i64,
+    wrap: &str,
+    relative_height: u32,
+) -> String {
+    format!(
+        r#"<w:drawing><wp:anchor simplePos="0" relativeHeight="{relative_height}" behindDoc="0" allowOverlap="1" distT="0" distB="114300" distL="114300" distR="114300"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="{horizontal_origin}">{horizontal_position}</wp:positionH><wp:positionV relativeFrom="{vertical_origin}">{vertical_position}</wp:positionV><wp:extent cx="{width_emu}" cy="{height_emu}"/>{wrap}<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    )
+}
+
+/// Margin/top-left page float with enough body text to exercise wrap release.
+pub fn margin_top_left_float_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        977_900,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    let lead = (0..9)
+        .map(|index| {
+            format!(
+                "<w:p><w:r><w:t>Wrapped body line {index} with enough words to expose its text window.</w:t></w:r></w:p>"
+            )
+        })
+        .collect::<String>();
+    image_docx(&format!(
+        "{lead}<w:p><w:r>{anchor}</w:r></w:p><w:p><w:r><w:t>Below float band</w:t></w:r></w:p>"
+    ))
+}
+
+/// Simultaneous left and right page floats carried by one paragraph.
+pub fn opposite_page_floats_docx() -> Vec<u8> {
+    let left = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        977_900,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    let right = picture_anchor(
+        "margin",
+        "<wp:align>right</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        977_900,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        2,
+    );
+    image_docx(&format!(
+        "<w:p><w:r><w:t>Text in the middle window between simultaneous page floats.</w:t></w:r></w:p><w:p><w:r>{left}{right}</w:r></w:p>"
+    ))
+}
+
+/// Two same-side page-float exclusions that overlap vertically.
+pub fn overlapping_page_floats_docx() -> Vec<u8> {
+    let left = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        977_900,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    image_docx(&format!("<w:p><w:r>{left}{left}</w:r></w:p>"))
+}
+
+/// Opposite-side page floats whose combined bands leave under 36pt for text.
+pub fn page_floats_without_text_window_docx() -> Vec<u8> {
+    let left = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        2_921_000,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    let right = picture_anchor(
+        "margin",
+        "<wp:align>right</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        2_921_000,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        2,
+    );
+    image_docx(&format!("<w:p><w:r>{left}{right}</w:r></w:p>"))
+}
+
+/// Full-width top-and-bottom page band overlapping a side band.
+pub fn full_and_side_page_floats_docx() -> Vec<u8> {
+    let full = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        254_000,
+        977_900,
+        "<wp:wrapTopAndBottom/>",
+        1,
+    );
+    let side = picture_anchor(
+        "margin",
+        "<wp:align>right</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        977_900,
+        977_900,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        2,
+    );
+    image_docx(&format!("<w:p><w:r>{full}{side}</w:r></w:p>"))
+}
+
+/// A page-scoped top-and-bottom float that moves all intersecting body text below it.
+pub fn page_top_bottom_float_docx() -> Vec<u8> {
+    let full = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        254_000,
+        914_400,
+        "<wp:wrapTopAndBottom/>",
+        1,
+    );
+    image_docx(&format!(
+        "<w:p><w:r><w:t>Body below page band</w:t></w:r></w:p><w:p><w:r>{full}</w:r></w:p>"
+    ))
+}
+
+/// Page-relative centered positioning on both axes.
+pub fn page_center_float_docx() -> Vec<u8> {
+    let centered = picture_anchor(
+        "page",
+        "<wp:align>center</wp:align>",
+        "page",
+        "<wp:align>center</wp:align>",
+        254_000,
+        254_000,
+        "<wp:wrapNone/>",
+        1,
+    );
+    image_docx(&format!("<w:p><w:r>{centered}</w:r></w:p>"))
+}
+
+/// Column-offset, paragraph-relative top-and-bottom float (file-1 anchor C shape).
+pub fn paragraph_column_top_bottom_float_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "column",
+        "<wp:posOffset>1931670</wp:posOffset>",
+        "paragraph",
+        "<wp:posOffset>6985</wp:posOffset>",
+        254_000,
+        241_300,
+        "<wp:wrapTopAndBottom/>",
+        1,
+    );
+    image_docx(&format!(
+        "<w:p><w:r>{anchor}</w:r></w:p><w:p><w:r><w:t>Text below top-and-bottom band</w:t></w:r></w:p>"
+    ))
+}
+
+/// Two paragraph-relative floats in one paragraph, outside the bounded envelope.
+pub fn two_paragraph_floats_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "paragraph",
+        "<wp:posOffset>0</wp:posOffset>",
+        254_000,
+        254_000,
+        "<wp:wrapNone/>",
+        1,
+    );
+    image_docx(&format!("<w:p><w:r>{anchor}{anchor}</w:r></w:p>"))
+}
+
+/// An anchored drawing governed by a two-column final section.
+pub fn multicolumn_anchor_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "paragraph",
+        "<wp:posOffset>0</wp:posOffset>",
+        254_000,
+        254_000,
+        "<wp:wrapNone/>",
+        1,
+    );
+    image_docx(&format!(
+        "<w:p><w:r>{anchor}</w:r></w:p><w:sectPr><w:cols w:num=\"2\"/></w:sectPr>"
+    ))
+}
+
+/// Text-relative left floating table with file-1's 187-twip right clearance.
+pub fn floating_table_side_wrap_docx(table_width_twips: u32) -> Vec<u8> {
+    let filler = "side wrapped words ".repeat(30);
+    minimal_docx(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="{table_width_twips}" w:type="dxa"/><w:tblpPr w:vertAnchor="text" w:horzAnchor="text" w:tblpX="0" w:tblpY="1" w:rightFromText="187"/></w:tblPr><w:tblGrid><w:gridCol w:w="{table_width_twips}"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Floating table</w:t></w:r></w:p><w:p><w:r><w:t>Second table row</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>{filler}</w:t></w:r></w:p><w:p><w:r><w:t>Below floating table</w:t></w:r></w:p>"#
+    ))
+}
+
+/// A page float near a pagination boundary whose page assignment oscillates.
+pub fn non_convergent_page_float_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        3_810_000,
+        5_080_000,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    let lead = (0..20)
+        .map(|index| {
+            format!(
+                "<w:p><w:r><w:t>Boundary {index} {}</w:t></w:r></w:p>",
+                "boundary words ".repeat(10)
+            )
+        })
+        .collect::<String>();
+    image_docx(&format!("{lead}<w:p><w:r>{anchor}</w:r></w:p>"))
+}
+
 /// Builds a compact Google-Docs-style DOCX conformance fixture.
 ///
 /// The package intentionally combines producer idioms that are individually

@@ -33,6 +33,15 @@ pub struct RowLayout {
     pub items: Vec<LineItem>,
 }
 
+/// Laid-out table rows plus the resolved grid footprint.
+#[derive(Debug, Default)]
+pub struct TableLayout {
+    /// Resolved table width in points.
+    pub width_pt: f64,
+    /// Rows positioned relative to the table's left edge.
+    pub rows: Vec<RowLayout>,
+}
+
 /// Lays out `table` into rows within `avail_width_pt`, starting at `table_left`
 /// (relative to the content-left edge).
 pub fn layout_table(
@@ -43,7 +52,7 @@ pub fn layout_table(
     avail_width_pt: f64,
     table_left: f64,
     counters: &mut ListCounters,
-) -> Result<Vec<RowLayout>> {
+) -> Result<TableLayout> {
     let cols = resolve_columns(table, avail_width_pt);
     let table_width: f64 = cols.iter().sum();
     let free_width = (avail_width_pt - table_width).max(0.0);
@@ -154,7 +163,10 @@ pub fn layout_table(
     if let Some(last) = rows.last_mut() {
         last.height_pt += trailing;
     }
-    Ok(rows)
+    Ok(TableLayout {
+        width_pt: table_width,
+        rows,
+    })
 }
 
 struct CellBox {
@@ -338,10 +350,11 @@ fn layout_cell(
             BlockContent::Paragraph(p) => {
                 let label = counter_label(doc, warnings, p, counters)?;
                 let layout = layout_paragraph(doc, warnings, p, rels, width, label, None)?;
-                if layout
-                    .lines
-                    .iter()
-                    .any(|line| !line.anchored_items.is_empty())
+                if !layout.page_floats.is_empty()
+                    || layout
+                        .lines
+                        .iter()
+                        .any(|line| !line.anchored_items.is_empty())
                 {
                     return Err(crate::OfficeError::unsupported(
                         crate::UnsupportedCode::AnchoredDrawing,
@@ -362,8 +375,8 @@ fn layout_cell(
                 y += layout.space_after_pt;
             }
             BlockContent::Table(t) => {
-                let rows = layout_table(doc, warnings, t, rels, width, 0.0, counters)?;
-                for row in rows {
+                let table_layout = layout_table(doc, warnings, t, rels, width, 0.0, counters)?;
+                for row in table_layout.rows {
                     for li in &row.items {
                         items.push(LineItem {
                             x_pt: li.x_pt,

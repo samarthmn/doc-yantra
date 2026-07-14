@@ -923,6 +923,7 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
     // Reasons from parse-time document flags + settings.
     add_flag_reasons(&mut profile, &document.flags);
     add_section_reasons(&mut profile, &document);
+    add_anchor_column_reasons(&mut profile, &document);
     if settings.auto_hyphenation {
         profile.add_reason_deduped(UnsupportedCode::AutoHyphenation, "w:autoHyphenation");
     }
@@ -962,7 +963,11 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
             BlockContent::Table(_) => None,
         })
         .sum();
-    if profile.supported && body_anchor_count > 1 {
+    let body_has_page_float = document.body.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => paragraph_has_page_float(paragraph),
+        BlockContent::Table(_) => false,
+    });
+    if profile.supported && (body_anchor_count > 1 || body_has_page_float) {
         let layout_doc = crate::layout::WordDoc::open(bytes, opts)?;
         if let Err(error) = crate::layout::layout_docx(&layout_doc) {
             match error {
@@ -1057,6 +1062,52 @@ fn add_section_reasons(profile: &mut DocProfile, document: &wml::Document) {
             );
         }
     }
+}
+
+fn add_anchor_column_reasons(profile: &mut DocProfile, document: &wml::Document) {
+    let boundaries: Vec<(usize, &SectPr)> = document
+        .body
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            BlockContent::Paragraph(paragraph) => paragraph
+                .sect_break
+                .as_ref()
+                .map(|section| (index, section)),
+            BlockContent::Table(_) => None,
+        })
+        .collect();
+    let mut start = 0usize;
+    for (boundary_index, (block_index, section)) in boundaries.iter().enumerate() {
+        let next = boundaries
+            .get(boundary_index + 1)
+            .map(|(_, section)| *section)
+            .unwrap_or(&document.final_sect);
+        if section.sect_type == SectType::Continuous && !section_geometry_differs(section, next) {
+            continue;
+        }
+        if section.cols.is_multi() && blocks_have_body_anchor(&document.body[start..=*block_index])
+        {
+            profile.add_reason_deduped(
+                UnsupportedCode::AnchoredDrawing,
+                "anchored drawing in a multi-column section",
+            );
+        }
+        start = *block_index + 1;
+    }
+    if document.final_sect.cols.is_multi() && blocks_have_body_anchor(&document.body[start..]) {
+        profile.add_reason_deduped(
+            UnsupportedCode::AnchoredDrawing,
+            "anchored drawing in a multi-column section",
+        );
+    }
+}
+
+fn blocks_have_body_anchor(blocks: &[BlockContent]) -> bool {
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => paragraph_anchor_count(paragraph) > 0,
+        BlockContent::Table(_) => false,
+    })
 }
 
 fn section_geometry_differs(left: &SectPr, right: &SectPr) -> bool {
@@ -1216,6 +1267,33 @@ fn paragraph_anchor_count(paragraph: &Paragraph) -> usize {
     }
 
     paragraph.runs.iter().map(inline_count).sum()
+}
+
+fn paragraph_has_page_float(paragraph: &Paragraph) -> bool {
+    fn run_has_page_float(run: &wml::Run) -> bool {
+        run.content.iter().any(|content| {
+            matches!(
+                content,
+                RunContent::Drawing(drawing)
+                    if drawing.anchor.is_some_and(|anchor| {
+                        anchor.relative_from_v != wml::AnchorOrigin::Paragraph
+                    })
+            )
+        })
+    }
+
+    fn inline_has_page_float(inline: &InlineContent) -> bool {
+        match inline {
+            InlineContent::Run(run) => run_has_page_float(run),
+            InlineContent::Hyperlink { runs, .. } => runs.iter().any(run_has_page_float),
+            InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                field.content.iter().any(inline_has_page_float)
+            }
+            InlineContent::Math(_) => false,
+        }
+    }
+
+    paragraph.runs.iter().any(inline_has_page_float)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1399,12 +1477,6 @@ impl<'a> Collector<'a> {
             }
         }
         let anchor_count = paragraph_anchor_count(p);
-        if anchor_count > 1 {
-            profile.add_reason_deduped(
-                UnsupportedCode::AnchoredDrawing,
-                "multiple anchored drawings in one paragraph",
-            );
-        }
         if anchor_count > 0 && eff_para.frame.is_some() {
             profile.add_reason_deduped(
                 UnsupportedCode::AnchoredDrawing,

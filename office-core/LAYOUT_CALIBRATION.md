@@ -28,6 +28,8 @@ Per failing case:
 | `paragraph.rs` | line height | OS/2 winAscent+winDescent | the primary parity lever (T2.5) |
 | `table.rs` | `DEFAULT_CELL_MARGIN_PT` | 5.4 | 108 twips default cell side margin |
 | `flow.rs` | paragraph gap | `max(after_prev, before_next)` | Word collapse rule |
+| `flow.rs` | `MIN_TEXT_WINDOW_PT` | 36.0 | minimum useful middle/side wrap interval |
+| `flow.rs` | `PAGE_FLOAT_REFLOW_LIMIT` | 3 | deterministic page-float pagination fixpoint bound |
 
 ## Log
 
@@ -86,5 +88,22 @@ Per failing case:
   0.962378 / 0.972241 / 0.973315 / 0.971328 / 0.927610 / 0.934960 (minimum
   0.927610). This is a fixture-specific regression, not a pixel-identity claim;
   Word uses Calibri and the package uses Carlito.
+
+### 2026-07-14 — bounded page-float reflow and minimum text window
+
+- **Axis:** page-scoped anchored drawings and text-relative floating tables can
+  change line widths after their carrier's page is known.
+- **Constants:** reflow is capped at 3 rebuild/re-paginate passes; simultaneous
+  edge bands and side-wrapped floating tables require at least 36pt of text
+  width. Non-convergence fails closed. An over-wide floating table keeps the
+  previous block layout and emits `floating_table_block_fallback`.
+- **Evidence:** the focused pathological fixture moves its page-float carrier
+  through pages 0 → 2 → 1 → 0 and reaches the typed non-convergence guard after
+  3 passes. The dual 77pt corner fixture leaves a 296pt middle interval and
+  converts; the 230pt-per-side fixture leaves less than 36pt and fails closed.
+  A 430pt table plus 9.35pt clearance leaves about 28.65pt on the default 468pt
+  content box and takes the documented block fallback. All 15 pre-existing
+  manifested DOCX fidelity cases remain green; `complex` retains its frozen
+  0.927610 minimum SSIM and 6/6 page count.
 
 _Invariant going forward: a calibration commit gets a log entry here._

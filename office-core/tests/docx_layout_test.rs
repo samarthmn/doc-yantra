@@ -1,7 +1,13 @@
 //! DOCX layout + emission integration tests (agent task T3.9).
 
 use office_core::layout::{Item, LaidOutDocument, Page, WordDoc, layout_docx};
-use office_core::testkit::{minimal_docx, wrap_document, zip_package};
+use office_core::testkit::{
+    floating_table_side_wrap_docx, full_and_side_page_floats_docx, margin_top_left_float_docx,
+    minimal_docx, multicolumn_anchor_docx, non_convergent_page_float_docx,
+    opposite_page_floats_docx, overlapping_page_floats_docx, page_center_float_docx,
+    page_floats_without_text_window_docx, page_top_bottom_float_docx,
+    paragraph_column_top_bottom_float_docx, two_paragraph_floats_docx, wrap_document, zip_package,
+};
 use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
 
 fn opts() -> ConvertOptions {
@@ -49,6 +55,236 @@ fn text_rows(page: &Page) -> usize {
     ys.sort_unstable();
     ys.dedup();
     ys.len()
+}
+
+fn glyph_runs(page: &Page) -> Vec<(String, f64, f64, f64)> {
+    page.items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) => Some((
+                run.glyphs.iter().map(|glyph| glyph.ch).collect(),
+                positioned.x_pt,
+                positioned.y_pt,
+                run.glyphs.iter().map(|glyph| glyph.advance_pt).sum(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_anchor_rejection_parity(bytes: &[u8], detail: &str) {
+    let predicted = profile(bytes, OfficeFormat::Docx).expect("profile");
+    assert!(
+        predicted.reasons.iter().any(|reason| {
+            reason.code == UnsupportedCode::AnchoredDrawing && reason.detail == detail
+        }),
+        "missing {detail:?} in {:?}",
+        predicted.reasons
+    );
+    assert!(matches!(
+        convert(bytes, OfficeFormat::Docx, &opts()),
+        Err(office_core::OfficeError::Unsupported {
+            code: UnsupportedCode::AnchoredDrawing,
+            detail: actual,
+        }) if actual == detail
+    ));
+}
+
+#[test]
+fn margin_top_left_page_float_reflows_and_releases_body_text() {
+    let bytes = margin_top_left_float_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let page = &laid.pages[0];
+    let image = page
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("page float image");
+    assert!((image.y_pt - 72.0).abs() <= 0.15, "image_y={}", image.y_pt);
+    let runs = glyph_runs(page);
+    let first = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Wrapped body"))
+        .expect("first wrapped body run");
+    assert!(first.1 >= 72.0 + 77.0 + 9.0 - 0.15, "first={first:?}");
+    let below = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Below float band"))
+        .expect("below-band run");
+    assert!((below.1 - 72.0).abs() <= 0.15, "below={below:?}");
+}
+
+#[test]
+fn simultaneous_left_and_right_page_floats_leave_middle_window() {
+    let bytes = opposite_page_floats_docx();
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(predicted.supported, "reasons: {:?}", predicted.reasons);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let page = &laid.pages[0];
+    let images: Vec<_> = page
+        .items
+        .iter()
+        .filter(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .collect();
+    assert_eq!(images.len(), 2);
+    assert!(images.iter().any(|image| (image.x_pt - 72.0).abs() <= 0.15));
+    assert!(
+        images
+            .iter()
+            .any(|image| (image.x_pt - 463.0).abs() <= 0.15)
+    );
+    let middle = glyph_runs(page)
+        .into_iter()
+        .find(|(text, ..)| text.contains("Text in the middle"))
+        .expect("middle text");
+    assert!(middle.1 >= 158.0 - 0.15, "middle={middle:?}");
+    assert!(middle.1 + middle.3 <= 454.0 + 0.15, "middle={middle:?}");
+}
+
+#[test]
+fn overlapping_page_float_band_policies_fail_closed() {
+    assert_anchor_rejection_parity(
+        &overlapping_page_floats_docx(),
+        "overlapping anchored drawing exclusions",
+    );
+    assert_anchor_rejection_parity(
+        &full_and_side_page_floats_docx(),
+        "overlapping anchored drawing exclusions",
+    );
+    assert_anchor_rejection_parity(
+        &page_floats_without_text_window_docx(),
+        "anchored drawings leave no text window",
+    );
+}
+
+#[test]
+fn page_top_bottom_band_moves_intersecting_text_below_float() {
+    let bytes = page_top_bottom_float_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let page = &laid.pages[0];
+    let image = page
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("page float");
+    let body = glyph_runs(page)
+        .into_iter()
+        .find(|(text, ..)| text.contains("Body below"))
+        .expect("body text");
+    assert!(
+        body.2 >= image.y_pt + 72.0 + 9.0 - 0.15,
+        "image={image:?}, body={body:?}"
+    );
+}
+
+#[test]
+fn page_relative_center_alignment_resolves_against_page_box() {
+    let bytes = page_center_float_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let image = laid.pages[0]
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("centered page float");
+    assert!((image.x_pt - 296.0).abs() <= 0.15, "image_x={}", image.x_pt);
+    assert!((image.y_pt - 386.0).abs() <= 0.15, "image_y={}", image.y_pt);
+}
+
+#[test]
+fn column_paragraph_top_bottom_float_reserves_full_width_band() {
+    let bytes = paragraph_column_top_bottom_float_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let page = &laid.pages[0];
+    let image = page
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("paragraph float image");
+    assert!((image.x_pt - 224.1).abs() <= 0.2, "image_x={}", image.x_pt);
+    let below = glyph_runs(page)
+        .into_iter()
+        .find(|(text, ..)| text.contains("Text below"))
+        .expect("text below band");
+    assert!(
+        below.2 >= image.y_pt + 19.0 - 0.15,
+        "image={image:?}, below={below:?}"
+    );
+}
+
+#[test]
+fn two_paragraph_relative_floats_fail_profile_convert_parity() {
+    assert_anchor_rejection_parity(
+        &two_paragraph_floats_docx(),
+        "multiple paragraph-relative drawings in one paragraph",
+    );
+}
+
+#[test]
+fn anchor_in_multicolumn_section_fails_profile_convert_parity() {
+    assert_anchor_rejection_parity(
+        &multicolumn_anchor_docx(),
+        "anchored drawing in a multi-column section",
+    );
+}
+
+#[test]
+fn floating_table_wraps_side_text_then_releases_full_width() {
+    let bytes = floating_table_side_wrap_docx(2880);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let (laid, warnings) = layout_docx(&doc).expect("layout");
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.code != "floating_table_block_fallback"),
+        "warnings: {warnings:?}"
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let table = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Floating table"))
+        .expect("table text");
+    let beside = runs
+        .iter()
+        .find(|(text, ..)| text.contains("side wrapped"))
+        .expect("side-wrapped text");
+    assert!(beside.1 >= 72.0 + 144.0 + 9.35 - 0.15, "beside={beside:?}");
+    assert!(
+        beside.2 < table.2 + 40.0,
+        "table={table:?}, beside={beside:?}"
+    );
+    let below = runs
+        .iter()
+        .rev()
+        .find(|(text, ..)| text.contains("Below floating table"))
+        .expect("below-table text");
+    assert!((below.1 - 72.0).abs() <= 0.15, "below={below:?}");
+}
+
+#[test]
+fn overwide_floating_table_falls_back_with_stable_warning() {
+    let bytes = floating_table_side_wrap_docx(8600);
+    let output = convert(&bytes, OfficeFormat::Docx, &opts()).expect("fallback converts");
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| { warning.code == "floating_table_block_fallback" }),
+        "warnings: {:?}",
+        output.warnings
+    );
+}
+
+#[test]
+fn page_float_fixpoint_is_bounded_and_fails_typed_on_non_convergence() {
+    assert_anchor_rejection_parity(
+        &non_convergent_page_float_docx(),
+        "page-anchored drawing did not converge",
+    );
 }
 
 #[test]

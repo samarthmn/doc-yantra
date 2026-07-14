@@ -9,8 +9,8 @@ use super::assemble::WordDoc;
 use super::numbering_layout::{ListCounters, PlacedLabel, build_label};
 use super::page::PageGeometry;
 use super::paragraph::{
-    AnchoredLineItem, FieldContext, LineItem, ParaLayout, WrapExclusion, layout_paragraph,
-    layout_paragraph_with_wrap,
+    AnchoredLineItem, ExclusionBand, FieldContext, LineItem, PageFloat, ParaLayout, WrapExclusion,
+    layout_paragraph, layout_paragraph_with_wrap,
 };
 use super::table::layout_table;
 use super::{EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned};
@@ -25,6 +25,9 @@ use crate::profile::Warning;
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
 
+const MIN_TEXT_WINDOW_PT: f64 = 36.0;
+const PAGE_FLOAT_REFLOW_LIMIT: usize = 3;
+
 /// A single flow unit (one paragraph line or one table row).
 struct Unit {
     height: f64,
@@ -34,6 +37,7 @@ struct Unit {
     float_leading: f64,
     items: Vec<LineItem>,
     anchored_items: Vec<AnchoredLineItem>,
+    page_floats: Vec<PageFloat>,
     break_before: bool,
     column_break_before: bool,
     group: usize,
@@ -42,6 +46,8 @@ struct Unit {
     outline: Option<(String, u8)>,
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
     frame: Option<FramePlacement>,
+    block_index: usize,
+    floating_table: Option<FloatingTablePlacement>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +55,143 @@ struct FramePlacement {
     props: FrameProps,
     width_pt: f64,
     height_pt: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FloatingTablePlacement {
+    horizontal: AnchorOrigin,
+    vertical: AnchorOrigin,
+    x_pt: f64,
+    y_pt: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageBandSide {
+    Left,
+    Right,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedPageBand {
+    side: PageBandSide,
+    top_pt: f64,
+    bottom_pt: f64,
+    inset_pt: f64,
+    uses_text_baseline: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct FloatCarrier {
+    block_index: usize,
+    float_index: usize,
+}
+
+#[derive(Default)]
+struct PageBandSchedule {
+    block_placements: HashMap<usize, (usize, f64)>,
+    bands: HashMap<usize, Vec<ResolvedPageBand>>,
+}
+
+struct SectionPass {
+    units: Vec<Unit>,
+    pages: Vec<WorkPage>,
+    counters: ListCounters,
+    warnings: Vec<Warning>,
+}
+
+impl PageBandSchedule {
+    fn wrap_for_block(&self, block_index: usize, content_width: f64) -> Option<WrapExclusion> {
+        let (page_index, unit_top) = self.block_placements.get(&block_index).copied()?;
+        let mut left_band = None;
+        let mut right_band = None;
+        for band in self.bands.get(&page_index).into_iter().flatten() {
+            if band.bottom_pt <= unit_top + 0.01 {
+                continue;
+            }
+            let edge = ExclusionBand {
+                top_remaining_pt: (band.top_pt - unit_top).max(0.0),
+                remaining_pt: band.bottom_pt - unit_top,
+                inset_pt: if band.side == PageBandSide::Full {
+                    content_width
+                } else {
+                    band.inset_pt
+                },
+                uses_text_baseline: band.uses_text_baseline,
+            };
+            match band.side {
+                PageBandSide::Left | PageBandSide::Full => {
+                    if left_band.is_none() {
+                        left_band = Some(edge);
+                    }
+                }
+                PageBandSide::Right => {
+                    if right_band.is_none() {
+                        right_band = Some(edge);
+                    }
+                }
+            }
+        }
+        (left_band.is_some() || right_band.is_some()).then_some(WrapExclusion {
+            left_band,
+            right_band,
+        })
+    }
+}
+
+fn advance_wrap(wrap: WrapExclusion, distance: f64) -> Option<WrapExclusion> {
+    let advance = |band: Option<ExclusionBand>| {
+        band.and_then(|mut band| {
+            band.top_remaining_pt = (band.top_remaining_pt - distance).max(0.0);
+            band.remaining_pt -= distance;
+            (band.remaining_pt > 0.01).then_some(band)
+        })
+    };
+    let advanced = WrapExclusion {
+        left_band: advance(wrap.left_band),
+        right_band: advance(wrap.right_band),
+    };
+    (advanced.left_band.is_some() || advanced.right_band.is_some()).then_some(advanced)
+}
+
+fn combine_wraps(
+    active: Option<WrapExclusion>,
+    scheduled: Option<WrapExclusion>,
+) -> Result<Option<WrapExclusion>> {
+    match (active, scheduled) {
+        (None, other) | (other, None) => Ok(other),
+        (Some(active), Some(scheduled)) => {
+            let merge_edge = |active: Option<ExclusionBand>,
+                              scheduled: Option<ExclusionBand>|
+             -> Result<Option<ExclusionBand>> {
+                match (active, scheduled) {
+                    (None, other) | (other, None) => Ok(other),
+                    (Some(active), Some(scheduled))
+                        if (active.inset_pt - scheduled.inset_pt).abs() <= 0.01
+                            && active.uses_text_baseline == scheduled.uses_text_baseline =>
+                    {
+                        Ok(Some(scheduled))
+                    }
+                    (Some(_), Some(_)) => Err(OfficeError::unsupported(
+                        UnsupportedCode::AnchoredDrawing,
+                        "overlapping anchored drawing exclusions",
+                    )),
+                }
+            };
+            Ok(Some(WrapExclusion {
+                left_band: merge_edge(active.left_band, scheduled.left_band)?,
+                right_band: merge_edge(active.right_band, scheduled.right_band)?,
+            }))
+        }
+    }
+}
+
+fn wrap_remaining(wrap: WrapExclusion) -> f64 {
+    wrap.left_band
+        .into_iter()
+        .chain(wrap.right_band)
+        .map(|band| band.remaining_pt)
+        .fold(0.0, f64::max)
 }
 
 /// Lays out a resolved document into pages plus emitter resources.
@@ -102,23 +245,57 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         let geo = PageGeometry::from_section(section);
         let (column_widths, column_offsets) = section_columns(&geo, &section.cols);
         let layout_width = column_widths.iter().copied().fold(f64::INFINITY, f64::min);
-        let mut table_headers = HashMap::new();
-        let units = build_units(
+        if section.cols.is_multi() && blocks_contain_anchors(blocks) {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::AnchoredDrawing,
+                "anchored drawing in a multi-column section",
+            ));
+        }
+        let counter_start = counters.clone();
+        let mut pass = run_section_pass(
             doc,
-            &mut warnings,
             blocks,
-            doc.main_rels(),
-            layout_width,
-            &mut counters,
-            &mut table_headers,
-        )?;
-        let mut pages = paginate(
-            &units,
             &geo,
-            &table_headers,
+            layout_width,
             &column_widths,
             &column_offsets,
-        );
+            &counter_start,
+            None,
+        )?;
+        if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
+            let mut previous_carriers = float_carriers(&pass.pages);
+            let mut converged = false;
+            for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
+                let schedule = page_band_schedule(&pass.units, &pass.pages);
+                let next = run_section_pass(
+                    doc,
+                    blocks,
+                    &geo,
+                    layout_width,
+                    &column_widths,
+                    &column_offsets,
+                    &counter_start,
+                    Some(&schedule),
+                )?;
+                let next_carriers = float_carriers(&next.pages);
+                pass = next;
+                if next_carriers == previous_carriers {
+                    converged = true;
+                    break;
+                }
+                previous_carriers = next_carriers;
+            }
+            if !converged {
+                return Err(OfficeError::unsupported(
+                    UnsupportedCode::AnchoredDrawing,
+                    "page-anchored drawing did not converge",
+                ));
+            }
+        }
+        counters = pass.counters;
+        warnings.extend(pass.warnings);
+        let units = pass.units;
+        let mut pages = pass.pages;
         align_body_vertically(section.vertical_align, &geo, &units, &mut pages);
         place_footnotes(doc, &mut warnings, &geo, &mut pages)?;
         let next_page_number = pages_before + 1;
@@ -256,12 +433,50 @@ struct WorkPage {
     page: Page,
     underlays: Vec<(u32, Positioned)>,
     overlays: Vec<(u32, Positioned)>,
+    page_underlays: Vec<(u32, Positioned)>,
+    page_overlays: Vec<(u32, Positioned)>,
     /// The set of (unit index) placed, for outline mapping.
     unit_ys: Vec<(usize, f64)>,
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
+    float_bands: Vec<ResolvedPageBand>,
+    float_carriers: Vec<FloatCarrier>,
 }
 
 // --- Unit construction ------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_section_pass(
+    doc: &WordDoc,
+    blocks: &[BlockContent],
+    geo: &PageGeometry,
+    layout_width: f64,
+    column_widths: &[f64],
+    column_offsets: &[f64],
+    counter_start: &ListCounters,
+    schedule: Option<&PageBandSchedule>,
+) -> Result<SectionPass> {
+    let mut warnings = Vec::new();
+    let mut counters = counter_start.clone();
+    let mut table_headers = HashMap::new();
+    let units = build_units(
+        doc,
+        &mut warnings,
+        blocks,
+        doc.main_rels(),
+        layout_width,
+        &mut counters,
+        &mut table_headers,
+        schedule,
+    )?;
+    let pages = paginate(&units, geo, &table_headers, column_widths, column_offsets);
+    validate_page_bands(&pages, geo.content_width_pt())?;
+    Ok(SectionPass {
+        units,
+        pages,
+        counters,
+        warnings,
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 fn build_units(
@@ -272,6 +487,7 @@ fn build_units(
     content_w: f64,
     counters: &mut ListCounters,
     table_headers: &mut HashMap<usize, Vec<Unit>>,
+    page_schedule: Option<&PageBandSchedule>,
 ) -> Result<Vec<Unit>> {
     let mut units = Vec::new();
     let mut group_counter = 0usize;
@@ -285,8 +501,24 @@ fn build_units(
     let mut pending_break = false;
     let mut pending_column_break = false;
     let mut active_wrap: Option<WrapExclusion> = None;
+    let mut previous_scheduled_page = None;
 
-    for block in blocks {
+    for (block_index, block) in blocks.iter().enumerate() {
+        let scheduled_page = page_schedule.and_then(|schedule| {
+            schedule
+                .block_placements
+                .get(&block_index)
+                .map(|(page, _)| *page)
+        });
+        if previous_scheduled_page.is_some()
+            && scheduled_page.is_some()
+            && previous_scheduled_page != scheduled_page
+        {
+            active_wrap = None;
+        }
+        if scheduled_page.is_some() {
+            previous_scheduled_page = scheduled_page;
+        }
         match block {
             BlockContent::Paragraph(p) => {
                 let label = counter_label(doc, warnings, p, counters)?;
@@ -301,13 +533,14 @@ fn build_units(
                     .max(1.0);
                 if pending_break || pending_column_break || effective_para.page_break_before {
                     active_wrap = None;
-                } else if let Some(mut wrap) = active_wrap {
+                } else if let Some(wrap) = active_wrap {
                     let gap =
                         prev_after.max(effective_para.spacing.before_pt.unwrap_or(0.0).max(0.0));
-                    wrap.top_remaining_pt = (wrap.top_remaining_pt - gap).max(0.0);
-                    wrap.remaining_pt -= gap;
-                    active_wrap = (wrap.remaining_pt > 0.01).then_some(wrap);
+                    active_wrap = advance_wrap(wrap, gap);
                 }
+                let scheduled_wrap = page_schedule
+                    .and_then(|schedule| schedule.wrap_for_block(block_index, frame_width));
+                let paragraph_wrap = combine_wraps(active_wrap, scheduled_wrap)?;
                 let layout = layout_paragraph_with_wrap(
                     doc,
                     warnings,
@@ -316,7 +549,7 @@ fn build_units(
                     frame_width,
                     label,
                     None,
-                    active_wrap,
+                    paragraph_wrap,
                 )?;
                 active_wrap = layout.wrap_after;
                 if let Some(frame) = frame {
@@ -330,6 +563,7 @@ fn build_units(
                         &mut prev_after,
                         &mut pending_break,
                         &mut pending_column_break,
+                        block_index,
                     )?;
                 } else {
                     push_paragraph_units(
@@ -340,41 +574,94 @@ fn build_units(
                         &mut prev_after,
                         &mut pending_break,
                         &mut pending_column_break,
+                        block_index,
                     );
                 }
             }
             BlockContent::Table(t) => {
+                let scheduled_wrap = page_schedule
+                    .and_then(|schedule| schedule.wrap_for_block(block_index, content_w));
+                active_wrap = combine_wraps(active_wrap, scheduled_wrap)?;
                 // A table cannot occupy the single text interval beside an
                 // active float. Clear it below the exclusion before laying out
                 // the table, matching Word's block-flow behavior.
                 let table_clearance = active_wrap
                     .take()
-                    .map(|wrap| wrap.remaining_pt.max(0.0))
+                    .map(|wrap| wrap_remaining(wrap).max(0.0))
                     .unwrap_or(0.0);
                 let table_gap = prev_after.max(table_clearance);
                 let table_id = table_counter;
                 table_counter += 1;
                 keep_next_group = None;
-                let rows = layout_table(doc, warnings, t, rels, content_w, 0.0, counters)?;
+                let table_layout = layout_table(doc, warnings, t, rels, content_w, 0.0, counters)?;
                 if let Some(floating) = t.props.floating {
                     let mut items = Vec::new();
-                    let mut row_y = floating.y_pt;
-                    for row in rows {
+                    let mut row_y = 0.0;
+                    for row in table_layout.rows {
                         for item in row.items {
                             items.push(LineItem {
-                                x_pt: floating.x_pt + item.x_pt,
+                                x_pt: item.x_pt,
                                 y_pt: row_y + item.y_pt,
                                 item: item.item,
                             });
                         }
                         row_y += row.height_pt;
                     }
+                    let [_, dist_bottom, dist_left, dist_right] = floating.distances_pt;
+                    let left_hugging = floating.x_pt <= 0.01;
+                    let right_hugging = floating.x_pt + table_layout.width_pt >= content_w - 0.01;
+                    let (side_wrap, text_window) = if left_hugging {
+                        (
+                            Some(WrapExclusion {
+                                left_band: Some(ExclusionBand {
+                                    top_remaining_pt: floating.y_pt.max(0.0),
+                                    remaining_pt: floating.y_pt + row_y + dist_bottom,
+                                    inset_pt: floating.x_pt + table_layout.width_pt + dist_right,
+                                    uses_text_baseline: false,
+                                }),
+                                right_band: None,
+                            }),
+                            content_w - floating.x_pt - table_layout.width_pt - dist_right,
+                        )
+                    } else if right_hugging {
+                        (
+                            Some(WrapExclusion {
+                                left_band: None,
+                                right_band: Some(ExclusionBand {
+                                    top_remaining_pt: floating.y_pt.max(0.0),
+                                    remaining_pt: floating.y_pt + row_y + dist_bottom,
+                                    inset_pt: content_w - floating.x_pt + dist_left,
+                                    uses_text_baseline: false,
+                                }),
+                            }),
+                            floating.x_pt - dist_left,
+                        )
+                    } else {
+                        (None, 0.0)
+                    };
+                    let wraps_text = floating.vertical == AnchorOrigin::Paragraph
+                        && side_wrap.is_some()
+                        && text_window >= MIN_TEXT_WINDOW_PT;
+                    if floating.vertical == AnchorOrigin::Paragraph
+                        && side_wrap.is_some()
+                        && text_window < MIN_TEXT_WINDOW_PT
+                    {
+                        warnings.push(Warning::new(
+                            "floating_table_block_fallback",
+                            "floating table leaves less than 36pt for side-wrapped text",
+                        ));
+                    }
                     units.push(Unit {
-                        height: row_y + floating.wrap_padding_pt,
+                        height: if wraps_text {
+                            0.0
+                        } else {
+                            floating.y_pt.max(0.0) + row_y + dist_bottom
+                        },
                         gap_before: table_gap,
                         float_leading: 0.0,
                         items,
                         anchored_items: Vec::new(),
+                        page_floats: Vec::new(),
                         break_before: std::mem::take(&mut pending_break),
                         column_break_before: std::mem::take(&mut pending_column_break),
                         group: next_group(),
@@ -383,19 +670,28 @@ fn build_units(
                         outline: None,
                         note_refs: Vec::new(),
                         frame: None,
+                        block_index,
+                        floating_table: Some(FloatingTablePlacement {
+                            horizontal: floating.horizontal,
+                            vertical: floating.vertical,
+                            x_pt: floating.x_pt,
+                            y_pt: floating.y_pt,
+                        }),
                     });
+                    active_wrap = if wraps_text { side_wrap } else { None };
                     prev_after = 0.0;
                     continue;
                 }
                 let mut headers = Vec::new();
                 let mut first_row = true;
-                for row in rows {
+                for row in table_layout.rows {
                     let unit = Unit {
                         height: row.height_pt,
                         gap_before: if first_row { table_gap } else { 0.0 },
                         float_leading: 0.0,
                         items: row.items,
                         anchored_items: Vec::new(),
+                        page_floats: Vec::new(),
                         break_before: first_row && std::mem::take(&mut pending_break),
                         column_break_before: first_row && std::mem::take(&mut pending_column_break),
                         group: next_group(),
@@ -404,6 +700,8 @@ fn build_units(
                         outline: None,
                         note_refs: Vec::new(),
                         frame: None,
+                        block_index,
+                        floating_table: None,
                     };
                     if row.is_header {
                         headers.push(clone_unit(&unit));
@@ -461,6 +759,7 @@ fn clone_unit(u: &Unit) -> Unit {
             .iter()
             .map(clone_anchored_line_item)
             .collect(),
+        page_floats: u.page_floats.iter().map(clone_page_float).collect(),
         break_before: u.break_before,
         column_break_before: u.column_break_before,
         group: u.group,
@@ -469,6 +768,8 @@ fn clone_unit(u: &Unit) -> Unit {
         outline: u.outline.clone(),
         note_refs: u.note_refs.clone(),
         frame: u.frame,
+        block_index: u.block_index,
+        floating_table: u.floating_table,
     }
 }
 
@@ -490,6 +791,25 @@ fn clone_anchored_line_item(item: &AnchoredLineItem) -> AnchoredLineItem {
     }
 }
 
+fn clone_page_float(float: &PageFloat) -> PageFloat {
+    PageFloat {
+        items: float.items.iter().map(clone_line_item).collect(),
+        w_pt: float.w_pt,
+        h_pt: float.h_pt,
+        x_origin: float.x_origin,
+        x_pt: float.x_pt,
+        x_align: float.x_align,
+        y_origin: float.y_origin,
+        y_pt: float.y_pt,
+        y_align: float.y_align,
+        wrap: float.wrap,
+        distances_pt: float.distances_pt,
+        behind_doc: float.behind_doc,
+        relative_height: float.relative_height,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_paragraph_units(
     layout: ParaLayout,
     units: &mut Vec<Unit>,
@@ -498,6 +818,7 @@ fn push_paragraph_units(
     prev_after: &mut f64,
     pending_break: &mut bool,
     pending_column_break: &mut bool,
+    block_index: usize,
 ) {
     let l = layout.lines.len();
     let mut ids = paragraph_group_ids(&layout, l, next_group);
@@ -514,6 +835,7 @@ fn push_paragraph_units(
     let mut brk = *pending_break;
     let mut column_brk = *pending_column_break;
     let note_refs = layout.note_refs.clone();
+    let mut page_floats = Some(layout.page_floats);
 
     for (i, line) in layout.lines.into_iter().enumerate() {
         let group = ids[i];
@@ -530,6 +852,11 @@ fn push_paragraph_units(
             float_leading: if i == 0 { layout.float_leading_pt } else { 0.0 },
             items: line.items,
             anchored_items: line.anchored_items,
+            page_floats: if i == 0 {
+                page_floats.take().unwrap_or_default()
+            } else {
+                Vec::new()
+            },
             break_before,
             column_break_before,
             group,
@@ -542,6 +869,8 @@ fn push_paragraph_units(
                 Vec::new()
             },
             frame: None,
+            block_index,
+            floating_table: None,
         });
     }
     *pending_break = brk;
@@ -565,11 +894,13 @@ fn push_frame_unit(
     prev_after: &mut f64,
     pending_break: &mut bool,
     pending_column_break: &mut bool,
+    block_index: usize,
 ) -> Result<()> {
-    if layout
-        .lines
-        .iter()
-        .any(|line| !line.anchored_items.is_empty())
+    if !layout.page_floats.is_empty()
+        || layout
+            .lines
+            .iter()
+            .any(|line| !line.anchored_items.is_empty())
     {
         return Err(OfficeError::unsupported(
             UnsupportedCode::AnchoredDrawing,
@@ -667,6 +998,7 @@ fn push_frame_unit(
         float_leading: layout.float_leading_pt,
         items,
         anchored_items: Vec::new(),
+        page_floats: Vec::new(),
         break_before: std::mem::take(pending_break) || layout.page_break_before,
         column_break_before: std::mem::take(pending_column_break),
         group,
@@ -681,6 +1013,8 @@ fn push_frame_unit(
             width_pt,
             height_pt,
         }),
+        block_index,
+        floating_table: None,
     });
     *prev_after = layout.space_after_pt;
     *keep_next_group = layout.keep_next.then_some(group);
@@ -835,6 +1169,77 @@ fn paginate(
     pages
 }
 
+fn float_carriers(pages: &[WorkPage]) -> Vec<(FloatCarrier, usize)> {
+    let mut carriers = pages
+        .iter()
+        .enumerate()
+        .flat_map(|(page_index, page)| {
+            page.float_carriers
+                .iter()
+                .copied()
+                .map(move |carrier| (carrier, page_index))
+        })
+        .collect::<Vec<_>>();
+    carriers.sort_unstable();
+    carriers
+}
+
+fn page_band_schedule(units: &[Unit], pages: &[WorkPage]) -> PageBandSchedule {
+    let mut schedule = PageBandSchedule::default();
+    for (page_index, page) in pages.iter().enumerate() {
+        schedule.bands.insert(page_index, page.float_bands.clone());
+        for (unit_index, unit_top) in &page.unit_ys {
+            if let Some(unit) = units.get(*unit_index) {
+                schedule
+                    .block_placements
+                    .entry(unit.block_index)
+                    .or_insert((page_index, *unit_top));
+            }
+        }
+    }
+    schedule
+}
+
+fn validate_page_bands(pages: &[WorkPage], content_width: f64) -> Result<()> {
+    for page in pages {
+        for band in &page.float_bands {
+            if band.side != PageBandSide::Full
+                && content_width - band.inset_pt < MIN_TEXT_WINDOW_PT - 0.01
+            {
+                return Err(OfficeError::unsupported(
+                    UnsupportedCode::AnchoredDrawing,
+                    "anchored drawings leave no text window",
+                ));
+            }
+        }
+        for (index, left) in page.float_bands.iter().enumerate() {
+            for right in &page.float_bands[index + 1..] {
+                if left.top_pt >= right.bottom_pt - 0.01 || right.top_pt >= left.bottom_pt - 0.01 {
+                    continue;
+                }
+                let opposite = matches!(
+                    (left.side, right.side),
+                    (PageBandSide::Left, PageBandSide::Right)
+                        | (PageBandSide::Right, PageBandSide::Left)
+                );
+                if !opposite {
+                    return Err(OfficeError::unsupported(
+                        UnsupportedCode::AnchoredDrawing,
+                        "overlapping anchored drawing exclusions",
+                    ));
+                }
+                if content_width - left.inset_pt - right.inset_pt < MIN_TEXT_WINDOW_PT - 0.01 {
+                    return Err(OfficeError::unsupported(
+                        UnsupportedCode::AnchoredDrawing,
+                        "anchored drawings leave no text window",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Groups consecutive units sharing a group id into atomic runs.
 fn coalesce_runs(units: &[Unit]) -> Vec<Vec<usize>> {
     let mut runs: Vec<Vec<usize>> = Vec::new();
@@ -862,10 +1267,13 @@ fn place_unit(
 ) {
     *y += effective_gap_before(unit, *y, geo.content_top_pt);
     let unit_top = *y;
-    let (frame_x, frame_y) = unit
-        .frame
-        .map(|frame| frame_origin(frame, geo, column_offset, unit_top))
-        .unwrap_or((geo.content_left_pt + column_offset, unit_top));
+    let (frame_x, frame_y) = if let Some(floating) = unit.floating_table {
+        floating_table_origin(floating, geo, column_offset, unit_top)
+    } else {
+        unit.frame
+            .map(|frame| frame_origin(frame, geo, column_offset, unit_top))
+            .unwrap_or((geo.content_left_pt + column_offset, unit_top))
+    };
     for li in &unit.items {
         page.page.items.push(Positioned {
             x_pt: frame_x + li.x_pt,
@@ -885,6 +1293,16 @@ fn place_unit(
             page.overlays.push((item.relative_height, anchored));
         }
     }
+    for (float_index, page_float) in unit.page_floats.iter().enumerate() {
+        place_page_float(
+            page,
+            geo,
+            column_offset,
+            unit.block_index,
+            float_index,
+            page_float,
+        );
+    }
     if index != usize::MAX {
         page.unit_ys.push((index, unit_top));
     }
@@ -894,6 +1312,108 @@ fn place_unit(
         }
     }
     *y += unit.height;
+}
+
+fn place_page_float(
+    page: &mut WorkPage,
+    geo: &PageGeometry,
+    column_offset: f64,
+    block_index: usize,
+    float_index: usize,
+    page_float: &PageFloat,
+) {
+    let (anchor_x, anchor_width) = match page_float.x_origin {
+        AnchorOrigin::Page => (0.0, geo.width_pt),
+        AnchorOrigin::Margin => (geo.content_left_pt, geo.content_width_pt()),
+        AnchorOrigin::Paragraph => (
+            geo.content_left_pt + column_offset,
+            geo.content_width_pt() - column_offset,
+        ),
+    };
+    let x = page_float
+        .x_align
+        .map_or(anchor_x + page_float.x_pt, |align| {
+            anchor_x
+                + match align {
+                    FrameAlign::Start => 0.0,
+                    FrameAlign::Center => (anchor_width - page_float.w_pt).max(0.0) / 2.0,
+                    FrameAlign::End => (anchor_width - page_float.w_pt).max(0.0),
+                }
+        });
+    let (anchor_y, anchor_height) = match page_float.y_origin {
+        AnchorOrigin::Page => (0.0, geo.height_pt),
+        AnchorOrigin::Margin => (geo.content_top_pt, geo.content_height_pt()),
+        AnchorOrigin::Paragraph => (geo.content_top_pt, geo.content_height_pt()),
+    };
+    let y = page_float
+        .y_align
+        .map_or(anchor_y + page_float.y_pt, |align| {
+            anchor_y
+                + match align {
+                    FrameAlign::Start => 0.0,
+                    FrameAlign::Center => (anchor_height - page_float.h_pt).max(0.0) / 2.0,
+                    FrameAlign::End => (anchor_height - page_float.h_pt).max(0.0),
+                }
+        });
+    for item in &page_float.items {
+        let positioned = Positioned {
+            x_pt: x + item.x_pt,
+            y_pt: y + item.y_pt,
+            item: item.item.clone(),
+        };
+        if page_float.behind_doc {
+            page.page_underlays
+                .push((page_float.relative_height, positioned));
+        } else {
+            page.page_overlays
+                .push((page_float.relative_height, positioned));
+        }
+    }
+    page.float_carriers.push(FloatCarrier {
+        block_index,
+        float_index,
+    });
+    let [dist_top, dist_bottom, dist_left, dist_right] = page_float.distances_pt;
+    let top_pt = y - dist_top;
+    let bottom_pt = y + page_float.h_pt + dist_bottom;
+    let expanded_left = x - dist_left;
+    let expanded_right = x + page_float.w_pt + dist_right;
+    let band = match page_float.wrap {
+        WrapMode::None => None,
+        WrapMode::TopAndBottom => Some(ResolvedPageBand {
+            side: PageBandSide::Full,
+            top_pt,
+            bottom_pt,
+            inset_pt: geo.content_width_pt(),
+            uses_text_baseline: false,
+        }),
+        WrapMode::Square | WrapMode::Tight => {
+            let left_room = (expanded_left - geo.content_left_pt).max(0.0);
+            let right_room = (geo.content_right_pt - expanded_right).max(0.0);
+            let (side, inset_pt) =
+                if expanded_left <= geo.content_left_pt + 0.01 || right_room >= left_room {
+                    (
+                        PageBandSide::Left,
+                        (expanded_right - geo.content_left_pt).max(0.0),
+                    )
+                } else {
+                    (
+                        PageBandSide::Right,
+                        (geo.content_right_pt - expanded_left).max(0.0),
+                    )
+                };
+            Some(ResolvedPageBand {
+                side,
+                top_pt,
+                bottom_pt,
+                inset_pt,
+                uses_text_baseline: page_float.wrap == WrapMode::Tight,
+            })
+        }
+    };
+    if let Some(band) = band {
+        page.float_bands.push(band);
+    }
 }
 
 fn effective_gap_before(unit: &Unit, y: f64, content_top: f64) -> f64 {
@@ -942,6 +1462,25 @@ fn frame_origin(
     (x, y)
 }
 
+fn floating_table_origin(
+    table: FloatingTablePlacement,
+    geo: &PageGeometry,
+    column_offset: f64,
+    unit_top: f64,
+) -> (f64, f64) {
+    let x = match table.horizontal {
+        AnchorOrigin::Page => 0.0,
+        AnchorOrigin::Margin => geo.content_left_pt,
+        AnchorOrigin::Paragraph => geo.content_left_pt + column_offset,
+    } + table.x_pt;
+    let y = match table.vertical {
+        AnchorOrigin::Page => 0.0,
+        AnchorOrigin::Margin => geo.content_top_pt,
+        AnchorOrigin::Paragraph => unit_top,
+    } + table.y_pt;
+    (x, y)
+}
+
 fn new_page(geo: &PageGeometry) -> WorkPage {
     WorkPage {
         page: Page {
@@ -951,16 +1490,26 @@ fn new_page(geo: &PageGeometry) -> WorkPage {
         },
         underlays: Vec::new(),
         overlays: Vec::new(),
+        page_underlays: Vec::new(),
+        page_overlays: Vec::new(),
         unit_ys: Vec::new(),
         note_refs: Vec::new(),
+        float_bands: Vec::new(),
+        float_carriers: Vec::new(),
     }
 }
 
 fn work_page_is_empty(page: &WorkPage) -> bool {
-    page.page.items.is_empty() && page.underlays.is_empty() && page.overlays.is_empty()
+    page.page.items.is_empty()
+        && page.underlays.is_empty()
+        && page.overlays.is_empty()
+        && page.page_underlays.is_empty()
+        && page.page_overlays.is_empty()
 }
 
 fn finish_work_page(mut work: WorkPage) -> Page {
+    work.underlays.append(&mut work.page_underlays);
+    work.overlays.append(&mut work.page_overlays);
     work.underlays.sort_by_key(|(height, _)| *height);
     work.overlays.sort_by_key(|(height, _)| *height);
     let mut items =
@@ -1027,6 +1576,7 @@ fn place_footnotes(
                 geo.content_width_pt(),
                 &mut counters,
                 &mut table_headers,
+                None,
             )?);
         }
 
@@ -1109,6 +1659,7 @@ fn append_endnotes(
             geo.content_width_pt(),
             &mut counters,
             &mut table_headers,
+            None,
         )?);
     }
     let mut page = new_page(geo);
@@ -1287,10 +1838,11 @@ fn place_hf(
             BlockContent::Paragraph(p) => {
                 let layout =
                     layout_paragraph(doc, warnings, p, rels, content_w, None, Some(ctx.clone()))?;
-                if layout
-                    .lines
-                    .iter()
-                    .any(|line| !line.anchored_items.is_empty())
+                if !layout.page_floats.is_empty()
+                    || layout
+                        .lines
+                        .iter()
+                        .any(|line| !line.anchored_items.is_empty())
                 {
                     return Err(OfficeError::unsupported(
                         UnsupportedCode::AnchoredDrawing,
@@ -1307,7 +1859,8 @@ fn place_hf(
                 block_y += layout.space_after_pt;
             }
             BlockContent::Table(table) => {
-                for row in layout_table(doc, warnings, table, rels, content_w, 0.0, &mut counters)?
+                for row in
+                    layout_table(doc, warnings, table, rels, content_w, 0.0, &mut counters)?.rows
                 {
                     for item in row.items {
                         placed.push((block_y + item.y_pt, item));

@@ -33,7 +33,7 @@ pub struct PlacedLabel {
 
 /// Stateful list counters. `advance` increments the referenced level and resets
 /// deeper levels (Word restart semantics).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ListCounters {
     counters: HashMap<(i64, u32), i64>,
 }

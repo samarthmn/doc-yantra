@@ -12,9 +12,9 @@ use crate::fonts::metrics::FaceMetrics;
 use crate::fonts::{FaceId, FontDb, matching};
 use crate::oxml::numbering::LabelJustification;
 use crate::oxml::wml::{
-    AnchorProps, BreakKind, Field, InlineContent, Jc, LineSpacing, NoteKind, Paragraph, Run,
-    RunColor, RunContent, RunProps, TabAlign, TabLeader, TabStop, TextBox, UnderlineKind,
-    VertAlign, VmlShape, WrapMode,
+    AnchorOrigin, AnchorProps, BreakKind, Field, FrameAlign, InlineContent, Jc, LineSpacing,
+    NoteKind, Paragraph, Run, RunColor, RunContent, RunProps, TabAlign, TabLeader, TabStop,
+    TextBox, UnderlineKind, VertAlign, VmlShape, WrapMode,
 };
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
@@ -72,34 +72,46 @@ pub struct ParaLayout {
     pub(crate) wrap_after: Option<WrapExclusion>,
     /// Word float-line clearance added before this paragraph's first line.
     pub(crate) float_leading_pt: f64,
+    /// Page-scoped floats carried by this paragraph's first flow unit.
+    pub(crate) page_floats: Vec<PageFloat>,
 }
 
-/// A single edge-aligned rectangular exclusion carried across paragraphs.
+/// One edge of a rectangular exclusion carried across paragraphs.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WrapExclusion {
+pub(crate) struct ExclusionBand {
     /// Remaining distance to the top of the exclusion.
     pub top_remaining_pt: f64,
     /// Remaining vertical extent from the next paragraph's content top.
     pub remaining_pt: f64,
-    /// Width unavailable at the left edge.
-    pub left_inset_pt: f64,
-    /// Width unavailable at the right edge.
-    pub right_inset_pt: f64,
+    /// Width unavailable from this content edge.
+    pub inset_pt: f64,
     /// Tight wrapping follows the text baseline through its polygon, while
     /// square wrapping excludes the complete line box.
     pub uses_text_baseline: bool,
 }
 
+/// Edge-aligned rectangular exclusions; both edges may be active together.
 #[derive(Debug, Clone, Copy)]
-struct WrapBand {
+pub(crate) struct WrapExclusion {
+    pub(crate) left_band: Option<ExclusionBand>,
+    pub(crate) right_band: Option<ExclusionBand>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeWrapBand {
     top_pt: f64,
     bottom_pt: f64,
-    left_inset_pt: f64,
-    right_inset_pt: f64,
+    inset_pt: f64,
     uses_text_baseline: bool,
 }
 
-impl WrapBand {
+#[derive(Debug, Clone, Copy, Default)]
+struct WrapBand {
+    left: Option<EdgeWrapBand>,
+    right: Option<EdgeWrapBand>,
+}
+
+impl EdgeWrapBand {
     fn applies_to_line(
         self,
         line_index: usize,
@@ -157,6 +169,24 @@ pub(crate) struct AnchoredLineItem {
     pub(crate) behind_doc: bool,
     pub(crate) relative_height: u32,
     pub(crate) item: Item,
+}
+
+/// A margin/page-relative float whose placement is resolved during pagination.
+#[derive(Debug)]
+pub(crate) struct PageFloat {
+    pub(crate) items: Vec<LineItem>,
+    pub(crate) w_pt: f64,
+    pub(crate) h_pt: f64,
+    pub(crate) x_origin: AnchorOrigin,
+    pub(crate) x_pt: f64,
+    pub(crate) x_align: Option<FrameAlign>,
+    pub(crate) y_origin: AnchorOrigin,
+    pub(crate) y_pt: f64,
+    pub(crate) y_align: Option<FrameAlign>,
+    pub(crate) wrap: WrapMode,
+    pub(crate) distances_pt: [f64; 4],
+    pub(crate) behind_doc: bool,
+    pub(crate) relative_height: u32,
 }
 
 /// Shared per-run style. Glyphs from one run share an `Rc` so coalescing is a
@@ -358,26 +388,88 @@ pub(crate) fn layout_paragraph_with_wrap(
                 h_pt,
                 anchor: Some(anchor),
                 ..
-            } => Some((*w_pt, *h_pt, *anchor)),
+            } if anchor.relative_from_v == AnchorOrigin::Paragraph => Some((*w_pt, *h_pt, *anchor)),
             _ => None,
         })
         .collect();
     if anchored.len() > 1 {
         return Err(OfficeError::unsupported(
             UnsupportedCode::AnchoredDrawing,
-            "multiple anchored drawings in one paragraph",
+            "multiple paragraph-relative drawings in one paragraph",
         ));
     }
 
+    let page_floats = atoms
+        .iter()
+        .filter_map(|atom| match atom {
+            Atom::Composite {
+                w_pt,
+                h_pt,
+                items,
+                anchor: Some(anchor),
+                ..
+            } if anchor.relative_from_v != AnchorOrigin::Paragraph => Some(PageFloat {
+                items: items
+                    .iter()
+                    .map(|item| LineItem {
+                        x_pt: item.x_pt,
+                        y_pt: item.y_pt,
+                        item: item.item.clone(),
+                    })
+                    .collect(),
+                w_pt: *w_pt,
+                h_pt: *h_pt,
+                x_origin: anchor.relative_from_h,
+                x_pt: anchor.x_pt,
+                x_align: anchor.x_align,
+                y_origin: anchor.relative_from_v,
+                y_pt: anchor.y_pt,
+                y_align: anchor.y_align,
+                wrap: anchor.wrap,
+                distances_pt: anchor.distances_pt,
+                behind_doc: anchor.behind_doc,
+                relative_height: anchor.relative_height,
+            }),
+            _ => None,
+        })
+        .collect();
+
     let mut wrap_band = incoming_wrap
-        .filter(|wrap| wrap.remaining_pt > 0.01)
         .map(|wrap| WrapBand {
-            top_pt: wrap.top_remaining_pt.max(0.0),
-            bottom_pt: wrap.remaining_pt,
-            left_inset_pt: wrap.left_inset_pt,
-            right_inset_pt: wrap.right_inset_pt,
-            uses_text_baseline: wrap.uses_text_baseline,
-        });
+            left: wrap
+                .left_band
+                .filter(|band| band.remaining_pt > 0.01)
+                .map(|band| EdgeWrapBand {
+                    top_pt: band.top_remaining_pt.max(0.0),
+                    bottom_pt: band.remaining_pt,
+                    inset_pt: band.inset_pt,
+                    uses_text_baseline: band.uses_text_baseline,
+                }),
+            right: wrap
+                .right_band
+                .filter(|band| band.remaining_pt > 0.01)
+                .map(|band| EdgeWrapBand {
+                    top_pt: band.top_remaining_pt.max(0.0),
+                    bottom_pt: band.remaining_pt,
+                    inset_pt: band.inset_pt,
+                    uses_text_baseline: band.uses_text_baseline,
+                }),
+        })
+        .filter(|wrap| wrap.left.is_some() || wrap.right.is_some());
+    let mut full_width_band = wrap_band.as_mut().and_then(|band| {
+        if band.right.is_none()
+            && band
+                .left
+                .is_some_and(|left| left.inset_pt >= avail_width_pt - 0.01)
+        {
+            band.left.take()
+        } else {
+            None
+        }
+    });
+    if wrap_band.is_some_and(|band| band.left.is_none() && band.right.is_none()) {
+        wrap_band = None;
+    }
     let mut top_bottom_reserve = None;
     let mut float_leading_pt = 0.0;
     if let Some((w_pt, h_pt, anchor)) = anchored.first().copied() {
@@ -414,16 +506,26 @@ pub(crate) fn layout_paragraph_with_wrap(
                     } else {
                         0.0
                     };
-                wrap_band = Some(WrapBand {
+                let edge = EdgeWrapBand {
                     top_pt: (anchor_y_for_wrap - dist_top).max(0.0),
                     bottom_pt: (anchor_y_for_wrap + h_pt + dist_bottom).max(0.0),
-                    left_inset_pt: if use_right_interval { right_start } else { 0.0 },
-                    right_inset_pt: if use_right_interval {
-                        0.0
+                    inset_pt: if use_right_interval {
+                        right_start
                     } else {
                         (avail_width_pt - left_available).max(0.0)
                     },
                     uses_text_baseline: anchor.wrap == WrapMode::Tight,
+                };
+                wrap_band = Some(if use_right_interval {
+                    WrapBand {
+                        left: Some(edge),
+                        right: None,
+                    }
+                } else {
+                    WrapBand {
+                        left: None,
+                        right: Some(edge),
+                    }
                 });
             }
             WrapMode::TopAndBottom => {
@@ -434,13 +536,20 @@ pub(crate) fn layout_paragraph_with_wrap(
     }
 
     let constrained_width = |line_index: usize, base_width: f64, base_x: f64| {
-        let Some(band) = wrap_band.filter(|band| {
-            band.applies_to_line(line_index, nominal_line_height, nominal_baseline_offset)
-        }) else {
-            return (base_width, base_x);
-        };
-        let left_shift = (band.left_inset_pt - base_x).max(0.0);
-        let right_cut = (band.right_inset_pt - right).max(0.0);
+        let left_inset = wrap_band
+            .and_then(|band| band.left)
+            .filter(|band| {
+                band.applies_to_line(line_index, nominal_line_height, nominal_baseline_offset)
+            })
+            .map_or(0.0, |band| band.inset_pt);
+        let right_inset = wrap_band
+            .and_then(|band| band.right)
+            .filter(|band| {
+                band.applies_to_line(line_index, nominal_line_height, nominal_baseline_offset)
+            })
+            .map_or(0.0, |band| band.inset_pt);
+        let left_shift = (left_inset - base_x).max(0.0);
+        let right_cut = (right_inset - right).max(0.0);
         (
             (base_width - left_shift - right_cut).max(1.0),
             base_x + left_shift,
@@ -503,6 +612,36 @@ pub(crate) fn layout_paragraph_with_wrap(
             page_break_after: false,
             column_break_after: false,
         });
+    }
+
+    let mut full_width_after = None;
+    if let Some(band) = full_width_band.take() {
+        let occupied_before: f64 = lines.iter().map(|line| line.height_pt).sum();
+        if occupied_before <= band.top_pt + 0.01 {
+            full_width_after = Some(ExclusionBand {
+                top_remaining_pt: (band.top_pt - occupied_before).max(0.0),
+                remaining_pt: band.bottom_pt - occupied_before,
+                inset_pt: band.inset_pt,
+                uses_text_baseline: false,
+            });
+        } else if band.top_pt <= 0.01 {
+            float_leading_pt = float_leading_pt.max(band.bottom_pt.max(0.0));
+        } else {
+            let mut before = 0.0;
+            let mut lines_before = 0usize;
+            for line in &lines {
+                if before + line.height_pt > band.top_pt + 0.01 {
+                    break;
+                }
+                before += line.height_pt;
+                lines_before += 1;
+            }
+            if lines_before == 0 {
+                float_leading_pt = float_leading_pt.max(band.bottom_pt.max(0.0));
+            } else if let Some(previous) = lines.get_mut(lines_before - 1) {
+                previous.height_pt += (band.bottom_pt - before).max(0.0);
+            }
+        }
     }
 
     if let Some(reserve_bottom) = top_bottom_reserve {
@@ -569,17 +708,31 @@ pub(crate) fn layout_paragraph_with_wrap(
     }
 
     let occupied_height: f64 = lines.iter().map(|line| line.height_pt).sum();
-    let wrap_after = wrap_band.and_then(|band| {
-        let top_remaining_pt = (band.top_pt - occupied_height).max(0.0);
-        let remaining_pt = band.bottom_pt - occupied_height;
-        (remaining_pt > 0.01).then_some(WrapExclusion {
-            top_remaining_pt,
-            remaining_pt,
-            left_inset_pt: band.left_inset_pt,
-            right_inset_pt: band.right_inset_pt,
-            uses_text_baseline: band.uses_text_baseline,
+    let wrap_after = wrap_band
+        .and_then(|band| {
+            let carry = |edge: Option<EdgeWrapBand>| {
+                edge.and_then(|edge| {
+                    let remaining_pt = edge.bottom_pt - occupied_height;
+                    (remaining_pt > 0.01).then_some(ExclusionBand {
+                        top_remaining_pt: (edge.top_pt - occupied_height).max(0.0),
+                        remaining_pt,
+                        inset_pt: edge.inset_pt,
+                        uses_text_baseline: edge.uses_text_baseline,
+                    })
+                })
+            };
+            let exclusion = WrapExclusion {
+                left_band: full_width_after.or_else(|| carry(band.left)),
+                right_band: carry(band.right),
+            };
+            (exclusion.left_band.is_some() || exclusion.right_band.is_some()).then_some(exclusion)
         })
-    });
+        .or_else(|| {
+            full_width_after.map(|left_band| WrapExclusion {
+                left_band: Some(left_band),
+                right_band: None,
+            })
+        });
 
     Ok(ParaLayout {
         space_before_pt: eff_para.spacing.before_pt.unwrap_or(0.0).max(0.0),
@@ -596,6 +749,7 @@ pub(crate) fn layout_paragraph_with_wrap(
         note_refs: paragraph_note_refs(para),
         wrap_after,
         float_leading_pt,
+        page_floats,
     })
 }
 
@@ -1124,7 +1278,9 @@ fn text_box_items(
                     width,
                     0.0,
                     &mut counters,
-                )? {
+                )?
+                .rows
+                {
                     for item in row.items {
                         items.push(LineItem {
                             x_pt: 4.0 + item.x_pt,
@@ -1866,7 +2022,9 @@ fn place_line(
                         x,
                         (ascent - baseline_pt.unwrap_or(*h_pt).clamp(0.0, *h_pt)).max(0.0),
                     ));
-                if let Some(position) = anchor {
+                if let Some(position) = anchor
+                    && position.relative_from_v == AnchorOrigin::Paragraph
+                {
                     anchored_items.extend(nested.iter().map(|nested_item| AnchoredLineItem {
                         x_pt: origin_x + nested_item.x_pt,
                         y_pt: origin_y + nested_item.y_pt,
@@ -1874,7 +2032,7 @@ fn place_line(
                         relative_height: position.relative_height,
                         item: nested_item.item.clone(),
                     }));
-                } else {
+                } else if anchor.is_none() {
                     items.extend(nested.iter().map(|nested_item| LineItem {
                         x_pt: origin_x + nested_item.x_pt,
                         y_pt: origin_y + nested_item.y_pt,
@@ -2044,15 +2202,14 @@ fn para_mark_height(doc: &WordDoc, para: &Paragraph, use_mark_rpr: bool) -> f64 
 
 #[cfg(test)]
 mod tests {
-    use super::WrapBand;
+    use super::EdgeWrapBand;
 
     #[test]
     fn tight_wrap_releases_a_line_when_its_baseline_clears_the_polygon() {
-        let tight = WrapBand {
+        let tight = EdgeWrapBand {
             top_pt: 0.0,
             bottom_pt: 31.0,
-            left_inset_pt: 100.0,
-            right_inset_pt: 0.0,
+            inset_pt: 100.0,
             uses_text_baseline: true,
         };
         assert!(tight.applies_to_line(1, 15.0, 11.0));
@@ -2061,7 +2218,7 @@ mod tests {
             "line-box top overlaps by 1pt, but the text baseline is below the polygon"
         );
 
-        let square = WrapBand {
+        let square = EdgeWrapBand {
             uses_text_baseline: false,
             ..tight
         };
