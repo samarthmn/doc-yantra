@@ -350,14 +350,14 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         if section.sect_type == SectType::Continuous && !geometry_differs(section, next) {
             continue;
         }
-        sections.push((&doc.document.body[start..=*block_index], *section));
+        sections.push((start, &doc.document.body[start..=*block_index], *section));
         start = *block_index + 1;
     }
-    sections.push((&doc.document.body[start..], &doc.document.final_sect));
+    sections.push((start, &doc.document.body[start..], &doc.document.final_sect));
 
     let mut batches = Vec::new();
     let mut pages_before = 0usize;
-    for (blocks, section) in sections {
+    for (body_block_offset, blocks, section) in sections {
         let geo = PageGeometry::from_section(section);
         let (column_widths, column_offsets) = section_columns(&geo, &section.cols);
         let layout_width = column_widths.iter().copied().fold(f64::INFINITY, f64::min);
@@ -382,6 +382,7 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
             &column_widths,
             &column_offsets,
             &counter_start,
+            body_block_offset,
             None,
         )?;
         if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
@@ -396,6 +397,7 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
                     &column_widths,
                     &column_offsets,
                     &counter_start,
+                    body_block_offset,
                     Some(&schedule),
                 )?;
                 let next_schedule = page_band_schedule(&next.units, &next.pages, &geo);
@@ -632,6 +634,7 @@ fn run_section_pass(
     column_widths: &[f64],
     column_offsets: &[f64],
     counter_start: &ListCounters,
+    body_block_offset: usize,
     schedule: Option<&PageBandSchedule>,
 ) -> Result<SectionPass> {
     let mut warnings = Vec::new();
@@ -649,6 +652,7 @@ fn run_section_pass(
             content_left_pt: geo.content_left_pt,
             page_width_pt: geo.width_pt,
         },
+        Some(body_block_offset),
         schedule,
     )?;
     let pages = paginate(&units, geo, &table_headers, column_widths, column_offsets);
@@ -671,6 +675,7 @@ fn build_units(
     counters: &mut ListCounters,
     table_headers: &mut HashMap<usize, Vec<Unit>>,
     page_horizontal: PageHorizontalContext,
+    body_block_offset: Option<usize>,
     page_schedule: Option<&PageBandSchedule>,
 ) -> Result<Vec<Unit>> {
     let mut units = Vec::new();
@@ -790,7 +795,10 @@ fn build_units(
                         }
                         row_y += row.height_pt;
                     }
-                    let wrap_padding = floating.wrap_padding_pt;
+                    let distances = doc.floating_table_distances(
+                        body_block_offset.map(|offset| offset + block_index),
+                        t,
+                    );
                     // Resolve the authored origin into content-relative physical
                     // coordinates before deciding whether the table hugs a text
                     // edge. Page-edge tables therefore cannot masquerade as
@@ -808,13 +816,15 @@ fn build_units(
                                 left_bands: vec![ExclusionBand {
                                     source: None,
                                     top_remaining_pt: floating.y_pt.max(0.0),
-                                    remaining_pt: floating.y_pt + row_y + wrap_padding,
-                                    inset_pt: resolved_x + table_layout.width_pt + wrap_padding,
+                                    remaining_pt: floating.y_pt + row_y + distances.bottom_pt,
+                                    inset_pt: resolved_x
+                                        + table_layout.width_pt
+                                        + distances.right_pt,
                                     uses_text_baseline: false,
                                 }],
                                 right_bands: Vec::new(),
                             }),
-                            content_w - resolved_x - table_layout.width_pt - wrap_padding,
+                            content_w - resolved_x - table_layout.width_pt - distances.right_pt,
                         )
                     } else if right_hugging {
                         (
@@ -823,12 +833,12 @@ fn build_units(
                                 right_bands: vec![ExclusionBand {
                                     source: None,
                                     top_remaining_pt: floating.y_pt.max(0.0),
-                                    remaining_pt: floating.y_pt + row_y + wrap_padding,
-                                    inset_pt: content_w - resolved_x + wrap_padding,
+                                    remaining_pt: floating.y_pt + row_y + distances.bottom_pt,
+                                    inset_pt: content_w - resolved_x + distances.left_pt,
                                     uses_text_baseline: false,
                                 }],
                             }),
-                            resolved_x - wrap_padding,
+                            resolved_x - distances.left_pt,
                         )
                     } else {
                         (None, 0.0)
@@ -1848,6 +1858,7 @@ fn place_footnotes(
                     page_width_pt: geo.width_pt,
                 },
                 None,
+                None,
             )?);
         }
 
@@ -1934,6 +1945,7 @@ fn append_endnotes(
                 content_left_pt: geo.content_left_pt,
                 page_width_pt: geo.width_pt,
             },
+            None,
             None,
         )?);
     }

@@ -1083,6 +1083,18 @@ pub struct FloatingTableProps {
     pub wrap_padding_pt: f64,
 }
 
+/// Exact text clearances authored on a floating table.
+///
+/// This stays crate-private so the legacy public [`FloatingTableProps`] shape
+/// remains source-compatible while layout can still honor asymmetric sides
+/// and the independent bottom clearance.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct FloatingTableDistances {
+    pub(crate) left_pt: f64,
+    pub(crate) right_pt: f64,
+    pub(crate) bottom_pt: f64,
+}
+
 /// A table row.
 #[derive(Debug, Clone, Default)]
 pub struct Row {
@@ -1360,16 +1372,41 @@ pub enum SectType {
 
 // --- Parsing ----------------------------------------------------------------
 
+/// Private parse metadata kept outside the public document model.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DocumentMetadata {
+    /// One entry per logical top-level body block, after transparent wrappers
+    /// such as `w:sdt` and `mc:AlternateContent` have been expanded.
+    pub(crate) floating_table_distances: Vec<Option<FloatingTableDistances>>,
+}
+
 /// Parses `word/document.xml` into a [`Document`].
 pub fn parse_document(xml: &str) -> Result<Document> {
+    Ok(parse_document_with_metadata(xml)?.0)
+}
+
+/// Parses the public document plus private layout metadata that cannot be
+/// represented without changing the legacy public table-property API.
+pub(crate) fn parse_document_with_metadata(xml: &str) -> Result<(Document, DocumentMetadata)> {
     let doc = super::parse_xml(xml, "document.xml")?;
     let root = doc.root_element();
     let body = child(root, W, "body")
         .ok_or_else(|| OfficeError::Invalid("document.xml has no w:body".into()))?;
 
+    let mut floating_table_distances = Vec::new();
+    collect_document_block_metadata(body, &mut floating_table_distances)?;
+
     let mut p = WmlParser::default();
     let mut content = p.block_level(body, "w:body")?;
     p.finish_story(&mut content);
+
+    if floating_table_distances.len() != content.len() {
+        return Err(OfficeError::Internal(format!(
+            "document block metadata count {} does not match parsed block count {}",
+            floating_table_distances.len(),
+            content.len()
+        )));
+    }
 
     // The trailing direct-child w:sectPr is the final section.
     let final_sect = match child(body, W, "sectPr") {
@@ -1377,11 +1414,58 @@ pub fn parse_document(xml: &str) -> Result<Document> {
         None => SectPr::default(),
     };
 
-    Ok(Document {
-        body: content,
-        final_sect,
-        flags: p.flags,
-    })
+    Ok((
+        Document {
+            body: content,
+            final_sect,
+            flags: p.flags,
+        },
+        DocumentMetadata {
+            floating_table_distances,
+        },
+    ))
+}
+
+fn collect_document_block_metadata(
+    container: Node,
+    out: &mut Vec<Option<FloatingTableDistances>>,
+) -> Result<()> {
+    for node in children(container) {
+        if is(node, W, "p") || is(node, M, "oMathPara") {
+            out.push(None);
+        } else if is(node, W, "tbl") {
+            out.push(child(node, W, "tblPr").and_then(parse_floating_table_distances));
+        } else if is(node, W, "sdt") {
+            if let Some(content) = child(node, W, "sdtContent") {
+                collect_document_block_metadata(content, out)?;
+            }
+        } else if is(node, MC, "AlternateContent") {
+            for fallback in alternate_content_fallback(node)? {
+                collect_document_block_metadata_node(fallback, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_document_block_metadata_node(
+    node: Node,
+    out: &mut Vec<Option<FloatingTableDistances>>,
+) -> Result<()> {
+    if is(node, W, "p") || is(node, M, "oMathPara") {
+        out.push(None);
+    } else if is(node, W, "tbl") {
+        out.push(child(node, W, "tblPr").and_then(parse_floating_table_distances));
+    } else if is(node, W, "sdt") {
+        if let Some(content) = child(node, W, "sdtContent") {
+            collect_document_block_metadata(content, out)?;
+        }
+    } else if is(node, MC, "AlternateContent") {
+        for fallback in alternate_content_fallback(node)? {
+            collect_document_block_metadata_node(fallback, out)?;
+        }
+    }
+    Ok(())
 }
 
 /// Parses a header/footer part body into block content (same engine as the body).
@@ -2723,6 +2807,21 @@ fn parse_cell_margins(node: Node) -> CellMargins {
         }
     }
     m
+}
+
+fn parse_floating_table_distances(node: Node) -> Option<FloatingTableDistances> {
+    let positioning = children(node).find(|child| is(*child, W, "tblpPr"))?;
+    let distance = |name| {
+        parse_i64(attr(positioning, W, name))
+            .map(twip_to_pt)
+            .unwrap_or(0.0)
+            .max(0.0)
+    };
+    Some(FloatingTableDistances {
+        left_pt: distance("leftFromText"),
+        right_pt: distance("rightFromText"),
+        bottom_pt: distance("bottomFromText"),
+    })
 }
 
 /// Parses `w:tblPr` — both the table's direct properties and the `w:tblPr` of a

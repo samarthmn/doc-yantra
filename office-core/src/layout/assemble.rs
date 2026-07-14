@@ -14,7 +14,7 @@ use crate::oxml::settings::Settings;
 use crate::oxml::styles::StyleResolver;
 use crate::oxml::table_style;
 use crate::oxml::theme::Theme;
-use crate::oxml::wml::{self, BlockContent, NoteKind, NotesPart};
+use crate::oxml::wml::{self, BlockContent, FloatingTableDistances, NoteKind, NotesPart, Table};
 use crate::oxml::{R, W, attr, child, children};
 use crate::{ConvertOptions, OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
@@ -45,6 +45,7 @@ pub struct WordDoc {
     endnotes: NotesPart,
     charts_by_part: HashMap<String, Chart>,
     diagrams: DiagramStore,
+    floating_table_distances: Vec<Option<FloatingTableDistances>>,
 }
 
 impl WordDoc {
@@ -52,7 +53,8 @@ impl WordDoc {
     pub fn open(bytes: &[u8], opts: &ConvertOptions) -> Result<WordDoc> {
         let pkg = Package::open(bytes)?;
         let main_part = pkg.main_part()?;
-        let mut document = parse_part(&pkg, &main_part, wml::parse_document)?;
+        let (mut document, document_metadata) =
+            parse_part(&pkg, &main_part, wml::parse_document_with_metadata)?;
 
         let styles = optional(&pkg, "word/styles.xml", StyleResolver::parse)?.unwrap_or_default();
         let numbering = optional(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
@@ -179,7 +181,33 @@ impl WordDoc {
             endnotes,
             charts_by_part,
             diagrams,
+            floating_table_distances: document_metadata.floating_table_distances,
         })
+    }
+
+    /// Exact clearances for a floating table at a stable main-body block
+    /// index. Publicly-mutated or style-supplied tables retain the legacy
+    /// symmetric-padding behavior as a compatibility fallback.
+    pub(crate) fn floating_table_distances(
+        &self,
+        body_block_index: Option<usize>,
+        table: &Table,
+    ) -> FloatingTableDistances {
+        body_block_index
+            .and_then(|index| self.floating_table_distances.get(index))
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| {
+                let padding = table
+                    .props
+                    .floating
+                    .map_or(0.0, |floating| floating.wrap_padding_pt);
+                FloatingTableDistances {
+                    left_pt: padding,
+                    right_pt: padding,
+                    bottom_pt: padding,
+                }
+            })
     }
 
     /// Resolves note content and relationships by family/id.

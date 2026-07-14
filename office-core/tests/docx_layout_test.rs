@@ -4,14 +4,15 @@ use office_core::layout::{Item, LaidOutDocument, Page, WordDoc, layout_docx};
 use office_core::testkit::{
     continuous_multicolumn_anchor_docx, continuous_vertically_aligned_page_float_docx,
     cross_page_page_float_band_docx, disjoint_left_page_floats_docx,
-    floating_table_block_flow_docx, floating_table_origin_docx, floating_table_side_wrap_docx,
-    full_and_side_page_floats_docx, margin_top_left_float_docx, minimal_docx,
-    multicolumn_anchor_docx, non_convergent_page_float_docx, opposite_page_floats_docx,
-    overlapping_page_floats_docx, page_center_float_docx, page_floats_without_text_window_docx,
-    page_top_bottom_float_docx, paragraph_column_top_bottom_float_docx,
-    paragraph_float_with_page_horizontal_origin_docx, single_narrow_page_float_docx,
-    stacked_full_then_side_page_floats_docx, stale_page_band_schedule_docx,
-    two_paragraph_floats_docx, vertically_aligned_body_page_float_docx, wrap_document, zip_package,
+    floating_table_block_flow_docx, floating_table_distances_docx, floating_table_origin_docx,
+    floating_table_side_wrap_docx, full_and_side_page_floats_docx, margin_top_left_float_docx,
+    minimal_docx, multicolumn_anchor_docx, non_convergent_page_float_docx,
+    opposite_page_floats_docx, overlapping_page_floats_docx, page_center_float_docx,
+    page_floats_without_text_window_docx, page_top_bottom_float_docx,
+    paragraph_column_top_bottom_float_docx, paragraph_float_with_page_horizontal_origin_docx,
+    single_narrow_page_float_docx, stacked_full_then_side_page_floats_docx,
+    stale_page_band_schedule_docx, two_paragraph_floats_docx,
+    vertically_aligned_body_page_float_docx, wrap_document, zip_package,
 };
 use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
 
@@ -531,6 +532,52 @@ fn floating_table_side_wrap_uses_resolved_physical_origin() {
             "{origin}-origin content-left table must side-wrap: {content_left:?}"
         );
     }
+}
+
+#[test]
+fn floating_table_side_wrap_uses_the_opposite_edge_distance() {
+    let first_flow_run = |side: &str, left_twips: u32, right_twips: u32| {
+        let bytes = floating_table_distances_docx(side, left_twips, right_twips, 0);
+        let doc = WordDoc::open(&bytes, &opts()).expect("open");
+        let laid = layout_docx(&doc).expect("layout").0;
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .find(|(text, ..)| text.contains("distance flow"))
+            .expect("first side-wrapped distance line")
+    };
+
+    let left = first_flow_run("left", 800, 100);
+    assert!(
+        (left.1 - 221.0).abs() <= 0.15,
+        "left-hugging inset must use rightFromText=5pt: {left:?}"
+    );
+
+    let right = first_flow_run("right", 100, 800);
+    assert!((right.1 - 72.0).abs() <= 0.15, "right={right:?}");
+    assert!(
+        right.1 + right.3 > 370.0,
+        "right-hugging window must use leftFromText=5pt: {right:?}"
+    );
+}
+
+#[test]
+fn floating_table_side_wrap_releases_after_bottom_distance() {
+    let release_y = |bottom_twips: u32| {
+        let bytes = floating_table_distances_docx("left", 0, 0, bottom_twips);
+        let doc = WordDoc::open(&bytes, &opts()).expect("open");
+        let laid = layout_docx(&doc).expect("layout").0;
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .find(|(text, x, ..)| text.contains("distance flow") && (*x - 72.0).abs() <= 0.15)
+            .expect("first full-width line below floating table")
+            .2
+    };
+    let no_bottom = release_y(0);
+    let bottom_40pt = release_y(800);
+    assert!(
+        (bottom_40pt - no_bottom - 40.0).abs() <= 0.5,
+        "no_bottom={no_bottom}, bottom_40pt={bottom_40pt}"
+    );
 }
 
 #[test]

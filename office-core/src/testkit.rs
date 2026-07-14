@@ -536,6 +536,20 @@ pub fn floating_table_origin_docx(horizontal_anchor: &str, x_twips: i32) -> Vec<
     ))
 }
 
+/// Floating table with independently authored left/right/bottom text distances.
+pub fn floating_table_distances_docx(
+    side: &str,
+    left_twips: u32,
+    right_twips: u32,
+    bottom_twips: u32,
+) -> Vec<u8> {
+    let x_twips = if side == "right" { 6480 } else { 0 };
+    let filler = "distance flow words ".repeat(90);
+    minimal_docx(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/><w:tblpPr w:vertAnchor="text" w:horzAnchor="text" w:tblpX="{x_twips}" w:tblpY="0" w:leftFromText="{left_twips}" w:rightFromText="{right_twips}" w:bottomFromText="{bottom_twips}"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Distance table</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>{filler}</w:t></w:r></w:p>"#
+    ))
+}
+
 /// One left page band with less than 36pt remaining; no opposite band exists.
 pub fn single_narrow_page_float_docx() -> Vec<u8> {
     let anchor = picture_anchor(
