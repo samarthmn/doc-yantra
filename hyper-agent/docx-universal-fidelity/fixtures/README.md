@@ -6,9 +6,31 @@ the planning agent pushes through a text-only GitHub API surface, and base64
 round-trips the bytes bit-exact. `4.docx`/`4.pdf` are NOT here — they are already
 committed as `fidelity-corpus/docx/complex/`.
 
-Decode them into the corpus with **human-tasks.md § H1** (one paste-able script).
-After decoding, verify the binaries' SHA-256 against the table in H1 (also
-repeated below). Do not commit decoded binaries under `hyper-agent/`.
+**If you hold the original files, ignore this directory** — human-tasks.md § H1
+copies them straight into the corpus. This directory exists so anyone *without*
+the originals (a coding agent on a fresh checkout, a teammate) can materialize
+them from the repo alone:
+
+```bash
+# from the repo root
+mkdir -p fidelity-corpus/docx/{gdocs-anchors-toc,gdocs-tables-longdoc,gdocs-columns}
+python3 - <<'EOF'
+import base64, pathlib
+pairs = {
+  '1.docx': 'gdocs-anchors-toc/source.docx',     '1.pdf': 'gdocs-anchors-toc/ground-truth.pdf',
+  '2.docx': 'gdocs-tables-longdoc/source.docx',  '2.pdf': 'gdocs-tables-longdoc/ground-truth.pdf',
+  '3.docx': 'gdocs-columns/source.docx',         '3.pdf': 'gdocs-columns/ground-truth.pdf',
+}
+src = pathlib.Path('hyper-agent/docx-universal-fidelity/fixtures')
+for name, dest in pairs.items():
+    out = pathlib.Path('fidelity-corpus/docx') / dest
+    out.write_bytes(base64.b64decode((src / f'{name}.b64').read_text()))
+    print('wrote', out)
+EOF
+```
+
+After materializing (either way), verify the binaries' SHA-256 (`shasum -a 256`)
+against the table below / H1. Do not commit decoded binaries under `hyper-agent/`.
 
 | File | SHA-256 of DECODED binary | git blob SHA-1 of this .b64 file | .b64 length |
 |---|---|---|---|

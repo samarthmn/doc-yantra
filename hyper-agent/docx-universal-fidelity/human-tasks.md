@@ -4,27 +4,20 @@ Everything here needs a human (the fixture binaries, a Word installation, judgme
 
 ## H1. Commit the three reference fixture pairs (BEFORE agent phase 5; ~10 min)
 
-The fixture bytes are committed on this plan branch as **base64 text** under `hyper-agent/docx-universal-fidelity/fixtures/*.b64` (the planning agent's GitHub API access is text-only; base64 round-trips bit-exact — see `fixtures/README.md`). The originals are also attached to the planning thread (https://hyperagent.com/thread/cmrki1y8p0ixg06adbyatevrz). `4.docx`/`4.pdf` are already committed as `fidelity-corpus/docx/complex/` — do NOT re-add them.
+You hold the six original files (`1.docx` … `3.pdf`) locally — this step is a plain copy. (Backups exist for anyone without them: the planning thread https://hyperagent.com/thread/cmrki1y8p0ixg06adbyatevrz carries the originals, and this branch carries bit-exact base64 copies under `hyper-agent/docx-universal-fidelity/fixtures/*.b64` with a decode script in `fixtures/README.md`.) `4.docx`/`4.pdf` are already committed as `fidelity-corpus/docx/complex/` — do NOT re-add them.
 
-1. Decode the six `.b64` files into the corpus (from the repo root; `python3` variant is fully portable, or use `base64 -d`):
+1. Copy your local files into the corpus (from the repo root; exact destination names `source.docx` / `ground-truth.pdf`):
    ```bash
-   P=hyper-agent/docx-universal-fidelity/fixtures
+   SRC=/path/to/your/reference-files   # wherever 1.docx … 3.pdf live
    mkdir -p fidelity-corpus/docx/{gdocs-anchors-toc,gdocs-tables-longdoc,gdocs-columns}
-   python3 - <<'EOF'
-   import base64, pathlib
-   pairs = {
-     '1.docx': 'gdocs-anchors-toc/source.docx',     '1.pdf': 'gdocs-anchors-toc/ground-truth.pdf',
-     '2.docx': 'gdocs-tables-longdoc/source.docx',  '2.pdf': 'gdocs-tables-longdoc/ground-truth.pdf',
-     '3.docx': 'gdocs-columns/source.docx',         '3.pdf': 'gdocs-columns/ground-truth.pdf',
-   }
-   src = pathlib.Path('hyper-agent/docx-universal-fidelity/fixtures')
-   for name, dest in pairs.items():
-       out = pathlib.Path('fidelity-corpus/docx') / dest
-       out.write_bytes(base64.b64decode((src / f'{name}.b64').read_text()))
-       print('wrote', out)
-   EOF
+   cp "$SRC/1.docx" fidelity-corpus/docx/gdocs-anchors-toc/source.docx
+   cp "$SRC/1.pdf"  fidelity-corpus/docx/gdocs-anchors-toc/ground-truth.pdf
+   cp "$SRC/2.docx" fidelity-corpus/docx/gdocs-tables-longdoc/source.docx
+   cp "$SRC/2.pdf"  fidelity-corpus/docx/gdocs-tables-longdoc/ground-truth.pdf
+   cp "$SRC/3.docx" fidelity-corpus/docx/gdocs-columns/source.docx
+   cp "$SRC/3.pdf"  fidelity-corpus/docx/gdocs-columns/ground-truth.pdf
    ```
-2. Do NOT commit decoded binaries under `hyper-agent/` — they belong only at the `fidelity-corpus/docx/<case>/` paths above.
+2. Commit the binaries only at these `fidelity-corpus/docx/<case>/` paths — never under `hyper-agent/`. The `fixtures/*.b64` copies stay untouched on the plan branch as provenance.
 3. Verify integrity (`shasum -a 256 <file>`), expected SHA-256:
    | File | SHA-256 |
    |---|---|
