@@ -264,11 +264,20 @@ fn only_the_page_with_a_footnote_reserves_the_note_band() {
         r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="1"><w:p><w:r><w:t>PAGE ONE NOTE</w:t></w:r></w:p></w:footnote></w:footnotes>"#
     );
     let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
-    let laid = open_layout(&package_with_parts(
+    let bytes = package_with_parts(
         &body,
         rels,
         vec![("word/footnotes.xml", footnotes.into_bytes())],
-    ));
+    );
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile normal footnote");
+    assert!(
+        predicted.supported,
+        "normal footnote profile reasons: {:?}",
+        predicted.reasons
+    );
+    convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
+        .expect("normal footnote converts");
+    let laid = open_layout(&bytes);
     assert_eq!(
         laid.pages.len(),
         2,
@@ -281,6 +290,37 @@ fn only_the_page_with_a_footnote_reserves_the_note_band() {
         text_position(&laid.pages[1], "FULL HEIGHT 7").1 < 252.0,
         "later page must retain the full body height"
     );
+}
+
+#[test]
+fn oscillating_footnote_reservation_has_profile_convert_parity() {
+    let leading = (0..7)
+        .map(|index| exact_paragraph(&format!("OSCILLATION LEAD {index}")))
+        .collect::<String>();
+    let reference = r#"<w:p><w:pPr><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>OSCILLATING NOTE</w:t><w:footnoteReference w:id="1"/></w:r></w:p>"#;
+    let body = format!("{leading}{reference}<w:sectPr>{SHORT_SECTION}</w:sectPr>");
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="1"><w:p><w:r><w:t>OSCILLATING NOTE TEXT</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let bytes = package_with_parts(
+        &body,
+        rels,
+        vec![("word/footnotes.xml", footnotes.into_bytes())],
+    );
+
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()),
+        Err(OfficeError::Unsupported {
+            code: UnsupportedCode::Footnotes,
+            detail,
+        }) if detail == "footnote page reservation did not converge"
+    ));
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile oscillating footnote");
+    assert!(predicted.reasons.iter().any(|reason| {
+        reason.code == UnsupportedCode::Footnotes
+            && reason.detail == "footnote page reservation did not converge"
+    }));
 }
 
 #[test]

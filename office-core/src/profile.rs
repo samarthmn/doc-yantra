@@ -951,10 +951,9 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
     profile.stats.images = collector.images;
     profile.stats.fonts_used = collector.fonts_used.clone();
 
-    // Cross-paragraph wrap exclusions depend on shaped line heights. For a
-    // body containing multiple floats, run the same layout preflight used by
-    // conversion so profile() cannot approve an overlap that layout rejects.
-    // Single-anchor documents retain the cheap structural profile path.
+    // Some pagination verdicts depend on shaped line heights and physical-page
+    // state. Run the same layout preflight used by conversion for those cases
+    // so profile() cannot approve a document that layout rejects.
     let body_anchor_count: usize = document
         .body
         .iter()
@@ -967,6 +966,10 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
         BlockContent::Paragraph(paragraph) => paragraph_has_page_float(paragraph),
         BlockContent::Table(_) => false,
     });
+    let has_footnote_references = collector
+        .note_refs
+        .iter()
+        .any(|(kind, _)| *kind == wml::NoteKind::Footnote);
     let mut sections: Vec<&SectPr> = document
         .body
         .iter()
@@ -979,7 +982,10 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
     let has_multi_section_columns =
         sections.len() >= 2 && sections.iter().any(|section| section.cols.is_multi());
     if profile.supported
-        && (body_anchor_count > 1 || body_has_page_float || has_multi_section_columns)
+        && (body_anchor_count > 1
+            || body_has_page_float
+            || has_footnote_references
+            || has_multi_section_columns)
     {
         let layout_doc = crate::layout::WordDoc::open(bytes, opts)?;
         if let Err(error) = crate::layout::layout_docx(&layout_doc) {
