@@ -97,8 +97,7 @@ struct FloatCarrier {
 struct PageBandSchedule {
     unit_placements: HashMap<(usize, usize), ScheduledUnitPlacement>,
     bands: HashMap<usize, Vec<ResolvedPageBand>>,
-    content_top_pt: f64,
-    content_bottom_pt: f64,
+    page_bounds: HashMap<usize, (f64, f64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -251,10 +250,16 @@ impl PageBandSchedule {
         let step = placement.height_pt.max(1.0);
         let mut ordinal = last_ordinal + 1;
         while placement.page_index <= last_band_page {
+            let Some((_, content_bottom_pt)) = self.page_bounds.get(&placement.page_index) else {
+                break;
+            };
             placement.top_pt += step;
-            if placement.top_pt + step > self.content_bottom_pt + 0.01 {
+            if placement.top_pt + step > *content_bottom_pt + 0.01 {
                 placement.page_index += 1;
-                placement.top_pt = self.content_top_pt;
+                let Some((content_top_pt, _)) = self.page_bounds.get(&placement.page_index) else {
+                    break;
+                };
+                placement.top_pt = *content_top_pt;
             }
             if placement.page_index > last_band_page {
                 break;
@@ -378,12 +383,11 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
 
     let mut pass = run_document_pass(doc, &section_runs, None)?;
     if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
-        let first_geo = &pass.runs[0].geo;
-        let mut schedule = page_band_schedule(&pass.units, &pass.pages, first_geo);
+        let mut schedule = page_band_schedule(&pass.units, &pass.pages, &pass.runs);
         let mut converged = false;
         for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
             let next = run_document_pass(doc, &section_runs, Some(&schedule))?;
-            let next_schedule = page_band_schedule(&next.units, &next.pages, &next.runs[0].geo);
+            let next_schedule = page_band_schedule(&next.units, &next.pages, &next.runs);
             let stable = page_band_schedules_equivalent(&schedule, &next_schedule);
             pass = next;
             if stable {
@@ -554,7 +558,11 @@ fn validate_anchor_section_envelope(
     final_section: &SectPr,
 ) -> Result<()> {
     let mut start = 0usize;
-    for (block_index, section) in boundaries {
+    let mut governing_alignment = None;
+    for (run_index, (block_index, section)) in boundaries.iter().enumerate() {
+        if run_index == 0 || section.sect_type != SectType::Continuous {
+            governing_alignment = Some(section.vertical_align);
+        }
         let section_blocks = &blocks[start..=*block_index];
         if section.cols.is_multi() && blocks_contain_anchors(section_blocks) {
             return Err(OfficeError::unsupported(
@@ -562,7 +570,9 @@ fn validate_anchor_section_envelope(
                 "anchored drawing in a multi-column section",
             ));
         }
-        if section.vertical_align != PageVAlign::Top && blocks_contain_page_floats(section_blocks) {
+        if governing_alignment != Some(PageVAlign::Top)
+            && blocks_contain_page_floats(section_blocks)
+        {
             return Err(OfficeError::unsupported(
                 UnsupportedCode::AnchoredDrawing,
                 "page-anchored drawing with non-top body alignment",
@@ -570,14 +580,16 @@ fn validate_anchor_section_envelope(
         }
         start = *block_index + 1;
     }
+    if boundaries.is_empty() || final_section.sect_type != SectType::Continuous {
+        governing_alignment = Some(final_section.vertical_align);
+    }
     if final_section.cols.is_multi() && blocks_contain_anchors(&blocks[start..]) {
         return Err(OfficeError::unsupported(
             UnsupportedCode::AnchoredDrawing,
             "anchored drawing in a multi-column section",
         ));
     }
-    if final_section.vertical_align != PageVAlign::Top
-        && blocks_contain_page_floats(&blocks[start..])
+    if governing_alignment != Some(PageVAlign::Top) && blocks_contain_page_floats(&blocks[start..])
     {
         return Err(OfficeError::unsupported(
             UnsupportedCode::AnchoredDrawing,
@@ -911,7 +923,11 @@ fn build_units(
                         floating_table: None,
                     };
                     if row.is_header {
-                        headers.push(clone_unit(&unit));
+                        let mut repeated = clone_unit(&unit);
+                        repeated.gap_before = 0.0;
+                        repeated.break_before = false;
+                        repeated.column_break_before = false;
+                        headers.push(repeated);
                     }
                     units.push(unit);
                     first_row = false;
@@ -1329,18 +1345,10 @@ fn paginate(
     let mut pages: Vec<WorkPage> = Vec::new();
     let mut page = new_page(first_geo, 0);
     let mut y = first_geo.content_top_pt;
-    let has_footnotes = units.iter().any(|unit| {
-        unit.note_refs
-            .iter()
-            .any(|(kind, _)| *kind == NoteKind::Footnote)
-    });
 
     for (run_index, (section_run, run_layout)) in section_runs.iter().zip(run_layouts).enumerate() {
         let geo = &run_layout.geo;
         if run_index == 0 {
-            if parity_blank_needed(1, section_run.sect.sect_type) {
-                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
-            }
             y = geo.content_top_pt;
         } else if section_run.sect.sect_type != SectType::Continuous {
             if !work_page_is_empty(&page) {
@@ -1358,11 +1366,7 @@ fn paginate(
         let mut column = 0usize;
         let mut band_top = y;
         let mut band_extent = y;
-        let full_bottom = if has_footnotes {
-            geo.content_bottom_pt - geo.content_height_pt() * 0.25
-        } else {
-            geo.content_bottom_pt
-        };
+        let mut full_bottom = body_content_bottom(geo, page_has_footnotes(&page));
         let should_balance = run_layout.column_widths.len() > 1
             && (run_index + 1 == section_runs.len()
                 || section_runs[run_index + 1].sect.sect_type == SectType::Continuous);
@@ -1374,17 +1378,39 @@ fn paginate(
             full_bottom,
             run_layout.column_widths.len(),
             should_balance,
+            table_headers,
         );
         let mut active_table: Option<usize> = None;
         let mut table_first_page: Option<usize> = None;
 
         for unit_run in coalesce_runs(units, run_layout.unit_start, run_layout.unit_end) {
+            let first_unit_index = unit_run[0];
+            let unit_run_has_footnotes = unit_run.iter().any(|index| {
+                units[*index]
+                    .note_refs
+                    .iter()
+                    .any(|(kind, _)| *kind == NoteKind::Footnote)
+            });
+            let candidate_has_footnotes = page_has_footnotes(&page) || unit_run_has_footnotes;
+            let candidate_full_bottom = body_content_bottom(geo, candidate_has_footnotes);
+            if (candidate_full_bottom - full_bottom).abs() > 0.01 {
+                full_bottom = candidate_full_bottom;
+                (content_bottom, band_is_balanced) = column_band_bottom(
+                    units,
+                    run_layout.unit_start,
+                    run_layout.unit_end,
+                    band_top,
+                    full_bottom,
+                    run_layout.column_widths.len(),
+                    should_balance,
+                    table_headers,
+                );
+            }
             let mut probe_y = y;
             for &unit_index in &unit_run {
                 probe_y += effective_gap_before(&units[unit_index], probe_y, band_top);
                 probe_y += units[unit_index].height;
             }
-            let first_unit_index = unit_run[0];
             let break_before = units[first_unit_index].break_before;
             let fits = probe_y <= content_bottom + 0.01;
             let mut advanced = false;
@@ -1395,6 +1421,7 @@ fn paginate(
                 band_top = y;
                 band_extent = y;
                 column = 0;
+                full_bottom = body_content_bottom(geo, unit_run_has_footnotes);
                 (content_bottom, band_is_balanced) = column_band_bottom(
                     units,
                     first_unit_index,
@@ -1403,6 +1430,7 @@ fn paginate(
                     full_bottom,
                     run_layout.column_widths.len(),
                     should_balance,
+                    table_headers,
                 );
                 advanced = true;
             } else if units[first_unit_index].column_break_before || !fits {
@@ -1416,6 +1444,7 @@ fn paginate(
                     band_top = y;
                     band_extent = y;
                     column = 0;
+                    full_bottom = body_content_bottom(geo, unit_run_has_footnotes);
                     (content_bottom, band_is_balanced) = column_band_bottom(
                         units,
                         first_unit_index,
@@ -1424,6 +1453,7 @@ fn paginate(
                         full_bottom,
                         run_layout.column_widths.len(),
                         should_balance,
+                        table_headers,
                     );
                     advanced = true;
                 }
@@ -1483,6 +1513,20 @@ fn paginate(
     pages
 }
 
+fn page_has_footnotes(page: &WorkPage) -> bool {
+    page.note_refs
+        .iter()
+        .any(|(kind, _)| *kind == NoteKind::Footnote)
+}
+
+fn body_content_bottom(geo: &PageGeometry, reserves_footnotes: bool) -> f64 {
+    if reserves_footnotes {
+        geo.content_bottom_pt - geo.content_height_pt() * 0.25
+    } else {
+        geo.content_bottom_pt
+    }
+}
+
 fn parity_blank_needed(next_page_number: usize, sect_type: SectType) -> bool {
     match sect_type {
         SectType::OddPage => next_page_number.is_multiple_of(2),
@@ -1491,6 +1535,10 @@ fn parity_blank_needed(next_page_number: usize, sect_type: SectType) -> bool {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the balancing probe needs the complete run slice and its page-band constraints"
+)]
 fn column_band_bottom(
     units: &[Unit],
     start: usize,
@@ -1499,30 +1547,36 @@ fn column_band_bottom(
     full_bottom: f64,
     column_count: usize,
     should_balance: bool,
+    table_headers: &HashMap<usize, Vec<Unit>>,
 ) -> (f64, bool) {
     let total_height: f64 = units[start..end]
         .iter()
         .map(|unit| unit.gap_before + unit.float_leading + unit.height)
         .sum();
     let available_height = (full_bottom - band_top).max(0.0);
-    let balanced = should_balance
-        && total_height > 0.0
-        && total_height <= available_height * column_count as f64;
+    let balanced_height = balanced_column_height(units, start, end, column_count, table_headers);
+    let balanced = should_balance && total_height > 0.0 && balanced_height <= available_height;
     if balanced {
-        let balanced_height = balanced_column_height(units, start, end, column_count);
         (band_top + balanced_height.ceil() + 0.5, true)
     } else {
         (full_bottom, false)
     }
 }
 
-fn balanced_column_height(units: &[Unit], start: usize, end: usize, column_count: usize) -> f64 {
-    let group_heights = coalesce_runs(units, start, end)
-        .into_iter()
+fn balanced_column_height(
+    units: &[Unit],
+    start: usize,
+    end: usize,
+    column_count: usize,
+    table_headers: &HashMap<usize, Vec<Unit>>,
+) -> f64 {
+    let groups = coalesce_runs(units, start, end);
+    let group_heights = groups
+        .iter()
         .map(|run| {
-            run.into_iter()
+            run.iter()
                 .map(|index| {
-                    let unit = &units[index];
+                    let unit = &units[*index];
                     unit.gap_before + unit.float_leading + unit.height
                 })
                 .sum::<f64>()
@@ -1531,17 +1585,34 @@ fn balanced_column_height(units: &[Unit], start: usize, end: usize, column_count
     let total = group_heights.iter().sum::<f64>();
     let largest = group_heights.iter().copied().fold(0.0, f64::max);
     let mut low = (total / column_count as f64).max(largest);
-    let mut high = total.max(low);
+    let repeat_allowance = table_headers
+        .values()
+        .map(|headers| repeated_header_height(headers))
+        .sum::<f64>()
+        * column_count.saturating_sub(1) as f64;
+    let mut high = (total + repeat_allowance).max(low);
     for _ in 0..32 {
         let candidate = (low + high) / 2.0;
         let mut used_columns = 1usize;
         let mut column_height = 0.0;
-        for height in &group_heights {
+        let mut active_table = None;
+        for (group, height) in groups.iter().zip(&group_heights) {
             if column_height > 0.0 && column_height + height > candidate + 0.001 {
                 used_columns += 1;
                 column_height = 0.0;
+                if let Some(table_id) = active_table
+                    && units[group[0]].table_id == Some(table_id)
+                    && let Some(headers) = table_headers.get(&table_id)
+                {
+                    column_height += repeated_header_height(headers);
+                }
+                if column_height + height > candidate + 0.001 {
+                    used_columns = column_count + 1;
+                    break;
+                }
             }
             column_height += height;
+            active_table = units[group[0]].table_id;
         }
         if used_columns <= column_count {
             high = candidate;
@@ -1552,13 +1623,24 @@ fn balanced_column_height(units: &[Unit], start: usize, end: usize, column_count
     high
 }
 
-fn page_band_schedule(units: &[Unit], pages: &[WorkPage], geo: &PageGeometry) -> PageBandSchedule {
-    let mut schedule = PageBandSchedule {
-        content_top_pt: geo.content_top_pt,
-        content_bottom_pt: geo.content_bottom_pt,
-        ..PageBandSchedule::default()
-    };
+fn repeated_header_height(headers: &[Unit]) -> f64 {
+    headers
+        .iter()
+        .map(|header| header.float_leading + header.height)
+        .sum()
+}
+
+fn page_band_schedule(
+    units: &[Unit],
+    pages: &[WorkPage],
+    run_layouts: &[RunLayout],
+) -> PageBandSchedule {
+    let mut schedule = PageBandSchedule::default();
     for (page_index, page) in pages.iter().enumerate() {
+        let geo = &run_layouts[page.governing_run].geo;
+        schedule
+            .page_bounds
+            .insert(page_index, (geo.content_top_pt, geo.content_bottom_pt));
         let mut bands = page.float_bands.clone();
         for band in &mut bands {
             if band.side != PageBandSide::Full {
@@ -1590,7 +1672,18 @@ fn page_band_schedule(units: &[Unit], pages: &[WorkPage], geo: &PageGeometry) ->
 fn page_band_schedules_equivalent(previous: &PageBandSchedule, next: &PageBandSchedule) -> bool {
     if previous.unit_placements.len() != next.unit_placements.len()
         || previous.bands.len() != next.bands.len()
+        || previous.page_bounds.len() != next.page_bounds.len()
     {
+        return false;
+    }
+    let same_bounds = previous.page_bounds.iter().all(|(page, (top, bottom))| {
+        next.page_bounds
+            .get(page)
+            .is_some_and(|(next_top, next_bottom)| {
+                (top - next_top).abs() <= 0.01 && (bottom - next_bottom).abs() <= 0.01
+            })
+    });
+    if !same_bounds {
         return false;
     }
     let same_units = previous.unit_placements.iter().all(|(unit, placement)| {
@@ -2051,10 +2144,7 @@ fn append_endnotes(
     refs: &[(NoteKind, i64)],
     pages: &mut Vec<WorkPage>,
 ) -> Result<()> {
-    let governing_run = pages
-        .last()
-        .map(|page| page.governing_run)
-        .unwrap_or(run_layouts.len() - 1);
+    let governing_run = run_layouts.len() - 1;
     let geo = &run_layouts[governing_run].geo;
     let mut counters = ListCounters::default();
     let mut table_headers = HashMap::new();

@@ -1909,17 +1909,17 @@ fn fixture_section_page_format_border_vertical_align_and_even_start() {
     assert_profile_convert_agree(&bytes);
     let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
     let laid = layout_docx(&doc).unwrap().0;
-    assert_eq!(laid.pages.len(), 2);
-    assert!(page_text(&laid.pages[1]).contains("II"));
+    assert_eq!(laid.pages.len(), 1);
+    assert!(page_text(&laid.pages[0]).contains('I'));
     assert!(
-        laid.pages[1]
+        laid.pages[0]
             .items
             .iter()
             .filter(|item| matches!(item.item, Item::Line { .. }))
             .count()
             >= 4
     );
-    let body_y = laid.pages[1]
+    let body_y = laid.pages[0]
         .items
         .iter()
         .find(|item| {

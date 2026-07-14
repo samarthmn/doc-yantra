@@ -2,7 +2,7 @@
 
 use office_core::layout::{Item, Page, WordDoc, layout_docx};
 use office_core::testkit::{DOC_NAMESPACES, minimal_docx, zip_package};
-use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
+use office_core::{ConvertOptions, OfficeError, OfficeFormat, UnsupportedCode, convert, profile};
 
 const LETTER_SECTION: &str = r#"<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="720" w:footer="720"/>"#;
 const SHORT_SECTION: &str = r#"<w:pgSz w:w="12240" w:h="5760"/><w:pgMar w:top="720" w:right="1800" w:bottom="720" w:left="1800" w:header="360" w:footer="360"/>"#;
@@ -43,6 +43,25 @@ fn text_position(page: &Page, needle: &str) -> (f64, f64) {
         .unwrap_or_else(|| panic!("missing {needle:?} on page: {:?}", page_text(page)))
 }
 
+fn text_positions(page: &Page, needle: &str) -> Vec<(f64, f64)> {
+    page.items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run)
+                if run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.ch)
+                    .collect::<String>()
+                    .contains(needle) =>
+            {
+                Some((positioned.x_pt, positioned.y_pt))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn paragraph(text: &str) -> String {
     format!(r#"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"#)
 }
@@ -80,6 +99,51 @@ fn footer_docx(body: &str) -> Vec<u8> {
         ("word/footer1.xml", inherited.as_bytes()),
         ("word/footer2.xml", overridden.as_bytes()),
     ])
+}
+
+fn package_with_parts(
+    body: &str,
+    document_rels: &str,
+    extra_parts: Vec<(&str, Vec<u8>)>,
+) -> Vec<u8> {
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{DOC_NAMESPACES}><w:body>{body}</w:body></w:document>"#
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let mut owned = vec![
+        ("[Content_Types].xml", content_types.as_bytes().to_vec()),
+        ("_rels/.rels", root_rels.as_bytes().to_vec()),
+        ("word/document.xml", document.into_bytes()),
+        (
+            "word/_rels/document.xml.rels",
+            document_rels.as_bytes().to_vec(),
+        ),
+    ];
+    owned.extend(extra_parts);
+    let borrowed = owned
+        .iter()
+        .map(|(name, bytes)| (*name, bytes.as_slice()))
+        .collect::<Vec<_>>();
+    zip_package(&borrowed)
+}
+
+fn page_float(width_emu: i64, height_emu: i64) -> String {
+    format!(
+        r#"<w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" allowOverlap="1" distT="0" distB="114300" distL="0" distR="114300"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>left</wp:align></wp:positionH><wp:positionV relativeFrom="margin"><wp:align>top</wp:align></wp:positionV><wp:extent cx="{width_emu}" cy="{height_emu}"/><wp:wrapSquare wrapText="bothSides"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    )
+}
+
+fn image_docx(body: &str) -> Vec<u8> {
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#;
+    package_with_parts(
+        body,
+        rels,
+        vec![(
+            "word/media/image1.png",
+            include_bytes!("../../mock-files/png/file1.png").to_vec(),
+        )],
+    )
 }
 
 #[test]
@@ -166,21 +230,224 @@ fn next_page_preserves_an_empty_trailing_section_page() {
 }
 
 #[test]
-fn even_and_odd_transitions_insert_only_required_parity_pages() {
+fn entering_odd_and_even_sections_insert_required_physical_parity_blanks() {
     let body = format!(
-        "{}{}{}<w:sectPr><w:type w:val=\"oddPage\"/>{LETTER_SECTION}</w:sectPr>",
+        "{}{}{}{}<w:sectPr><w:type w:val=\"evenPage\"/>{LETTER_SECTION}</w:sectPr>",
         section_end("ONE", LETTER_SECTION),
         section_end(
-            "TWO",
-            &format!(r#"<w:type w:val="evenPage"/>{LETTER_SECTION}"#)
+            "ODD",
+            &format!(r#"<w:type w:val="oddPage"/>{LETTER_SECTION}"#)
         ),
-        paragraph("THREE")
+        section_end("NEXT", LETTER_SECTION),
+        paragraph("EVEN")
     );
     let laid = open_layout(&minimal_docx(&body));
-    assert_eq!(laid.pages.len(), 3);
+    assert_eq!(laid.pages.len(), 6);
     assert!(page_text(&laid.pages[0]).contains("ONE"));
-    assert!(page_text(&laid.pages[1]).contains("TWO"));
-    assert!(page_text(&laid.pages[2]).contains("THREE"));
+    assert!(page_text(&laid.pages[1]).is_empty());
+    assert!(page_text(&laid.pages[2]).contains("ODD"));
+    assert!(page_text(&laid.pages[3]).contains("NEXT"));
+    assert!(page_text(&laid.pages[4]).is_empty());
+    assert!(page_text(&laid.pages[5]).contains("EVEN"));
+}
+
+#[test]
+fn only_the_page_with_a_footnote_reserves_the_note_band() {
+    let note_page = format!(
+        r#"<w:p><w:pPr><w:sectPr>{SHORT_SECTION}</w:sectPr></w:pPr><w:r><w:t>NOTE PAGE</w:t><w:footnoteReference w:id="1"/></w:r></w:p>"#
+    );
+    let later_body = (0..8)
+        .map(|index| exact_paragraph(&format!("FULL HEIGHT {index}")))
+        .collect::<String>();
+    let body = format!("{note_page}{later_body}<w:sectPr>{SHORT_SECTION}</w:sectPr>");
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="1"><w:p><w:r><w:t>PAGE ONE NOTE</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let laid = open_layout(&package_with_parts(
+        &body,
+        rels,
+        vec![("word/footnotes.xml", footnotes.into_bytes())],
+    ));
+    assert_eq!(
+        laid.pages.len(),
+        2,
+        "page texts: {:?}",
+        laid.pages.iter().map(page_text).collect::<Vec<_>>()
+    );
+    assert!(page_text(&laid.pages[0]).contains("PAGE ONE NOTE"));
+    assert!(page_text(&laid.pages[1]).contains("FULL HEIGHT 7"));
+    assert!(
+        text_position(&laid.pages[1], "FULL HEIGHT 7").1 < 252.0,
+        "later page must retain the full body height"
+    );
+}
+
+#[test]
+fn balanced_columns_include_each_repeated_table_header_height() {
+    let row = |label: &str, line_twips: u32, header: bool| {
+        let header = if header { "<w:tblHeader/>" } else { "" };
+        format!(
+            r#"<w:tr><w:trPr>{header}</w:trPr><w:tc><w:p><w:pPr><w:spacing w:line="{line_twips}" w:lineRule="exact"/></w:pPr><w:r><w:t>{label}</w:t></w:r></w:p></w:tc></w:tr>"#
+        )
+    };
+    let mut table = r#"<w:tbl><w:tblPr><w:tblW w:w="4320" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid>"#.to_string();
+    table.push_str(&row("REPEATED HEADER", 960, true));
+    for index in 0..4 {
+        table.push_str(&row(&format!("BODY ROW {index}"), 480, false));
+    }
+    table.push_str("</w:tbl>");
+    table.push_str(&format!(
+        r#"<w:sectPr>{SHORT_SECTION}{TWO_COLUMNS}</w:sectPr>"#
+    ));
+    let laid = open_layout(&minimal_docx(&table));
+    assert_eq!(laid.pages.len(), 1);
+    assert_eq!(text_positions(&laid.pages[0], "REPEATED HEADER").len(), 2);
+    let left_rows = (0..4)
+        .filter(|index| text_position(&laid.pages[0], &format!("BODY ROW {index}")).0 < 200.0)
+        .count();
+    assert_eq!(
+        left_rows, 2,
+        "repeated headers must participate in balancing"
+    );
+}
+
+#[test]
+fn balancing_does_not_orphan_a_header_before_one_large_atomic_row() {
+    let table = format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="4320" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid><w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:t>ATOMIC HEADER</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:pPr><w:keepLines/><w:spacing w:line="2400" w:lineRule="exact"/></w:pPr><w:r><w:t>LARGE ATOMIC ROW</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr>{SHORT_SECTION}{TWO_COLUMNS}</w:sectPr>"#
+    );
+    let laid = open_layout(&minimal_docx(&table));
+    assert_eq!(laid.pages.len(), 1);
+    assert_eq!(text_positions(&laid.pages[0], "ATOMIC HEADER").len(), 1);
+    assert!(
+        text_position(&laid.pages[0], "LARGE ATOMIC ROW").0 < 200.0,
+        "the header and its only atomic row must stay together in the first column"
+    );
+}
+
+#[test]
+fn balanced_columns_keep_keep_next_groups_atomic() {
+    let exact = |label: &str, keep_next: bool| {
+        let keep = if keep_next { "<w:keepNext/>" } else { "" };
+        format!(
+            r#"<w:p><w:pPr>{keep}<w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>{label}</w:t></w:r></w:p>"#
+        )
+    };
+    let body = format!(
+        "{}{}{}{}<w:sectPr>{SHORT_SECTION}{TWO_COLUMNS}</w:sectPr>",
+        exact("LEAD", false),
+        exact("KEEP HEADING", true),
+        exact("KEEP FOLLOW", false),
+        exact("TAIL", false),
+    );
+    let laid = open_layout(&minimal_docx(&body));
+    let heading = text_position(&laid.pages[0], "KEEP HEADING");
+    let following = text_position(&laid.pages[0], "KEEP FOLLOW");
+    let tail = text_position(&laid.pages[0], "TAIL");
+    assert!((heading.0 - following.0).abs() < 0.1);
+    assert!((tail.0 - following.0).abs() > 100.0);
+}
+
+#[test]
+fn later_next_page_geometry_drives_page_float_reflow_bounds() {
+    let first = section_end("SHORT FIRST", SHORT_SECTION);
+    let anchor = page_float(3_175_000, 5_080_000);
+    let wrapped = "WRAP GEOMETRY words must remain beside the later-section float. ".repeat(8);
+    let body = format!(
+        r#"{first}<w:p><w:r>{anchor}</w:r></w:p><w:p><w:r><w:t>{wrapped}</w:t></w:r></w:p><w:sectPr>{LETTER_SECTION}</w:sectPr>"#
+    );
+    let laid = open_layout(&image_docx(&body));
+    assert!(laid.pages.len() >= 2);
+    let wrapped_under_float = text_positions(&laid.pages[1], "WRAP GEOMETRY")
+        .into_iter()
+        .filter(|(_, y)| *y < 484.0)
+        .collect::<Vec<_>>();
+    assert!(!wrapped_under_float.is_empty());
+    assert!(
+        wrapped_under_float.iter().all(|(x, _)| *x > 330.0),
+        "later-section lines escaped the float window: {wrapped_under_float:?}"
+    );
+}
+
+#[test]
+fn continuous_page_float_under_prior_non_top_alignment_fails_with_profile_parity() {
+    let first = section_end(
+        "CENTERED FIRST",
+        &format!(r#"{LETTER_SECTION}<w:vAlign w:val="center"/>"#),
+    );
+    let anchor = page_float(977_900, 977_900);
+    let body = format!(
+        r#"{first}<w:p><w:r><w:t>LATER FLOAT</w:t>{anchor}</w:r></w:p><w:sectPr><w:type w:val="continuous"/>{LETTER_SECTION}<w:vAlign w:val="top"/></w:sectPr>"#
+    );
+    let bytes = image_docx(&body);
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    assert!(predicted.reasons.iter().any(|reason| {
+        reason.code == UnsupportedCode::AnchoredDrawing
+            && reason.detail == "page-anchored drawing with non-top body alignment"
+    }));
+    assert!(matches!(
+        convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()),
+        Err(OfficeError::Unsupported {
+            code: UnsupportedCode::AnchoredDrawing,
+            detail,
+        }) if detail == "page-anchored drawing with non-top body alignment"
+    ));
+}
+
+#[test]
+fn appended_endnote_pages_use_the_final_continuous_section_properties() {
+    let first = section_end(
+        "FIRST BODY",
+        &format!(
+            r#"{LETTER_SECTION}<w:headerReference w:type="default" r:id="rIdH1"/><w:footerReference w:type="default" r:id="rIdF1"/><w:pgNumType w:start="1"/>"#
+        ),
+    );
+    let body = format!(
+        r#"{first}<w:p><w:r><w:t>FINAL BODY</w:t><w:endnoteReference w:id="2"/></w:r></w:p><w:sectPr><w:type w:val="continuous"/>{LETTER_SECTION}<w:headerReference w:type="default" r:id="rIdH2"/><w:footerReference w:type="default" r:id="rIdF2"/><w:pgNumType w:start="9" w:fmt="upperRoman"/><w:pgBorders><w:top w:val="single" w:sz="8" w:color="000000"/><w:bottom w:val="single" w:sz="8" w:color="000000"/><w:left w:val="single" w:sz="8" w:color="000000"/><w:right w:val="single" w:sz="8" w:color="000000"/></w:pgBorders></w:sectPr>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/><Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/><Relationship Id="rIdF1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/><Relationship Id="rIdF2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer2.xml"/></Relationships>"#;
+    let header = |text: &str| {
+        format!(
+            r#"<?xml version="1.0"?><w:hdr{DOC_NAMESPACES}><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:hdr>"#
+        )
+        .into_bytes()
+    };
+    let footer = |text: &str| {
+        format!(
+            r#"<?xml version="1.0"?><w:ftr{DOC_NAMESPACES}><w:p><w:r><w:t>{text} </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>"#
+        )
+        .into_bytes()
+    };
+    let endnotes = format!(
+        r#"<?xml version="1.0"?><w:endnotes{DOC_NAMESPACES}><w:endnote w:id="2"><w:p><w:r><w:t>FINAL ENDNOTE</w:t></w:r></w:p></w:endnote></w:endnotes>"#
+    );
+    let laid = open_layout(&package_with_parts(
+        &body,
+        rels,
+        vec![
+            ("word/header1.xml", header("HEADER ONE")),
+            ("word/header2.xml", header("HEADER FINAL")),
+            ("word/footer1.xml", footer("FOOTER ONE")),
+            ("word/footer2.xml", footer("FOOTER FINAL")),
+            ("word/endnotes.xml", endnotes.into_bytes()),
+        ],
+    ));
+    assert_eq!(laid.pages.len(), 2);
+    assert!(page_text(&laid.pages[0]).contains("HEADER ONE"));
+    let last = &laid.pages[1];
+    let last_text = page_text(last);
+    assert!(last_text.contains("FINAL ENDNOTE"));
+    assert!(last_text.contains("HEADER FINAL"));
+    assert!(last_text.contains("FOOTER FINAL"));
+    assert!(last_text.contains("IX"), "last page text: {last_text:?}");
+    assert!(
+        last.items
+            .iter()
+            .filter(|item| matches!(item.item, Item::Line { .. }))
+            .count()
+            >= 4
+    );
 }
 
 #[test]

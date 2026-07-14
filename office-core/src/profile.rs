@@ -1092,7 +1092,12 @@ fn add_anchor_column_reasons(profile: &mut DocProfile, document: &wml::Document)
         })
         .collect();
     let mut start = 0usize;
-    for (block_index, section) in &boundaries {
+    let mut governing_alignment = None;
+    for (run_index, (block_index, section)) in boundaries.iter().enumerate() {
+        if run_index == 0 || section.sect_type != SectType::Continuous {
+            governing_alignment = Some(section.vertical_align);
+        }
+        let section_blocks = &document.body[start..=*block_index];
         if section.cols.is_multi() && blocks_have_body_anchor(&document.body[start..=*block_index])
         {
             profile.add_reason_deduped(
@@ -1100,7 +1105,18 @@ fn add_anchor_column_reasons(profile: &mut DocProfile, document: &wml::Document)
                 "anchored drawing in a multi-column section",
             );
         }
+        if governing_alignment != Some(wml::PageVAlign::Top)
+            && blocks_have_page_float(section_blocks)
+        {
+            profile.add_reason_deduped(
+                UnsupportedCode::AnchoredDrawing,
+                "page-anchored drawing with non-top body alignment",
+            );
+        }
         start = *block_index + 1;
+    }
+    if boundaries.is_empty() || document.final_sect.sect_type != SectType::Continuous {
+        governing_alignment = Some(document.final_sect.vertical_align);
     }
     if document.final_sect.cols.is_multi() && blocks_have_body_anchor(&document.body[start..]) {
         profile.add_reason_deduped(
@@ -1108,11 +1124,26 @@ fn add_anchor_column_reasons(profile: &mut DocProfile, document: &wml::Document)
             "anchored drawing in a multi-column section",
         );
     }
+    if governing_alignment != Some(wml::PageVAlign::Top)
+        && blocks_have_page_float(&document.body[start..])
+    {
+        profile.add_reason_deduped(
+            UnsupportedCode::AnchoredDrawing,
+            "page-anchored drawing with non-top body alignment",
+        );
+    }
 }
 
 fn blocks_have_body_anchor(blocks: &[BlockContent]) -> bool {
     blocks.iter().any(|block| match block {
         BlockContent::Paragraph(paragraph) => paragraph_anchor_count(paragraph) > 0,
+        BlockContent::Table(_) => false,
+    })
+}
+
+fn blocks_have_page_float(blocks: &[BlockContent]) -> bool {
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => paragraph_has_page_float(paragraph),
         BlockContent::Table(_) => false,
     })
 }
