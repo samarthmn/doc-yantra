@@ -35,11 +35,11 @@ pub struct RowLayout {
 
 /// Laid-out table rows plus the resolved grid footprint.
 #[derive(Debug, Default)]
-pub struct TableLayout {
+pub(crate) struct TableLayout {
     /// Resolved table width in points.
-    pub width_pt: f64,
+    pub(crate) width_pt: f64,
     /// Rows positioned relative to the table's left edge.
-    pub rows: Vec<RowLayout>,
+    pub(crate) rows: Vec<RowLayout>,
 }
 
 /// Lays out `table` into rows within `avail_width_pt`, starting at `table_left`

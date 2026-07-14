@@ -477,6 +477,65 @@ pub fn continuous_vertically_aligned_page_float_docx(alignment: &str) -> Vec<u8>
     ))
 }
 
+/// A long paragraph begins near the bottom of page one under a lower side
+/// band, then continues onto page two where that page-one band must not apply.
+pub fn cross_page_page_float_band_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:posOffset>7315200</wp:posOffset>",
+        977_900,
+        914_400,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        1,
+    );
+    let lead = (0..43)
+        .map(|index| format!("<w:p><w:r><w:t>Cross-page lead {index}</w:t></w:r></w:p>"))
+        .collect::<String>();
+    let body = "Continuation words must use only the bands on their physical page. ".repeat(90);
+    image_docx(&format!(
+        "<w:p><w:r>{anchor}</w:r></w:p>{lead}<w:p><w:r><w:t>{body}</w:t></w:r></w:p>"
+    ))
+}
+
+/// A full-width band ends exactly where a left-side band begins. Lines moved
+/// below the first exclusion must be rebroken against the second exclusion.
+pub fn stacked_full_then_side_page_floats_docx() -> Vec<u8> {
+    let full = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:align>top</wp:align>",
+        254_000,
+        762_000,
+        r#"<wp:wrapTopAndBottom/>"#,
+        1,
+    );
+    let side = picture_anchor(
+        "margin",
+        "<wp:align>left</wp:align>",
+        "margin",
+        "<wp:posOffset>876300</wp:posOffset>",
+        977_900,
+        1_016_000,
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        2,
+    );
+    let body = "Shifted side-band text must be narrowed after full-band clearance. ".repeat(8);
+    image_docx(&format!(
+        "<w:p><w:r><w:t>{body}</w:t></w:r></w:p><w:p><w:r>{full}{side}</w:r></w:p>"
+    ))
+}
+
+/// Floating table with independently authored horizontal origin and offset.
+pub fn floating_table_origin_docx(horizontal_anchor: &str, x_twips: i32) -> Vec<u8> {
+    let filler = "Resolved-origin following words ".repeat(20);
+    minimal_docx(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/><w:tblpPr w:vertAnchor="text" w:horzAnchor="{horizontal_anchor}" w:tblpX="{x_twips}" w:tblpY="0" w:rightFromText="187"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Resolved origin table</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>{filler}</w:t></w:r></w:p>"#
+    ))
+}
+
 /// One left page band with less than 36pt remaining; no opposite band exists.
 pub fn single_narrow_page_float_docx() -> Vec<u8> {
     let anchor = picture_anchor(

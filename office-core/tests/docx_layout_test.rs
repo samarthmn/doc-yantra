@@ -3,14 +3,15 @@
 use office_core::layout::{Item, LaidOutDocument, Page, WordDoc, layout_docx};
 use office_core::testkit::{
     continuous_multicolumn_anchor_docx, continuous_vertically_aligned_page_float_docx,
-    disjoint_left_page_floats_docx, floating_table_block_flow_docx, floating_table_side_wrap_docx,
+    cross_page_page_float_band_docx, disjoint_left_page_floats_docx,
+    floating_table_block_flow_docx, floating_table_origin_docx, floating_table_side_wrap_docx,
     full_and_side_page_floats_docx, margin_top_left_float_docx, minimal_docx,
     multicolumn_anchor_docx, non_convergent_page_float_docx, opposite_page_floats_docx,
     overlapping_page_floats_docx, page_center_float_docx, page_floats_without_text_window_docx,
     page_top_bottom_float_docx, paragraph_column_top_bottom_float_docx,
     paragraph_float_with_page_horizontal_origin_docx, single_narrow_page_float_docx,
-    stale_page_band_schedule_docx, two_paragraph_floats_docx,
-    vertically_aligned_body_page_float_docx, wrap_document, zip_package,
+    stacked_full_then_side_page_floats_docx, stale_page_band_schedule_docx,
+    two_paragraph_floats_docx, vertically_aligned_body_page_float_docx, wrap_document, zip_package,
 };
 use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
 
@@ -432,6 +433,102 @@ fn continuous_non_top_body_alignment_page_float_fails_profile_convert_parity() {
         assert_anchor_rejection_parity(
             &continuous_vertically_aligned_page_float_docx(alignment),
             "page-anchored drawing with non-top body alignment",
+        );
+    }
+}
+
+#[test]
+fn page_float_band_does_not_bleed_into_paragraph_continuation_page() {
+    let bytes = cross_page_page_float_band_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    assert!(laid.pages.len() >= 2, "pages={}", laid.pages.len());
+    let page_one = glyph_runs(&laid.pages[0]);
+    let narrowed = page_one
+        .iter()
+        .find(|(text, x, ..)| text.contains("Continuation") && *x >= 158.0 - 0.15)
+        .expect("page-one continuation line crossing the lower band");
+    assert!(narrowed.2 > 600.0, "narrowed={narrowed:?}");
+    let page_two = glyph_runs(&laid.pages[1]);
+    let initial = page_two
+        .iter()
+        .find(|(text, ..)| text.contains("Continuation"))
+        .expect("paragraph continuation on page two");
+    assert!(initial.2 < 120.0, "initial={initial:?}");
+    assert!(
+        (initial.1 - 72.0).abs() <= 0.15,
+        "page-one band leaked into page two: {initial:?}"
+    );
+}
+
+#[test]
+fn full_width_clearance_reflows_shifted_lines_against_later_side_band() {
+    let bytes = stacked_full_then_side_page_floats_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let shifted = glyph_runs(&laid.pages[0])
+        .into_iter()
+        .find(|(text, ..)| text.contains("Shifted"))
+        .expect("shifted text");
+    assert!(shifted.2 >= 141.0 - 0.15, "shifted={shifted:?}");
+    assert!(
+        shifted.1 >= 158.0 - 0.15,
+        "full-width clearance moved a full-width line into the side band: {shifted:?}"
+    );
+}
+
+#[test]
+fn floating_table_side_wrap_uses_resolved_physical_origin() {
+    let positions = |origin: &str, x_twips: i32| {
+        let bytes = floating_table_origin_docx(origin, x_twips);
+        let doc = WordDoc::open(&bytes, &opts()).expect("open");
+        let laid = layout_docx(&doc).expect("layout").0;
+        let runs = glyph_runs(&laid.pages[0]);
+        let table = runs
+            .iter()
+            .find(|(text, ..)| text.contains("Resolved origin table"))
+            .expect("table text");
+        let following = runs
+            .iter()
+            .find(|(text, ..)| text.contains("Resolved-origin"))
+            .expect("following text");
+        (table.1, following.1, following.2)
+    };
+
+    let page_left = positions("page", 0);
+    assert!((page_left.0 - 5.4).abs() <= 0.15, "page_left={page_left:?}");
+    assert!(
+        (page_left.1 - 72.0).abs() <= 0.15 && page_left.2 > 90.0,
+        "physical page-left table must keep legacy block flow: {page_left:?}"
+    );
+
+    let content_left = positions("page", 1440);
+    assert!(
+        content_left.1 >= 225.0 - 0.15 && content_left.2 < 90.0,
+        "page-origin table resolved to content-left must side-wrap: {content_left:?}"
+    );
+
+    let page_right = positions("page", 9360);
+    assert!(
+        (page_right.0 - 473.4).abs() <= 0.15,
+        "page_right={page_right:?}"
+    );
+    assert!(
+        (page_right.1 - 72.0).abs() <= 0.15 && page_right.2 > 90.0,
+        "physical page-right table must keep legacy block flow: {page_right:?}"
+    );
+
+    let content_right = positions("page", 7920);
+    assert!(
+        (content_right.1 - 72.0).abs() <= 0.15 && content_right.2 < 90.0,
+        "page-origin table resolved to content-right must side-wrap: {content_right:?}"
+    );
+
+    for origin in ["margin", "text"] {
+        let content_left = positions(origin, 0);
+        assert!(
+            content_left.1 >= 225.0 - 0.15 && content_left.2 < 90.0,
+            "{origin}-origin content-left table must side-wrap: {content_left:?}"
         );
     }
 }

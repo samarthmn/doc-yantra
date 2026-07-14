@@ -1079,10 +1079,8 @@ pub struct FloatingTableProps {
     pub horizontal: AnchorOrigin,
     /// Vertical anchor origin.
     pub vertical: AnchorOrigin,
-    /// Legacy maximum left/right text clearance used by block-flow fallback.
+    /// Maximum left/right text clearance used by wrapping and block fallback.
     pub wrap_padding_pt: f64,
-    /// Text clearance above, below, left, and right of the table.
-    pub distances_pt: [f64; 4],
 }
 
 /// A table row.
@@ -2784,18 +2782,15 @@ pub fn parse_tbl_props(node: Node) -> TblProps {
                     Some("margin") => AnchorOrigin::Margin,
                     _ => AnchorOrigin::Paragraph,
                 };
-                let distances_pt = [
-                    "topFromText",
-                    "bottomFromText",
-                    "leftFromText",
-                    "rightFromText",
-                ]
-                .map(|name| {
-                    parse_i64(attr(c, W, name))
-                        .map(twip_to_pt)
-                        .unwrap_or(0.0)
-                        .max(0.0)
-                });
+                let wrap_padding_pt = ["leftFromText", "rightFromText"]
+                    .map(|name| {
+                        parse_i64(attr(c, W, name))
+                            .map(twip_to_pt)
+                            .unwrap_or(0.0)
+                            .max(0.0)
+                    })
+                    .into_iter()
+                    .fold(0.0, f64::max);
                 props.floating = Some(FloatingTableProps {
                     x_pt: parse_i64(attr(c, W, "tblpX"))
                         .map(twip_to_pt)
@@ -2805,8 +2800,7 @@ pub fn parse_tbl_props(node: Node) -> TblProps {
                         .unwrap_or(0.0),
                     horizontal: origin(attr(c, W, "horzAnchor")),
                     vertical: origin(attr(c, W, "vertAnchor")),
-                    wrap_padding_pt: distances_pt[2].max(distances_pt[3]),
-                    distances_pt,
+                    wrap_padding_pt,
                 });
             }
             "shd" | "bidiVisual" | "tblOverlap" | "tblCellSpacing" => props

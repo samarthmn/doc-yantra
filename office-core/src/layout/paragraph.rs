@@ -122,6 +122,16 @@ pub(crate) struct PageHorizontalContext {
 }
 
 impl EdgeWrapBand {
+    fn applies_at(self, top: f64, line_height_pt: f64, baseline_offset_pt: f64) -> bool {
+        if self.uses_text_baseline {
+            let baseline = top + baseline_offset_pt;
+            baseline > self.top_pt + 0.01 && baseline < self.bottom_pt - 0.01
+        } else {
+            let bottom = top + line_height_pt;
+            top < self.bottom_pt - 0.01 && bottom > self.top_pt + 0.01
+        }
+    }
+
     fn applies_to_line(
         self,
         line_index: usize,
@@ -129,16 +139,87 @@ impl EdgeWrapBand {
         baseline_offset_pt: f64,
     ) -> bool {
         let top = line_index as f64 * line_height_pt;
-        if self.uses_text_baseline {
-            // Tight wrapping evaluates the polygon at the text baseline.
-            // Testing the complete line box keeps a line constrained after
-            // its visible text has already cleared the polygon's bottom edge.
-            let baseline = top + baseline_offset_pt;
-            baseline > self.top_pt + 0.01 && baseline < self.bottom_pt - 0.01
-        } else {
-            let bottom = top + line_height_pt;
-            top < self.bottom_pt - 0.01 && bottom > self.top_pt + 0.01
+        self.applies_at(top, line_height_pt, baseline_offset_pt)
+    }
+}
+
+impl WrapBand {
+    fn from_exclusion(wrap: WrapExclusion) -> Self {
+        let convert = |band: ExclusionBand| EdgeWrapBand {
+            source: band.source,
+            top_pt: band.top_remaining_pt.max(0.0),
+            bottom_pt: band.remaining_pt,
+            inset_pt: band.inset_pt,
+            uses_text_baseline: band.uses_text_baseline,
+        };
+        Self {
+            left: wrap
+                .left_bands
+                .into_iter()
+                .filter(|band| band.remaining_pt > 0.01)
+                .map(convert)
+                .collect(),
+            right: wrap
+                .right_bands
+                .into_iter()
+                .filter(|band| band.remaining_pt > 0.01)
+                .map(convert)
+                .collect(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ScheduledLineConstraint {
+    clearance_pt: f64,
+    left_inset_pt: f64,
+    right_inset_pt: f64,
+}
+
+fn scheduled_line_constraint(
+    wrap: Option<&WrapBand>,
+    avail_width_pt: f64,
+    line_height_pt: f64,
+    baseline_offset_pt: f64,
+) -> ScheduledLineConstraint {
+    let Some(wrap) = wrap else {
+        return ScheduledLineConstraint::default();
+    };
+    let mut full_bands = wrap
+        .left
+        .iter()
+        .copied()
+        .filter(|band| band.inset_pt >= avail_width_pt - 0.01)
+        .collect::<Vec<_>>();
+    full_bands.sort_by(|left, right| {
+        left.top_pt
+            .partial_cmp(&right.top_pt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut clearance_pt = 0.0_f64;
+    for band in full_bands {
+        if band.applies_at(clearance_pt, line_height_pt, baseline_offset_pt) {
+            clearance_pt = clearance_pt.max(band.bottom_pt);
+        }
+    }
+    let applies = |band: &&EdgeWrapBand| {
+        band.inset_pt < avail_width_pt - 0.01
+            && band.applies_at(clearance_pt, line_height_pt, baseline_offset_pt)
+    };
+    ScheduledLineConstraint {
+        clearance_pt,
+        left_inset_pt: wrap
+            .left
+            .iter()
+            .filter(applies)
+            .map(|band| band.inset_pt)
+            .fold(0.0, f64::max),
+        right_inset_pt: wrap
+            .right
+            .iter()
+            .filter(applies)
+            .map(|band| band.inset_pt)
+            .fold(0.0, f64::max),
     }
 }
 
@@ -336,6 +417,7 @@ pub(crate) fn layout_paragraph_with_wrap(
         field_ctx,
         incoming_wrap,
         None,
+        Vec::new(),
     )
 }
 
@@ -352,6 +434,7 @@ pub(crate) fn layout_paragraph_with_page_wrap(
     field_ctx: Option<FieldContext>,
     incoming_wrap: Option<WrapExclusion>,
     page_horizontal: PageHorizontalContext,
+    scheduled_line_wraps: Vec<Option<WrapExclusion>>,
 ) -> Result<ParaLayout> {
     layout_paragraph_with_wrap_context(
         doc,
@@ -363,6 +446,7 @@ pub(crate) fn layout_paragraph_with_page_wrap(
         field_ctx,
         incoming_wrap,
         Some(page_horizontal),
+        scheduled_line_wraps,
     )
 }
 
@@ -377,6 +461,7 @@ fn layout_paragraph_with_wrap_context(
     field_ctx: Option<FieldContext>,
     incoming_wrap: Option<WrapExclusion>,
     page_horizontal: Option<PageHorizontalContext>,
+    scheduled_line_wraps: Vec<Option<WrapExclusion>>,
 ) -> Result<ParaLayout> {
     let eff_para = doc.styles.para_props(&para.props);
     if let Some(detail) = eff_para.borders.unsupported_detail(&doc.theme) {
@@ -519,33 +604,15 @@ fn layout_paragraph_with_wrap_context(
         .collect();
 
     let mut wrap_band = incoming_wrap
-        .map(|wrap| WrapBand {
-            left: wrap
-                .left_bands
-                .into_iter()
-                .filter(|band| band.remaining_pt > 0.01)
-                .map(|band| EdgeWrapBand {
-                    source: band.source,
-                    top_pt: band.top_remaining_pt.max(0.0),
-                    bottom_pt: band.remaining_pt,
-                    inset_pt: band.inset_pt,
-                    uses_text_baseline: band.uses_text_baseline,
-                })
-                .collect(),
-            right: wrap
-                .right_bands
-                .into_iter()
-                .filter(|band| band.remaining_pt > 0.01)
-                .map(|band| EdgeWrapBand {
-                    source: band.source,
-                    top_pt: band.top_remaining_pt.max(0.0),
-                    bottom_pt: band.remaining_pt,
-                    inset_pt: band.inset_pt,
-                    uses_text_baseline: band.uses_text_baseline,
-                })
-                .collect(),
-        })
+        .map(WrapBand::from_exclusion)
         .filter(|wrap| !wrap.left.is_empty() || !wrap.right.is_empty());
+    let scheduled_line_wraps = scheduled_line_wraps
+        .into_iter()
+        .map(|wrap| {
+            wrap.map(WrapBand::from_exclusion)
+                .filter(|wrap| !wrap.left.is_empty() || !wrap.right.is_empty())
+        })
+        .collect::<Vec<_>>();
     let mut full_width_bands = Vec::new();
     if let Some(band) = &mut wrap_band {
         let mut side_bands = Vec::new();
@@ -625,6 +692,14 @@ fn layout_paragraph_with_wrap_context(
     }
 
     let constrained_width = |line_index: usize, base_width: f64, base_x: f64| {
+        let scheduled = scheduled_line_constraint(
+            scheduled_line_wraps
+                .get(line_index)
+                .and_then(Option::as_ref),
+            avail_width_pt,
+            nominal_line_height,
+            nominal_baseline_offset,
+        );
         let left_inset = wrap_band
             .as_ref()
             .into_iter()
@@ -633,7 +708,7 @@ fn layout_paragraph_with_wrap_context(
                 band.applies_to_line(line_index, nominal_line_height, nominal_baseline_offset)
             })
             .map(|band| band.inset_pt)
-            .fold(0.0, f64::max);
+            .fold(scheduled.left_inset_pt, f64::max);
         let right_inset = wrap_band
             .as_ref()
             .into_iter()
@@ -642,12 +717,13 @@ fn layout_paragraph_with_wrap_context(
                 band.applies_to_line(line_index, nominal_line_height, nominal_baseline_offset)
             })
             .map(|band| band.inset_pt)
-            .fold(0.0, f64::max);
+            .fold(scheduled.right_inset_pt, f64::max);
         let left_shift = (left_inset - base_x).max(0.0);
         let right_cut = (right_inset - right).max(0.0);
         (
             (base_width - left_shift - right_cut).max(1.0),
             base_x + left_shift,
+            scheduled.clearance_pt,
         )
     };
 
@@ -678,9 +754,9 @@ fn layout_paragraph_with_wrap_context(
             content_rest
         };
         let initial_x = left + if is_first { first_offset.max(0.0) } else { 0.0 };
-        let (content_w, base_x) = constrained_width(i, base_content_w, initial_x);
+        let (content_w, base_x, clearance_pt) = constrained_width(i, base_content_w, initial_x);
         let this_label = if is_first { label.as_ref() } else { None };
-        lines.push(place_line(
+        let mut line = place_line(
             &atoms,
             line_atoms,
             content_w,
@@ -696,7 +772,9 @@ fn layout_paragraph_with_wrap_context(
             this_label,
             rtl,
             page_horizontal,
-        ));
+        );
+        prepend_line_clearance(std::slice::from_mut(&mut line), clearance_pt);
+        lines.push(line);
     }
 
     if lines.is_empty() {

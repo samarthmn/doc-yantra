@@ -47,6 +47,8 @@ struct Unit {
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
     frame: Option<FramePlacement>,
     block_index: usize,
+    /// Stable ordinal of this unit within its source body block.
+    block_unit_index: usize,
     floating_table: Option<FloatingTablePlacement>,
 }
 
@@ -75,6 +77,9 @@ enum PageBandSide {
 #[derive(Debug, Clone, Copy)]
 struct ResolvedPageBand {
     carrier: FloatCarrier,
+    /// The one placed line/unit responsible for clearing a full-width band.
+    /// Side bands apply independently to every intersecting placed unit.
+    clearance_owner: Option<(usize, usize)>,
     side: PageBandSide,
     top_pt: f64,
     bottom_pt: f64,
@@ -90,8 +95,17 @@ struct FloatCarrier {
 
 #[derive(Clone, Default)]
 struct PageBandSchedule {
-    block_placements: HashMap<usize, (usize, f64)>,
+    unit_placements: HashMap<(usize, usize), ScheduledUnitPlacement>,
     bands: HashMap<usize, Vec<ResolvedPageBand>>,
+    content_top_pt: f64,
+    content_bottom_pt: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScheduledUnitPlacement {
+    page_index: usize,
+    top_pt: f64,
+    height_pt: f64,
 }
 
 struct SectionPass {
@@ -102,12 +116,23 @@ struct SectionPass {
 }
 
 impl PageBandSchedule {
-    fn wrap_for_block(&self, block_index: usize, content_width: f64) -> Option<WrapExclusion> {
-        let (page_index, unit_top) = self.block_placements.get(&block_index).copied()?;
+    fn wrap_for_position(
+        &self,
+        page_index: usize,
+        unit_top: f64,
+        owner: (usize, usize),
+        content_width: f64,
+    ) -> Option<WrapExclusion> {
+        let (block_index, block_unit_index) = owner;
         let mut left_bands = Vec::new();
         let mut right_bands = Vec::new();
         for band in self.bands.get(&page_index).into_iter().flatten() {
             if band.bottom_pt <= unit_top + 0.01 {
+                continue;
+            }
+            if band.side == PageBandSide::Full
+                && band.clearance_owner != Some((block_index, block_unit_index))
+            {
                 continue;
             }
             let edge = ExclusionBand {
@@ -130,6 +155,86 @@ impl PageBandSchedule {
             left_bands,
             right_bands,
         })
+    }
+
+    fn wrap_for_unit(
+        &self,
+        block_index: usize,
+        block_unit_index: usize,
+        content_width: f64,
+    ) -> Option<WrapExclusion> {
+        let placement = self
+            .unit_placements
+            .get(&(block_index, block_unit_index))
+            .copied()?;
+        self.wrap_for_position(
+            placement.page_index,
+            placement.top_pt,
+            (block_index, block_unit_index),
+            content_width,
+        )
+    }
+
+    fn line_wraps_for_block(
+        &self,
+        block_index: usize,
+        content_width: f64,
+    ) -> Vec<Option<WrapExclusion>> {
+        let Some(max_ordinal) = self
+            .unit_placements
+            .keys()
+            .filter_map(|(block, ordinal)| (*block == block_index).then_some(*ordinal))
+            .max()
+        else {
+            return Vec::new();
+        };
+        let mut wraps = (0..=max_ordinal)
+            .map(|ordinal| self.wrap_for_unit(block_index, ordinal, content_width))
+            .collect::<Vec<_>>();
+        let Some((last_ordinal, mut placement)) = self
+            .unit_placements
+            .iter()
+            .filter_map(|((block, ordinal), placement)| {
+                (*block == block_index).then_some((*ordinal, *placement))
+            })
+            .max_by_key(|(ordinal, _)| *ordinal)
+        else {
+            return wraps;
+        };
+        let Some(last_band_page) = self
+            .bands
+            .iter()
+            .filter_map(|(page, bands)| (!bands.is_empty()).then_some(*page))
+            .max()
+        else {
+            return wraps;
+        };
+        let step = placement.height_pt.max(1.0);
+        let mut ordinal = last_ordinal + 1;
+        while placement.page_index <= last_band_page {
+            placement.top_pt += step;
+            if placement.top_pt + step > self.content_bottom_pt + 0.01 {
+                placement.page_index += 1;
+                placement.top_pt = self.content_top_pt;
+            }
+            if placement.page_index > last_band_page {
+                break;
+            }
+            wraps.push(self.wrap_for_position(
+                placement.page_index,
+                placement.top_pt,
+                (block_index, ordinal),
+                content_width,
+            ));
+            ordinal += 1;
+        }
+        wraps
+    }
+
+    fn first_page_for_block(&self, block_index: usize) -> Option<usize> {
+        self.unit_placements
+            .get(&(block_index, 0))
+            .map(|placement| placement.page_index)
     }
 }
 
@@ -280,7 +385,7 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
             None,
         )?;
         if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
-            let mut schedule = page_band_schedule(&pass.units, &pass.pages);
+            let mut schedule = page_band_schedule(&pass.units, &pass.pages, &geo);
             let mut converged = false;
             for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
                 let next = run_section_pass(
@@ -293,7 +398,7 @@ pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
                     &counter_start,
                     Some(&schedule),
                 )?;
-                let next_schedule = page_band_schedule(&next.units, &next.pages);
+                let next_schedule = page_band_schedule(&next.units, &next.pages, &geo);
                 let stable = page_band_schedules_equivalent(&schedule, &next_schedule);
                 pass = next;
                 if stable {
@@ -583,12 +688,8 @@ fn build_units(
     let mut previous_scheduled_page = None;
 
     for (block_index, block) in blocks.iter().enumerate() {
-        let scheduled_page = page_schedule.and_then(|schedule| {
-            schedule
-                .block_placements
-                .get(&block_index)
-                .map(|(page, _)| *page)
-        });
+        let scheduled_page =
+            page_schedule.and_then(|schedule| schedule.first_page_for_block(block_index));
         if previous_scheduled_page.is_some()
             && scheduled_page.is_some()
             && previous_scheduled_page != scheduled_page
@@ -617,9 +718,9 @@ fn build_units(
                         prev_after.max(effective_para.spacing.before_pt.unwrap_or(0.0).max(0.0));
                     active_wrap = advance_wrap(wrap, gap);
                 }
-                let scheduled_wrap = page_schedule
-                    .and_then(|schedule| schedule.wrap_for_block(block_index, frame_width));
-                let paragraph_wrap = combine_wraps(active_wrap.take(), scheduled_wrap)?;
+                let scheduled_line_wraps = page_schedule
+                    .map(|schedule| schedule.line_wraps_for_block(block_index, frame_width))
+                    .unwrap_or_default();
                 let mut layout = layout_paragraph_with_page_wrap(
                     doc,
                     warnings,
@@ -628,8 +729,9 @@ fn build_units(
                     frame_width,
                     label,
                     None,
-                    paragraph_wrap,
+                    active_wrap.take(),
                     page_horizontal,
+                    scheduled_line_wraps,
                 )?;
                 active_wrap = layout.wrap_after.take();
                 if let Some(frame) = frame {
@@ -660,7 +762,7 @@ fn build_units(
             }
             BlockContent::Table(t) => {
                 let scheduled_wrap = page_schedule
-                    .and_then(|schedule| schedule.wrap_for_block(block_index, content_w));
+                    .and_then(|schedule| schedule.wrap_for_unit(block_index, 0, content_w));
                 active_wrap = combine_wraps(active_wrap.take(), scheduled_wrap)?;
                 // A table cannot occupy the single text interval beside an
                 // active float. Clear it below the exclusion before laying out
@@ -688,22 +790,31 @@ fn build_units(
                         }
                         row_y += row.height_pt;
                     }
-                    let [_, dist_bottom, dist_left, dist_right] = floating.distances_pt;
-                    let left_hugging = floating.x_pt <= 0.01;
-                    let right_hugging = floating.x_pt + table_layout.width_pt >= content_w - 0.01;
+                    let wrap_padding = floating.wrap_padding_pt;
+                    // Resolve the authored origin into content-relative physical
+                    // coordinates before deciding whether the table hugs a text
+                    // edge. Page-edge tables therefore cannot masquerade as
+                    // content-edge tables merely because their raw offset is 0.
+                    let resolved_x = match floating.horizontal {
+                        AnchorOrigin::Page => floating.x_pt - page_horizontal.content_left_pt,
+                        AnchorOrigin::Margin | AnchorOrigin::Paragraph => floating.x_pt,
+                    };
+                    let left_hugging = resolved_x.abs() <= 0.01;
+                    let right_hugging =
+                        (resolved_x + table_layout.width_pt - content_w).abs() <= 0.01;
                     let (side_wrap, text_window) = if left_hugging {
                         (
                             Some(WrapExclusion {
                                 left_bands: vec![ExclusionBand {
                                     source: None,
                                     top_remaining_pt: floating.y_pt.max(0.0),
-                                    remaining_pt: floating.y_pt + row_y + dist_bottom,
-                                    inset_pt: floating.x_pt + table_layout.width_pt + dist_right,
+                                    remaining_pt: floating.y_pt + row_y + wrap_padding,
+                                    inset_pt: resolved_x + table_layout.width_pt + wrap_padding,
                                     uses_text_baseline: false,
                                 }],
                                 right_bands: Vec::new(),
                             }),
-                            content_w - floating.x_pt - table_layout.width_pt - dist_right,
+                            content_w - resolved_x - table_layout.width_pt - wrap_padding,
                         )
                     } else if right_hugging {
                         (
@@ -712,12 +823,12 @@ fn build_units(
                                 right_bands: vec![ExclusionBand {
                                     source: None,
                                     top_remaining_pt: floating.y_pt.max(0.0),
-                                    remaining_pt: floating.y_pt + row_y + dist_bottom,
-                                    inset_pt: content_w - floating.x_pt + dist_left,
+                                    remaining_pt: floating.y_pt + row_y + wrap_padding,
+                                    inset_pt: content_w - resolved_x + wrap_padding,
                                     uses_text_baseline: false,
                                 }],
                             }),
-                            floating.x_pt - dist_left,
+                            resolved_x - wrap_padding,
                         )
                     } else {
                         (None, 0.0)
@@ -754,6 +865,7 @@ fn build_units(
                         note_refs: Vec::new(),
                         frame: None,
                         block_index,
+                        block_unit_index: 0,
                         floating_table: Some(FloatingTablePlacement {
                             horizontal: floating.horizontal,
                             vertical: floating.vertical,
@@ -767,7 +879,7 @@ fn build_units(
                 }
                 let mut headers = Vec::new();
                 let mut first_row = true;
-                for row in table_layout.rows {
+                for (row_index, row) in table_layout.rows.into_iter().enumerate() {
                     let unit = Unit {
                         height: row.height_pt,
                         gap_before: if first_row { table_gap } else { 0.0 },
@@ -784,6 +896,7 @@ fn build_units(
                         note_refs: Vec::new(),
                         frame: None,
                         block_index,
+                        block_unit_index: row_index,
                         floating_table: None,
                     };
                     if row.is_header {
@@ -886,6 +999,7 @@ fn clone_unit(u: &Unit) -> Unit {
         note_refs: u.note_refs.clone(),
         frame: u.frame,
         block_index: u.block_index,
+        block_unit_index: u.block_unit_index,
         floating_table: u.floating_table,
     }
 }
@@ -987,6 +1101,7 @@ fn push_paragraph_units(
             },
             frame: None,
             block_index,
+            block_unit_index: i,
             floating_table: None,
         });
     }
@@ -1131,6 +1246,7 @@ fn push_frame_unit(
             height_pt,
         }),
         block_index,
+        block_unit_index: 0,
         floating_table: None,
     });
     *prev_after = layout.space_after_pt;
@@ -1286,16 +1402,35 @@ fn paginate(
     pages
 }
 
-fn page_band_schedule(units: &[Unit], pages: &[WorkPage]) -> PageBandSchedule {
-    let mut schedule = PageBandSchedule::default();
+fn page_band_schedule(units: &[Unit], pages: &[WorkPage], geo: &PageGeometry) -> PageBandSchedule {
+    let mut schedule = PageBandSchedule {
+        content_top_pt: geo.content_top_pt,
+        content_bottom_pt: geo.content_bottom_pt,
+        ..PageBandSchedule::default()
+    };
     for (page_index, page) in pages.iter().enumerate() {
-        schedule.bands.insert(page_index, page.float_bands.clone());
+        let mut bands = page.float_bands.clone();
+        for band in &mut bands {
+            if band.side != PageBandSide::Full {
+                continue;
+            }
+            band.clearance_owner = page.unit_ys.iter().find_map(|(unit_index, unit_top)| {
+                let unit = units.get(*unit_index)?;
+                (*unit_top < band.bottom_pt - 0.01 && *unit_top + unit.height > band.top_pt + 0.01)
+                    .then_some((unit.block_index, unit.block_unit_index))
+            });
+        }
+        schedule.bands.insert(page_index, bands);
         for (unit_index, unit_top) in &page.unit_ys {
             if let Some(unit) = units.get(*unit_index) {
-                schedule
-                    .block_placements
-                    .entry(unit.block_index)
-                    .or_insert((page_index, *unit_top));
+                schedule.unit_placements.insert(
+                    (unit.block_index, unit.block_unit_index),
+                    ScheduledUnitPlacement {
+                        page_index,
+                        top_pt: *unit_top,
+                        height_pt: unit.height,
+                    },
+                );
             }
         }
     }
@@ -1303,17 +1438,21 @@ fn page_band_schedule(units: &[Unit], pages: &[WorkPage]) -> PageBandSchedule {
 }
 
 fn page_band_schedules_equivalent(previous: &PageBandSchedule, next: &PageBandSchedule) -> bool {
-    if previous.block_placements.len() != next.block_placements.len()
+    if previous.unit_placements.len() != next.unit_placements.len()
         || previous.bands.len() != next.bands.len()
     {
         return false;
     }
-    let same_blocks = previous.block_placements.iter().all(|(block, (page, y))| {
-        next.block_placements
-            .get(block)
-            .is_some_and(|(next_page, next_y)| page == next_page && (y - next_y).abs() <= 0.01)
+    let same_units = previous.unit_placements.iter().all(|(unit, placement)| {
+        next.unit_placements
+            .get(unit)
+            .is_some_and(|next_placement| {
+                placement.page_index == next_placement.page_index
+                    && (placement.top_pt - next_placement.top_pt).abs() <= 0.01
+                    && (placement.height_pt - next_placement.height_pt).abs() <= 0.01
+            })
     });
-    if !same_blocks {
+    if !same_units {
         return false;
     }
     previous.bands.iter().all(|(page, bands)| {
@@ -1323,6 +1462,7 @@ fn page_band_schedules_equivalent(previous: &PageBandSchedule, next: &PageBandSc
         bands.len() == next_bands.len()
             && bands.iter().zip(next_bands).all(|(left, right)| {
                 left.carrier == right.carrier
+                    && left.clearance_owner == right.clearance_owner
                     && left.side == right.side
                     && (left.top_pt - right.top_pt).abs() <= 0.01
                     && (left.bottom_pt - right.bottom_pt).abs() <= 0.01
@@ -1505,6 +1645,7 @@ fn place_page_float(
         WrapMode::None => None,
         WrapMode::TopAndBottom => Some(ResolvedPageBand {
             carrier,
+            clearance_owner: None,
             side: PageBandSide::Full,
             top_pt,
             bottom_pt,
@@ -1528,6 +1669,7 @@ fn place_page_float(
                 };
             Some(ResolvedPageBand {
                 carrier,
+                clearance_owner: None,
                 side,
                 top_pt,
                 bottom_pt,
