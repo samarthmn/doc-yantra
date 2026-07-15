@@ -62,9 +62,9 @@ Consequences (already reflected in the agent tasks — no further human action):
 
 When DocKosha telemetry surfaces new real-world failures: reproduce with either a synthetic equivalent (never customer text) or a verified public sample, add a `fidelity-corpus/docx/<case>/`, export ground truth per H2's provenance rules, and hand the failing case to a coding agent. Candidates already known from this analysis: a scientific-notation/superscript-heavy case (locks task 4.5's behavior), and a Google-Docs export carrying `⮚`/`♦` deep-level bullets (locks task 4.4).
 
-## H6. Provision the font-broker catalog entries (WITH agent phase 6; ~30 min)
+## H6. Provision the font-broker catalog entries (WITH agent phase 6B; ~30 min)
 
-Phase 6 is now **on-demand exact-font acquisition** (owner direction, 2026-07-15, superseding the same-day metric-overlay decision): the published package ships **zero font binaries**; fonts are resolved at runtime through a host-configured provider against a versioned, hash-pinned catalog. See `agent-tasks-6-on-demand-fonts.md` §N.
+Phase 6 is now **on-demand exact-font acquisition**, split into 6A (fontless package + resolver architecture, no human work) and 6B (Ubuntu acquisition — this task). The published package ships **zero font binaries**; the Carlito/Caladea/Liberation trio needs no human provisioning (the worker boot-registers it from the pdf package's `fonts/` assets — a DocKosha-side config follow-up); only the hash-pinned Ubuntu catalog needs you. See `agent-tasks-6b-on-demand-ubuntu.md` §B and the open CI decision in its §F.
 
 1. Obtain Canonical's official legacy archives: **Ubuntu Font Family 0.83** and **Ubuntu Mono 0.80** — https://design.ubuntu.com/font (licence: https://canonical.com/legal/font-licence). These versions match the ground-truth PDF embeds; do NOT substitute the current redesigned Ubuntu release.
 2. Provision broker/catalog entries for Ubuntu 0.83 Regular, Bold, Italic, Bold Italic and the Ubuntu Mono 0.80 styles the fixture's preflight demands. Record per artifact: source, license (UFL-1.0), internal family and PostScript names, version string, SHA-256, face index, OS/2 fsType embedding permissions, CORS behavior of the serving endpoint, and the broker catalog identifier.
