@@ -3,7 +3,9 @@
 use office_core::layout::{Item, LinkTarget, Page};
 use office_core::pptx::{PptxDoc, render_pptx};
 use office_core::testkit::zip_package;
-use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
+use office_core::{
+    ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile, profile_with_options,
+};
 
 fn opts() -> ConvertOptions {
     ConvertOptions::default()
@@ -1129,7 +1131,7 @@ fn chart_and_smartart_text_use_the_shared_logical_cluster_mapping() {
         ("chart", cached_chart_pptx(&chart)),
         ("SmartArt", smartart_text_pptx(source)),
     ] {
-        let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+        let prof = profile_with_options(&bytes, OfficeFormat::Pptx, &options).unwrap();
         assert!(prof.supported, "{label}: {:?}", prof.reasons);
         let doc = PptxDoc::open(&bytes, &options).unwrap();
         let (laid, _) = render_pptx(&doc).unwrap();
@@ -1292,9 +1294,13 @@ fn pptx_cluster_fallback_shapes_cjk_and_arabic() {
     let bytes = minimal_pptx(
         r#"<p:sp><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6400800" cy="1828800"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr><a:latin typeface="Arial"/></a:rPr><a:t>你好 مرحبا</a:t></a:r></a:p></p:txBody></p:sp>"#,
     );
-    let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+    let options = ConvertOptions {
+        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        ..opts()
+    };
+    let prof = profile_with_options(&bytes, OfficeFormat::Pptx, &options).unwrap();
     assert!(prof.supported, "fallback profile miss: {:?}", prof.reasons);
-    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let doc = PptxDoc::open(&bytes, &options).unwrap();
     let (laid, _) = render_pptx(&doc).unwrap();
     let text = page_text(&laid.pages[0]);
     for expected in ['你', '好', 'م', 'ر', 'ح', 'ب', 'ا'] {
@@ -1303,7 +1309,7 @@ fn pptx_cluster_fallback_shapes_cjk_and_arabic() {
             "missing {expected:?} from {text:?}"
         );
     }
-    assert!(convert(&bytes, OfficeFormat::Pptx, &opts()).is_ok());
+    assert!(convert(&bytes, OfficeFormat::Pptx, &options).is_ok());
 }
 
 #[test]
@@ -1316,7 +1322,7 @@ fn pptx_shaped_clusters_keep_the_complete_logical_source_once() {
         font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
         ..opts()
     };
-    let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+    let prof = profile_with_options(&bytes, OfficeFormat::Pptx, &options).unwrap();
     assert!(prof.supported, "{:?}", prof.reasons);
     let doc = PptxDoc::open(&bytes, &options).unwrap();
     let (laid, _) = render_pptx(&doc).unwrap();

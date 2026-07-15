@@ -3,7 +3,10 @@
 
 use office_core::layout::{Item, Page, PathCommand, Positioned, WordDoc, layout_docx};
 use office_core::testkit::{DOC_NAMESPACES, minimal_docx, zip_package};
-use office_core::{ConvertOptions, OfficeError, OfficeFormat, UnsupportedCode, convert, profile};
+use office_core::{
+    ConvertOptions, OfficeError, OfficeFormat, UnsupportedCode, convert, profile,
+    profile_with_options,
+};
 use sha2::{Digest, Sha256};
 
 fn page_text(page: &Page) -> String {
@@ -2018,7 +2021,7 @@ fn fixture_omml_delimiters_preserve_complete_semantic_graphemes() {
         font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
         ..ConvertOptions::default()
     };
-    let prof = profile(&bytes, OfficeFormat::Docx).unwrap();
+    let prof = profile_with_options(&bytes, OfficeFormat::Docx, &options).unwrap();
     assert!(prof.supported, "{:?}", prof.reasons);
     let doc = WordDoc::open(&bytes, &options).unwrap();
     let laid = layout_docx(&doc).unwrap().0;

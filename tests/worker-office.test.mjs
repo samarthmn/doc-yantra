@@ -16,11 +16,17 @@ const PKG = join(ROOT, "office-core", "wasm", "pkg");
 const direct = require(PKG);
 const pdf = require(join(ROOT, "pdf-core", "wasm", "pkg"));
 const { createOfficeEngineWorker, EngineWorkerError } = require(join(PKG, "worker.js"));
+const { createMockOfficeFontProvider } = require("./fixtures/mock-office-font-provider.cjs");
 
 const COMPLEX_INPUT_SHA256 =
   "8c2a8c4725e77bbfb4ddc7925674dc221611a39b876dbd7ea2efc829e70b8530";
 const COMPLEX_OUTPUT_SHA256 =
   "a3629b6aae822d56127cba7ab07ea6c0fc3ab51910b72bad0e0db301cdde3e1a";
+const MOCK_REGISTERED_FONT_SHA256S = [
+  "51edbfa32d8af939913ae1f4ad0a5173e32083499218c133384638090295f0b0", // Carlito Bold
+  "59faf27a90dee5c1b7813b12b26c725ea88adc1bfe37b0ac8e0b8b32a5732c2a", // Caladea Regular
+  "ca019755404c45627a8566915df99068949dc32ee2bce48d6aeee7542d2a0a89", // Carlito Regular
+].sort();
 
 function docx() {
   return readFileSync(join(ROOT, "mock-files", "docx", "file1.docx"));
@@ -40,8 +46,18 @@ function assertWorkerError(error, code) {
   return true;
 }
 
+function withoutFetchTiming(profile) {
+  return {
+    ...profile,
+    fonts: profile.fonts.map((font) => ({ ...font, fetchDurationMs: null })),
+  };
+}
+
 async function withWorker(run, options) {
-  const worker = createOfficeEngineWorker(options);
+  const worker = createOfficeEngineWorker({
+    fontProvider: createMockOfficeFontProvider(),
+    ...options,
+  });
   try {
     return await run(worker);
   } finally {
@@ -50,16 +66,22 @@ async function withWorker(run, options) {
 }
 
 describe("Office worker API", () => {
-  test("convert and profile match direct engine", async () => {
+  test("on-demand convert and profile match the direct provider facade", async () => {
     await withWorker(async (worker) => {
       const bytes = docx();
-      const output = await worker.convert({ bytes, extension: "docx" });
-      assert.ok(output instanceof Uint8Array);
-      assert.deepEqual(output, direct.office_to_pdf(bytes, "docx"));
+      const directOutput = await direct.convertOnDemand(bytes, "docx", {
+        provider: createMockOfficeFontProvider(),
+        memoryCache: new direct.MemoryFontCache(),
+      });
+      const output = await worker.convertOnDemand({ bytes, extension: "docx" });
+      assert.ok(output.pdf instanceof Uint8Array);
+      assert.deepEqual(output.pdf, directOutput.pdf);
       assert.deepEqual(
-        await worker.profile({ bytes, extension: "docx" }),
-        JSON.parse(direct.office_profile(bytes, "docx")),
+        withoutFetchTiming(output.profile),
+        withoutFetchTiming(directOutput.profile),
       );
+      const warmProfile = await worker.profileOnDemand({ bytes, extension: "docx" });
+      assert.ok(warmProfile.fonts.every((font) => font.source === "memory_cache"));
       assert.equal(await worker.engineVersion(), direct.version());
     });
   });
@@ -67,11 +89,24 @@ describe("Office worker API", () => {
   test("complex DOCX direct and worker conversions match the six-page golden", async () => {
     const bytes = complexDocx();
     assert.equal(sha256(bytes), COMPLEX_INPUT_SHA256);
-    const directOutput = direct.office_to_pdf(bytes, "docx");
+    const directOutput = (await direct.convertOnDemand(bytes, "docx", {
+      provider: createMockOfficeFontProvider(),
+      memoryCache: new direct.MemoryFontCache(),
+    })).pdf;
 
     await withWorker(async (worker) => {
-      const workerOutput = await worker.convert({ bytes, extension: "docx" });
-      assert.deepEqual(workerOutput, directOutput);
+      // Give both isolated engines the same deterministic provider-resolved
+      // face set before comparing their byte-for-byte output.
+      const warmup = await worker.convertOnDemand({ bytes: docx(), extension: "docx" });
+      const converted = await worker.convertOnDemand({ bytes, extension: "docx" });
+      const workerOutput = converted.pdf;
+      const registeredHashes = [...new Set(
+        [...warmup.providerResults, ...converted.providerResults]
+          .filter((result) => result.status === "found")
+          .map((result) => result.artifact.sha256),
+      )].sort();
+      assert.deepEqual(registeredHashes, MOCK_REGISTERED_FONT_SHA256S);
+      assert.ok(Buffer.from(workerOutput).equals(Buffer.from(directOutput)));
       assert.equal(sha256(directOutput), COMPLEX_OUTPUT_SHA256);
       assert.equal(sha256(workerOutput), COMPLEX_OUTPUT_SHA256);
       assert.equal(Buffer.from(workerOutput.subarray(0, 5)).toString(), "%PDF-");
@@ -83,7 +118,7 @@ describe("Office worker API", () => {
     await withWorker(async (worker) => {
       const bytes = new Uint8Array(docx());
       const before = bytes.slice();
-      await worker.profile({ bytes, extension: "docx" });
+      await worker.profileOnDemand({ bytes, extension: "docx" });
       assert.notEqual(bytes.byteLength, 0);
       assert.deepEqual(bytes, before);
     });
@@ -97,16 +132,16 @@ describe("Office worker API", () => {
         (error) => assertWorkerError(error, "deadline_exceeded"),
       );
       assert.ok(performance.now() - started < 1_000, "blocking worker was not terminated promptly");
-      const profile = await worker.profile({ bytes: docx(), extension: "docx" });
-      assert.equal(profile.supported, true);
+      const profile = await worker.profileOnDemand({ bytes: docx(), extension: "docx" });
+      assert.equal(profile.profile.supported, true);
     });
   });
 
   test("trap replaces worker and replacement converts", async () => {
     await withWorker(async (worker) => {
       await assert.rejects(worker.__testTrap(), (error) => assertWorkerError(error, "trap"));
-      const output = await worker.convert({ bytes: docx(), extension: "docx" });
-      assert.equal(Buffer.from(output.subarray(0, 5)).toString(), "%PDF-");
+      const output = await worker.convertOnDemand({ bytes: docx(), extension: "docx" });
+      assert.equal(Buffer.from(output.pdf.subarray(0, 5)).toString(), "%PDF-");
     });
   });
 
@@ -114,11 +149,11 @@ describe("Office worker API", () => {
     await withWorker(async (worker) => {
       const bytes = docx();
       const profiles = await Promise.all([
-        worker.profile({ bytes, extension: "docx" }),
-        worker.profile({ bytes, extension: "docx" }),
-        worker.profile({ bytes, extension: "docx" }),
+        worker.profileOnDemand({ bytes, extension: "docx" }),
+        worker.profileOnDemand({ bytes, extension: "docx" }),
+        worker.profileOnDemand({ bytes, extension: "docx" }),
       ]);
-      assert.ok(profiles.every((profile) => profile.supported === true));
+      assert.ok(profiles.every(({ profile }) => profile.supported === true));
     });
   });
 

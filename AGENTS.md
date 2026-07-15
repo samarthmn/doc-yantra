@@ -54,8 +54,13 @@ its own **fail-closed envelope** (`convert()` returns `Unsupported{code}` off-
 envelope) and **DocProfile** router contract (`profile()` predicts the verdict
 without layout). It reuses none of pdf-core's code and does not modify it (the
 fidelity harness consumes pdf-core read-only for rasterization). It compiles to
-wasm (`--no-default-features --features wasm,bundled-fonts`) and ships as
+wasm (`--no-default-features --features wasm`) and ships as the fontless
 `@samarthmn/doc-yantra-office`. See `office-core/README.md`.
+
+The Office package never embeds a font payload. Hosts use
+`office_font_requests` → provider/cache → `office_register_font` before profile
+and conversion; native default builds alone retain `bundled-fonts` for hermetic
+tests and fidelity scoring.
 
 **Versioning now spans four Cargo.tomls** kept in lockstep by
 `pdf-core/scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
@@ -83,6 +88,10 @@ Rebuild the wasm package after any Rust change (`cd pdf-core/wasm`):
 ```bash
 ./build.sh                         # rebuilds all three targets into pkg/
 ```
+
+Rebuild the Office wasm package after any `office-core` or Office host-glue
+change (`cd office-core/wasm && ./build.sh`). Its packed-artifact test rejects
+font files and embedded SFNT programs.
 
 ## Releasing (0.0.x line)
 

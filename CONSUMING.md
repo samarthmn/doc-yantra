@@ -105,8 +105,8 @@ The package has two entry points:
 | --- | --- | --- |
 | `@samarthmn/doc-yantra` | Node (CJS) | watermark, merge, csv/md/text → PDF, redaction, validate (~2.8MB) |
 | `@samarthmn/doc-yantra/web` | Browser (ESM) | Zone 1 for client-side previews; call `await mod.default(wasmUrl)` first and serve `web/pdf_core_wasm_bg.wasm` yourself |
-| `@samarthmn/doc-yantra-office` | Node (CJS) | **Office → PDF**: `office_profile()`, `office_to_pdf()`, `register_font()` |
-| `@samarthmn/doc-yantra-office/web` | Browser (ESM) | same API for in-browser conversion |
+| `@samarthmn/doc-yantra-office` | Node (CJS) | **Office → PDF**: staged sync exports plus provider-backed `convertOnDemand()` |
+| `@samarthmn/doc-yantra-office/web` | Browser (ESM) | same staged/on-demand API plus `IndexedDbFontCache` |
 
 ### Office package (`@samarthmn/doc-yantra-office`)
 
@@ -114,21 +114,47 @@ Same registry, token, and `.npmrc` scope flow as `@samarthmn/doc-yantra` (same
 GitHub owner). Both packages publish together on each `0.0.*` tag, so pin them to
 the same version.
 
+The package is fontless. The canonical order is discover → supply → verdict →
+convert; a profile taken before registration is provisional for font-dependent
+reasons:
+
 ```js
 const office = require("@samarthmn/doc-yantra-office");
 
-// Router gate — profile() NEVER throws for well-formed input; container
-// failures serialize into the JSON (supported:false + reason code).
-const profile = JSON.parse(office.office_profile(bytes, "docx"));
-if (profile.supported) {
-  const pdf = office.office_to_pdf(bytes, "docx"); // Uint8Array (%PDF-…)
+const requests = JSON.parse(office.office_font_requests(bytes, "docx"));
+for (const resolved of await trustedProvider.resolve(requests, signal)) {
+  if (resolved.status === "found") {
+    office.office_register_font(resolved.artifact.bytes, expectationJson(resolved));
+  }
 }
+const profile = JSON.parse(office.office_profile(bytes, "docx"));
+if (profile.supported) office.office_to_pdf(bytes, "docx");
+
+// Convenience facade performs the same sequence, batching the provider call.
+const result = await office.convertOnDemand(bytes, "docx", {
+  provider: trustedProvider,
+  mode: "compatible", // or "strict"
+  memoryCache: new office.MemoryFontCache(),
+  persistentCache: new office.NodeFontCache(absoluteCacheDirectory),
+  signal,
+  limits: { maxFontBytes: 10 * 1024 * 1024 },
+});
 ```
+
+Browser consumers initialize the ESM default export first and may use
+`IndexedDbFontCache`. Remote providers must use HTTPS, return catalog-allowlisted
+bytes (never a document-derived URL), enforce CORS/content type/redirect ≤3,
+and pin SHA-256. The package validates identity, coverage, collection index,
+variable axes, and OS/2 embedding permission before registration.
 
 **Stable API surface DocKosha depends on:**
 
-The signatures of `office_profile`, `office_to_pdf`, and `register_font` are
-unchanged. The DOCX envelope now additionally covers bounded page/paragraph
+The signatures of `office_profile`, `office_to_pdf`, and the deprecated
+`register_font` alias are unchanged. `office_register_font` is the validated
+replacement. `strict` mode permits only embedded/registered exact faces;
+`compatible` also permits explicitly reported style/substitution/fallback
+matches. Provider `not_found`, `denied`, and `temporary_failure` remain distinct.
+The DOCX envelope now additionally covers bounded page/paragraph
 anchors, floating-table side wrap, sequential notes, internal destinations,
 and balanced continuous-column bands; supported profiles may add the warning
 codes `bullet_substituted` and `floating_table_block_fallback`. Supported
@@ -145,6 +171,11 @@ superscripts use bundled U+207x glyph coverage; uncovered glyphs fail closed as
   recoverable; a panic/OOM traps and the instance must be discarded.
 
 DocKosha's adapter is `src/server/officeCoreWasm.ts` (mirrors `pdfCoreWasm.ts`).
+
+`createOfficeEngineWorker({ fontProvider, fontMemoryCache,
+fontPersistentCache, fontMode })` exposes `convertOnDemand()` and
+`profileOnDemand()`. `extraFontDirs` remains an explicit, host-authorized boot
+registration mechanism; system-font scanning is never implicit.
 
 Office → PDF is provided by the separate
 `@samarthmn/doc-yantra-office` package for supported DOCX/PPTX/XLSX/XLSM

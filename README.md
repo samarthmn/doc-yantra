@@ -58,12 +58,21 @@ cargo build --release       # CLI at target/release/pdfcore
 
 # rebuild the npm package after Rust changes (updates pkg/ — commit it)
 cd wasm && ./build.sh
+
+# rebuild the fontless Office package after office-core changes
+cd ../../office-core/wasm && ./build.sh
 ```
 
 Requires Rust ≥ 1.89 (`rust-version` is pinned in both Cargo.tomls). The wasm build compiles Zone 1 only
 (`--no-default-features --features wasm`); Zone 2 needs native pdfium and stays
 out of the package. Its legacy redactor exists only for native
 cross-validation. Zone-1 redaction has no HTTP fallback.
+
+The Office wasm package is also built with `--no-default-features --features wasm`.
+It contains no fonts: hosts discover canonical requests with
+`office_font_requests()`, supply validated SFNT bytes with
+`office_register_font()`, then profile and convert. Native Office builds retain
+the default `bundled-fonts` feature for hermetic tests and fidelity runs.
 
 ## Releasing
 

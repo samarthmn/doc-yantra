@@ -1,3 +1,10 @@
+import type {
+  FontCache,
+  FontProvider,
+  FontResult,
+  MemoryFontCache,
+} from './font-provider';
+
 export type WorkerBinary = ArrayBuffer | ArrayBufferView;
 
 export type EngineWorkerErrorCode =
@@ -48,6 +55,14 @@ export interface OfficeEngineWorkerOptions {
   maxRangeCount?: number;
   /** Font directories scanned once at worker boot in deterministic path order. */
   extraFontDirs?: string[];
+  /** Parent-thread provider used only by the staged on-demand APIs. */
+  fontProvider?: FontProvider;
+  fontMemoryCache?: MemoryFontCache;
+  fontPersistentCache?: FontCache;
+  fontProviderTimeoutMs?: number;
+  negativeFontTtlMs?: number;
+  maxFontBytes?: number;
+  fontMode?: 'strict' | 'compatible';
 }
 
 export interface OfficeWorkerInput {
@@ -58,6 +73,11 @@ export interface OfficeWorkerInput {
    * Accessor properties and detectable Proxies are rejected as `invalid_input`
    * without executing their getters, setters, or traps. */
   timeoutMs?: number;
+}
+
+export interface OfficeWorkerOnDemandInput extends OfficeWorkerInput {
+  mode?: 'strict' | 'compatible';
+  signal?: AbortSignal;
 }
 
 export interface RedactionWarning {
@@ -97,11 +117,24 @@ export interface OfficeProfile {
   reasons: OfficeProfileReason[];
   warnings: OfficeProfileWarning[];
   stats: OfficeProfileStats;
+  fonts: Array<Record<string, unknown>>;
+}
+
+export interface OfficeWorkerProfileOutput {
+  profile: OfficeProfile;
+  fonts: Array<Record<string, unknown>>;
+  providerResults: Array<FontResult & { cacheStatus?: string; fetchDurationMs?: number }>;
+}
+
+export interface OfficeWorkerConvertOutput extends OfficeWorkerProfileOutput {
+  pdf: Uint8Array;
 }
 
 export interface OfficeEngineWorker {
   convert(input: OfficeWorkerInput): Promise<Uint8Array>;
   profile(input: OfficeWorkerInput): Promise<OfficeProfile>;
+  convertOnDemand(input: OfficeWorkerOnDemandInput): Promise<OfficeWorkerConvertOutput>;
+  profileOnDemand(input: OfficeWorkerOnDemandInput): Promise<OfficeWorkerProfileOutput>;
   close(): Promise<void>;
   engineVersion(): Promise<string>;
 }

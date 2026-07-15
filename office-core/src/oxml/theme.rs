@@ -6,7 +6,7 @@ use super::{A, Node, Rgb, Rgba, attr, child, children, parse_f64};
 use crate::Result;
 use std::collections::HashMap;
 
-/// A theme: its named color slots and the major/minor Latin typefaces.
+/// A theme: its named color slots and major/minor script typefaces.
 #[derive(Debug, Clone, Default)]
 pub struct Theme {
     colors: HashMap<String, Rgb>,
@@ -14,6 +14,14 @@ pub struct Theme {
     pub major_latin: Option<String>,
     /// The minor (body) Latin typeface (`+mn-lt`).
     pub minor_latin: Option<String>,
+    /// The major East Asian typeface (`+mj-ea`).
+    pub major_east_asia: Option<String>,
+    /// The minor East Asian typeface (`+mn-ea`).
+    pub minor_east_asia: Option<String>,
+    /// The major complex-script typeface (`+mj-cs`).
+    pub major_complex_script: Option<String>,
+    /// The minor complex-script typeface (`+mn-cs`).
+    pub minor_complex_script: Option<String>,
 }
 
 impl Theme {
@@ -38,6 +46,10 @@ impl Theme {
         if let Some(font_scheme) = child(elements, A, "fontScheme") {
             theme.major_latin = latin_typeface(font_scheme, "majorFont");
             theme.minor_latin = latin_typeface(font_scheme, "minorFont");
+            theme.major_east_asia = script_typeface(font_scheme, "majorFont", "ea");
+            theme.minor_east_asia = script_typeface(font_scheme, "minorFont", "ea");
+            theme.major_complex_script = script_typeface(font_scheme, "majorFont", "cs");
+            theme.minor_complex_script = script_typeface(font_scheme, "minorFont", "cs");
         }
         Ok(theme)
     }
@@ -58,6 +70,19 @@ impl Theme {
             }
         }
         mapped
+    }
+
+    /// Resolves an OOXML theme-font reference to a concrete family.
+    pub fn resolve_font_reference(&self, reference: &str) -> Option<String> {
+        match reference {
+            "+mj-lt" | "majorAscii" | "majorHAnsi" => self.major_latin.clone(),
+            "+mn-lt" | "minorAscii" | "minorHAnsi" => self.minor_latin.clone(),
+            "+mj-ea" | "majorEastAsia" => self.major_east_asia.clone(),
+            "+mn-ea" | "minorEastAsia" => self.minor_east_asia.clone(),
+            "+mj-cs" | "majorBidi" => self.major_complex_script.clone(),
+            "+mn-cs" | "minorBidi" => self.minor_complex_script.clone(),
+            _ => None,
+        }
     }
 }
 
@@ -93,8 +118,12 @@ fn parse_scheme_color_value(slot: Node) -> Option<Rgb> {
 }
 
 fn latin_typeface(font_scheme: Node, bucket: &str) -> Option<String> {
+    script_typeface(font_scheme, bucket, "latin")
+}
+
+fn script_typeface(font_scheme: Node, bucket: &str, script: &str) -> Option<String> {
     child(font_scheme, A, bucket)
-        .and_then(|b| child(b, A, "latin"))
+        .and_then(|b| child(b, A, script))
         .and_then(|l| attr(l, A, "typeface").map(str::to_string))
         .filter(|s| !s.is_empty())
 }

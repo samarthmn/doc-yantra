@@ -8,8 +8,12 @@
 //! [`DocProfile::from_error`].
 
 use crate::drawing::diagram::DiagramStore;
-use crate::fonts::{FontDb, matching};
+use crate::fonts::{
+    FontDb, FontExactness, FontRequest, FontResolution, FontResolutionEvent, FontResolutionSource,
+    FontSlot, SelectedFontIdentity, matching,
+};
 use crate::opc::Package;
+use crate::oxml::font_table::FontTable;
 use crate::oxml::numbering::{NumFmt, Numbering};
 use crate::oxml::settings::Settings;
 use crate::oxml::styles::StyleResolver;
@@ -106,8 +110,12 @@ pub struct DocProfile {
     pub reasons: Vec<Reason>,
     /// Documented-lossy warnings that still convert.
     pub warnings: Vec<Warning>,
+    /// Per-request font resolution and reproducibility telemetry.
+    pub fonts: Vec<FontResolution>,
     /// Cheap document statistics.
     pub stats: Stats,
+    #[serde(skip)]
+    pub(crate) font_requests: Vec<FontRequest>,
 }
 
 impl DocProfile {
@@ -123,7 +131,9 @@ impl DocProfile {
             supported: true,
             reasons: Vec::new(),
             warnings: Vec::new(),
+            fonts: Vec::new(),
             stats: Stats::default(),
+            font_requests: Vec::new(),
         }
     }
 
@@ -331,13 +341,15 @@ fn profile_xlsx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
             other => return Err(other),
         }
     }
-    resolve_fonts(&mut profile, &fonts_used, &doc.fonts, &scripts);
+    resolve_fonts(&mut profile, &coverage, &doc.fonts, &scripts);
+    profile.fonts = font_resolution_report(&coverage, &doc.fonts);
     add_fallback_face_missing_reason(&mut profile, &doc.fonts, &coverage);
     profile.stats.sheets = doc.sheets.len() as u32;
     profile.stats.images = doc.images.len() as u32;
     if fonts_used.is_empty() {
         fonts_used.push("Calibri".to_string());
     }
+    profile.font_requests = canonical_font_requests(&coverage, None, &doc.fonts);
     profile.stats.fonts_used = fonts_used;
     Ok(profile)
 }
@@ -776,11 +788,13 @@ fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
 
     resolve_fonts(
         &mut profile,
-        &inventory.fonts,
+        &inventory.coverage,
         &doc.fonts,
         &inventory.scripts,
     );
+    profile.fonts = font_resolution_report(&inventory.coverage, &doc.fonts);
     add_fallback_face_missing_reason(&mut profile, &doc.fonts, &inventory.coverage);
+    profile.font_requests = canonical_font_requests(&inventory.coverage, None, &doc.fonts);
     profile.stats.slides = doc.slides.len() as u32;
     profile.stats.shapes = shape_count;
     profile.stats.images = doc.images.len() as u32;
@@ -825,17 +839,23 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
         optional_part(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
     let settings = optional_part(&pkg, "word/settings.xml", Settings::parse)?.unwrap_or_default();
     let theme = find_theme(&pkg)?;
+    let font_table = optional_part(&pkg, "word/fontTable.xml", FontTable::parse)?;
     let diagrams = DiagramStore::load(&pkg)?;
 
-    let mut db = FontDb::with_system(&opts.font_dirs);
+    let mut db = FontDb::with_sources(&opts.font_dirs, opts.include_system_fonts);
+    db.set_resolution_mode(opts.resolution_mode);
     for bytes in &opts.font_bytes {
         db.register(bytes.clone())?;
     }
+    crate::register_runtime_fonts(&mut db)?;
+    db.mark_hash_pinned(&opts.font_hash_pins);
+    crate::layout::assemble::register_embedded_fonts(&pkg, &mut db);
 
     let mut profile = DocProfile::new("docx");
     let mut collector = Collector::new(&styles, &numbering, &theme, &diagrams, &db);
 
-    // Body content.
+    // Body content. `word/comments.xml` is intentionally excluded: comments do
+    // not paint in Word's print view, so their text and fonts are not render inputs.
     let main_rels: HashMap<_, _> = pkg
         .relationships(&main)?
         .into_iter()
@@ -943,13 +963,15 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
 
     // Font resolution: warnings + missing fonts (deterministic, bundled DB only).
     // Sets `profile.stats.fonts_missing` directly.
-    resolve_fonts(&mut profile, &collector.fonts_used, &db, &collector.scripts);
+    resolve_fonts(&mut profile, &collector.coverage, &db, &collector.scripts);
+    profile.fonts = font_resolution_report(&collector.coverage, &db);
     add_fallback_face_missing_reason(&mut profile, &db, &collector.coverage);
 
     profile.stats.paragraphs = collector.paragraphs;
     profile.stats.tables = collector.tables;
     profile.stats.images = collector.images;
     profile.stats.fonts_used = collector.fonts_used.clone();
+    profile.font_requests = canonical_font_requests(&collector.coverage, font_table.as_ref(), &db);
 
     // Some pagination verdicts depend on shaped line heights and physical-page
     // state. Run the same layout preflight used by conversion for those cases
@@ -1160,20 +1182,38 @@ fn section_geometry_differs(left: &SectPr, right: &SectPr) -> bool {
 /// and flags CJK text that no available face covers.
 fn resolve_fonts(
     profile: &mut DocProfile,
-    fonts_used: &[String],
+    requests: &[CoverageRequest],
     db: &FontDb,
     scripts: &ScriptScan,
 ) {
     let mut missing = Vec::new();
-    for family in fonts_used {
-        let resolved = matching::resolve(db, family, 400, false);
+    let mut unresolved = Vec::new();
+    for request in requests {
+        let resolved = matching::resolve_with_stretch(
+            db,
+            &request.family,
+            request.weight,
+            request.italic,
+            request.stretch,
+        );
         for w in resolved.warnings {
             profile.add_warning_deduped(w);
         }
         if let Some(m) = resolved.missing
-            && !missing.contains(&m)
+            && !missing
+                .iter()
+                .any(|family: &String| family.eq_ignore_ascii_case(&m))
         {
             missing.push(m);
+        }
+        if resolved.face.is_none() {
+            let identity = format!(
+                "{} weight={} italic={} stretch={}",
+                request.family, request.weight, request.italic, request.stretch
+            );
+            if !unresolved.contains(&identity) {
+                unresolved.push(identity);
+            }
         }
     }
     // CJK with no covering face is fail-closed.
@@ -1182,6 +1222,12 @@ fn resolve_fonts(
     }
     // Store missing on the collector via the profile stats (set by caller).
     profile.stats.fonts_missing = missing;
+    if !unresolved.is_empty() {
+        profile.add_reason_deduped(
+            UnsupportedCode::FontUnresolved,
+            format!("unresolved font faces: {}", unresolved.join(", ")),
+        );
+    }
 }
 
 /// Whether any face in `db` maps a representative CJK ideograph.
@@ -1201,6 +1247,8 @@ struct CoverageRequest {
     family: String,
     weight: u16,
     italic: bool,
+    stretch: u16,
+    slots: BTreeSet<FontSlot>,
     codepoints: BTreeSet<char>,
     texts: Vec<String>,
 }
@@ -1212,13 +1260,28 @@ fn record_coverage(
     italic: bool,
     text: &str,
 ) {
+    let slots = inferred_slots(text);
+    record_coverage_with_slots(requests, family, weight, italic, 5, text, &slots);
+}
+
+fn record_coverage_with_slots(
+    requests: &mut Vec<CoverageRequest>,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    stretch: u16,
+    text: &str,
+    slots: &BTreeSet<FontSlot>,
+) {
     let request = requests.iter_mut().find(|request| {
         request.family.eq_ignore_ascii_case(family)
             && request.weight == weight
             && request.italic == italic
+            && request.stretch == stretch
     });
     if let Some(request) = request {
         collect_codepoints(&mut request.codepoints, text);
+        request.slots.extend(slots.iter().copied());
         if !request.texts.iter().any(|candidate| candidate == text) {
             request.texts.push(text.to_string());
         }
@@ -1229,10 +1292,288 @@ fn record_coverage(
             family: family.to_string(),
             weight,
             italic,
+            stretch,
+            slots: slots.clone(),
             codepoints,
             texts: vec![text.to_string()],
         });
     }
+}
+
+fn inferred_slots(text: &str) -> BTreeSet<FontSlot> {
+    text.chars()
+        .filter(|character| !character.is_control())
+        .map(slot_for_character)
+        .collect()
+}
+
+fn slot_for_character(character: char) -> FontSlot {
+    let codepoint = character as u32;
+    if character.is_ascii() {
+        FontSlot::Ascii
+    } else if matches!(
+        codepoint,
+        0x4E00..=0x9FFF | 0x3040..=0x30FF | 0xAC00..=0xD7AF | 0x3000..=0x303F
+    ) {
+        FontSlot::EastAsia
+    } else if matches!(
+        codepoint,
+        0x0590..=0x08FF
+            | 0x0900..=0x0EFF
+            | 0x1000..=0x109F
+            | 0x1780..=0x17FF
+            | 0xFB1D..=0xFEFF
+    ) {
+        FontSlot::Cs
+    } else {
+        FontSlot::HAnsi
+    }
+}
+
+fn numbering_request_text(pattern: &str) -> String {
+    let mut output = String::new();
+    let mut characters = pattern.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '%' && characters.peek().is_some_and(char::is_ascii_digit) {
+            characters.next();
+            output.push('0');
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn canonical_font_requests(
+    coverage: &[CoverageRequest],
+    font_table: Option<&FontTable>,
+    db: &FontDb,
+) -> Vec<FontRequest> {
+    let mut requests = Vec::new();
+    for coverage in coverage {
+        if matching::resolve_exact_with_stretch(
+            db,
+            &coverage.family,
+            coverage.weight,
+            coverage.italic,
+            coverage.stretch,
+        )
+        .is_some()
+        {
+            continue;
+        }
+        let metadata = font_table.and_then(|table| table.find(&coverage.family));
+        if metadata.is_some_and(|entry| entry.has_embedded_style(coverage.weight, coverage.italic))
+        {
+            continue;
+        }
+        let mut slots: Vec<_> = coverage.slots.iter().copied().collect();
+        slots.sort();
+        let mut scripts = scripts_for_codepoints(&coverage.codepoints);
+        scripts.sort();
+        let mut alt_families = metadata
+            .and_then(|entry| entry.alt_name.clone())
+            .into_iter()
+            .filter(|name| !name.eq_ignore_ascii_case(&coverage.family))
+            .collect::<Vec<_>>();
+        alt_families.sort_by_key(|name| name.to_ascii_lowercase());
+        requests.push(FontRequest {
+            family: coverage.family.clone(),
+            alt_families,
+            weight: coverage.weight,
+            italic: coverage.italic,
+            stretch: coverage.stretch,
+            slots,
+            panose: metadata.and_then(|entry| entry.panose.clone()),
+            family_class: metadata.and_then(|entry| entry.family_class.clone()),
+            pitch: metadata.and_then(|entry| entry.pitch.clone()),
+            charset: metadata.and_then(|entry| entry.charset.clone()),
+            unicode_ranges: metadata
+                .map(|entry| entry.unicode_ranges.clone())
+                .unwrap_or_default(),
+            scripts,
+            vf_coords: Vec::new(),
+        });
+    }
+    requests.sort_by(|left, right| {
+        left.family
+            .to_ascii_lowercase()
+            .cmp(&right.family.to_ascii_lowercase())
+            .then_with(|| left.weight.cmp(&right.weight))
+            .then_with(|| left.italic.cmp(&right.italic))
+            .then_with(|| left.stretch.cmp(&right.stretch))
+    });
+    requests
+}
+
+fn scripts_for_codepoints(codepoints: &BTreeSet<char>) -> Vec<String> {
+    let mut scripts = BTreeSet::new();
+    for character in codepoints {
+        let codepoint = *character as u32;
+        let script = if character.is_ascii_alphabetic() {
+            "latin"
+        } else if character.is_ascii() {
+            "common"
+        } else if matches!(codepoint, 0x00C0..=0x024F | 0x1E00..=0x1EFF) {
+            "latin"
+        } else if matches!(codepoint, 0x0370..=0x03FF) {
+            "greek"
+        } else if matches!(codepoint, 0x0400..=0x052F) {
+            "cyrillic"
+        } else if matches!(codepoint, 0x0590..=0x05FF) {
+            "hebrew"
+        } else if matches!(codepoint, 0x0600..=0x08FF | 0xFB50..=0xFEFF) {
+            "arabic"
+        } else if matches!(codepoint, 0x0900..=0x097F) {
+            "devanagari"
+        } else if matches!(codepoint, 0x0E00..=0x0E7F) {
+            "thai"
+        } else if matches!(
+            codepoint,
+            0x3000..=0x30FF | 0x3400..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF
+        ) {
+            "cjk"
+        } else if !character.is_alphanumeric() && !character.is_whitespace() {
+            "symbols"
+        } else {
+            "common"
+        };
+        scripts.insert(script.to_string());
+    }
+    scripts.into_iter().collect()
+}
+
+fn font_resolution_report(requests: &[CoverageRequest], db: &FontDb) -> Vec<FontResolution> {
+    let mut report = Vec::new();
+    for request in requests {
+        let resolved = matching::resolve_with_stretch(
+            db,
+            &request.family,
+            request.weight,
+            request.italic,
+            request.stretch,
+        );
+        let mut slots: Vec<_> = request.slots.iter().copied().collect();
+        slots.sort();
+        let Some(face_id) = resolved.face else {
+            report.push(FontResolution {
+                requested_family: request.family.clone(),
+                requested_weight: request.weight,
+                requested_italic: request.italic,
+                requested_stretch: request.stretch,
+                slots,
+                selected: None,
+                source: FontResolutionSource::None,
+                exactness: FontExactness::Unresolved,
+                embedding_permission: None,
+                coverage_ok: false,
+                failure_reason: Some("font_unresolved".to_string()),
+                fallback_identity: None,
+                cache_status: None,
+                fetch_duration_ms: None,
+                event: FontResolutionEvent::FontNotFound,
+            });
+            continue;
+        };
+        let face = db.face(face_id).expect("resolved face exists");
+        let selected = selected_font_identity(face);
+        let exact_face = matching::resolve_exact_with_stretch(
+            db,
+            &request.family,
+            request.weight,
+            request.italic,
+            request.stretch,
+        ) == Some(face_id);
+        let same_family = face.family_name.eq_ignore_ascii_case(&request.family)
+            || face
+                .full_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&request.family));
+        let exactness = if face.embedded && exact_face {
+            FontExactness::EmbeddedExact
+        } else if exact_face && face.hash_pinned {
+            FontExactness::HashPinnedExact
+        } else if exact_face {
+            FontExactness::CatalogVersionAssumed
+        } else if same_family {
+            FontExactness::FamilyStyleCompatible
+        } else {
+            FontExactness::Fallback
+        };
+        let source = match exactness {
+            FontExactness::EmbeddedExact => FontResolutionSource::Embedded,
+            FontExactness::Fallback => FontResolutionSource::Fallback,
+            _ => FontResolutionSource::Registered,
+        };
+        let event = match exactness {
+            FontExactness::EmbeddedExact => FontResolutionEvent::FontEmbedded,
+            FontExactness::Fallback => FontResolutionEvent::FontFallbackUsed,
+            FontExactness::CatalogVersionAssumed => FontResolutionEvent::FontVersionAssumed,
+            _ => FontResolutionEvent::FontRuntimeRegistered,
+        };
+        let fallback_ids =
+            matching::coverage_fallbacks(db, face_id, request.weight, request.italic);
+        let coverage_ok = request.codepoints.iter().all(|character| {
+            fallback_ids.iter().any(|candidate| {
+                db.face(*candidate)
+                    .and_then(|candidate| candidate.parsed())
+                    .and_then(|candidate| candidate.glyph_index(*character))
+                    .is_some()
+            })
+        });
+        report.push(FontResolution {
+            requested_family: request.family.clone(),
+            requested_weight: request.weight,
+            requested_italic: request.italic,
+            requested_stretch: request.stretch,
+            slots,
+            selected: Some(selected.clone()),
+            source,
+            exactness,
+            embedding_permission: Some(face.embedding_permission),
+            coverage_ok,
+            failure_reason: (!coverage_ok).then(|| "font_coverage_mismatch".to_string()),
+            fallback_identity: (exactness == FontExactness::Fallback).then_some(selected),
+            cache_status: None,
+            fetch_duration_ms: None,
+            event,
+        });
+    }
+    report.sort_by(|left, right| {
+        left.requested_family
+            .to_ascii_lowercase()
+            .cmp(&right.requested_family.to_ascii_lowercase())
+            .then_with(|| left.requested_weight.cmp(&right.requested_weight))
+            .then_with(|| left.requested_italic.cmp(&right.requested_italic))
+    });
+    report
+}
+
+fn selected_font_identity(face: &crate::fonts::Face) -> SelectedFontIdentity {
+    let parsed = face.parsed();
+    SelectedFontIdentity {
+        family: face.family_name.clone(),
+        full_name: face.full_name.clone(),
+        postscript_name: parsed
+            .as_ref()
+            .and_then(|parsed| profile_face_name(parsed, ttf_parser::name_id::POST_SCRIPT_NAME)),
+        version: parsed
+            .as_ref()
+            .and_then(|parsed| profile_face_name(parsed, ttf_parser::name_id::VERSION)),
+        sha256: face.sha256.clone(),
+        face_index: face.index,
+        weight: face.weight,
+        italic: face.italic,
+        stretch: face.stretch,
+    }
+}
+
+fn profile_face_name(face: &ttf_parser::Face<'_>, id: u16) -> Option<String> {
+    face.names()
+        .into_iter()
+        .filter(|name| name.name_id == id)
+        .find_map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
 }
 
 fn add_fallback_face_missing_reason(
@@ -1524,13 +1865,9 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            if level.num_fmt == NumFmt::Bullet {
-                let eff = self.styles.run_props(&p.props, &level.rpr);
-                let family = matching::numbering_label_family(
-                    eff.fonts.ascii.as_deref(),
-                    eff.fonts.h_ansi.as_deref(),
-                    self.theme.minor_latin.as_deref(),
-                );
+            let eff = self.styles.run_props(&p.props, &level.rpr);
+            let family = matching::wml_run_family(&eff.fonts, FontSlot::Ascii, self.theme);
+            let mapped = if level.num_fmt == NumFmt::Bullet {
                 let symbol_mapped: String = level
                     .lvl_text
                     .chars()
@@ -1545,7 +1882,7 @@ impl<'a> Collector<'a> {
                 for warning in resolved.warnings {
                     profile.add_warning_deduped(warning);
                 }
-                let mapped = if let Some(primary) = resolved.face {
+                if let Some(primary) = resolved.face {
                     let fallback_ids = matching::coverage_fallbacks(
                         self.font_db,
                         primary,
@@ -1572,15 +1909,24 @@ impl<'a> Collector<'a> {
                         .collect::<String>()
                 } else {
                     symbol_mapped
-                };
-                record_coverage(
-                    &mut self.coverage,
-                    &family,
-                    if eff.bold == Some(true) { 700 } else { 400 },
-                    eff.italic == Some(true),
-                    &mapped,
-                );
+                }
+            } else {
+                numbering_request_text(&level.lvl_text)
+            };
+            if !self
+                .fonts_used
+                .iter()
+                .any(|used| used.eq_ignore_ascii_case(&family))
+            {
+                self.fonts_used.push(family.clone());
             }
+            record_coverage(
+                &mut self.coverage,
+                &family,
+                if eff.bold == Some(true) { 700 } else { 400 },
+                eff.italic == Some(true),
+                &mapped,
+            );
         }
         let anchor_count = paragraph_anchor_count(p);
         if anchor_count > 0 && eff_para.frame.is_some() {
@@ -1636,12 +1982,8 @@ impl<'a> Collector<'a> {
         context: StoryContext,
     ) {
         let effective = self.styles.run_props(para, &run.props);
-        let family = self.run_font(para, &run.props);
         for detail in &effective.visible_unsupported {
             profile.add_reason_deduped(UnsupportedCode::UnknownElement, detail.clone());
-        }
-        if !self.fonts_used.contains(&family) {
-            self.fonts_used.push(family.clone());
         }
         let mut text = String::new();
         for content in &run.content {
@@ -1873,7 +2215,27 @@ impl<'a> Collector<'a> {
         }
         if !text.is_empty() {
             self.scripts.merge(scan_scripts(&text));
-            record_coverage(
+            self.record_run_coverage(&effective, &text);
+        }
+    }
+
+    fn record_run_coverage(&mut self, effective: &RunProps, text: &str) {
+        let mut groups: std::collections::BTreeMap<(String, FontSlot), String> =
+            std::collections::BTreeMap::new();
+        for character in text.chars().filter(|character| !character.is_control()) {
+            let slot = slot_for_character(character);
+            let family = matching::wml_run_family(&effective.fonts, slot, self.theme);
+            groups.entry((family, slot)).or_default().push(character);
+        }
+        for ((family, slot), source) in groups {
+            if !self
+                .fonts_used
+                .iter()
+                .any(|used| used.eq_ignore_ascii_case(&family))
+            {
+                self.fonts_used.push(family.clone());
+            }
+            record_coverage_with_slots(
                 &mut self.coverage,
                 &family,
                 if effective.bold == Some(true) {
@@ -1882,20 +2244,11 @@ impl<'a> Collector<'a> {
                     400
                 },
                 effective.italic == Some(true),
-                &text,
+                5,
+                &source,
+                &BTreeSet::from([slot]),
             );
         }
-    }
-
-    /// The effective primary font family for a run (ascii → hAnsi → theme minor
-    /// → Calibri).
-    fn run_font(&self, para: &ParaProps, run: &RunProps) -> String {
-        let eff = self.styles.run_props(para, run);
-        eff.fonts
-            .ascii
-            .or(eff.fonts.h_ansi)
-            .or_else(|| self.theme.minor_latin.clone())
-            .unwrap_or_else(|| "Calibri".to_string())
     }
 
     fn math(&mut self, math: &crate::oxml::omml::MathContent, profile: &mut DocProfile) {
@@ -2252,7 +2605,16 @@ mod tests {
 
     #[test]
     fn arabic_text_uses_available_coverage_fallback() {
-        let p = profile_body(r#"<w:p><w:r><w:t>مرحبا بالعالم</w:t></w:r></w:p>"#);
+        let bytes = minimal_docx(r#"<w:p><w:r><w:t>مرحبا بالعالم</w:t></w:r></w:p>"#);
+        let p = run_with_options(
+            &bytes,
+            OfficeFormat::Docx,
+            &crate::ConvertOptions {
+                font_dirs: vec!["../pdf-core/wasm/pkg/fonts".into()],
+                ..crate::ConvertOptions::default()
+            },
+        )
+        .expect("profile");
         assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
         assert!(!p.reasons.iter().any(|r| matches!(
             r.code,

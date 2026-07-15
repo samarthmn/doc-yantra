@@ -10,7 +10,7 @@
 //! DocProfile JSON to stdout.
 
 use clap::{Parser, Subcommand};
-use office_core::{ConvertOptions, OfficeError, OfficeFormat, convert, profile};
+use office_core::{ConvertOptions, OfficeError, OfficeFormat, convert, profile_with_options};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -31,13 +31,22 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Additional font directory to scan (repeatable).
-        #[arg(long = "font-path")]
-        font_path: Vec<PathBuf>,
+        #[arg(long = "font-dir", alias = "font-path")]
+        font_dir: Vec<PathBuf>,
+        /// Authorize scanning OS-managed font directories.
+        #[arg(long)]
+        system_fonts: bool,
     },
     /// Print the DocProfile JSON for a document.
     Profile {
         /// Input file.
         input: PathBuf,
+        /// Additional font directory to scan (repeatable).
+        #[arg(long = "font-dir", alias = "font-path")]
+        font_dir: Vec<PathBuf>,
+        /// Authorize scanning OS-managed font directories.
+        #[arg(long)]
+        system_fonts: bool,
     },
 }
 
@@ -47,9 +56,14 @@ fn main() -> ExitCode {
         Command::Convert {
             input,
             output,
-            font_path,
-        } => run_convert(input, output, font_path),
-        Command::Profile { input } => run_profile(input),
+            font_dir,
+            system_fonts,
+        } => run_convert(input, output, font_dir, system_fonts),
+        Command::Profile {
+            input,
+            font_dir,
+            system_fonts,
+        } => run_profile(input, font_dir, system_fonts),
     }
 }
 
@@ -58,7 +72,12 @@ fn format_for(path: &std::path::Path) -> Option<OfficeFormat> {
     OfficeFormat::from_extension(&ext)
 }
 
-fn run_convert(input: PathBuf, output: Option<PathBuf>, font_path: Vec<PathBuf>) -> ExitCode {
+fn run_convert(
+    input: PathBuf,
+    output: Option<PathBuf>,
+    font_dir: Vec<PathBuf>,
+    system_fonts: bool,
+) -> ExitCode {
     let Some(format) = format_for(&input) else {
         eprintln!("unknown or unsupported extension: {}", input.display());
         return ExitCode::from(2);
@@ -71,7 +90,8 @@ fn run_convert(input: PathBuf, output: Option<PathBuf>, font_path: Vec<PathBuf>)
         }
     };
     let opts = ConvertOptions {
-        font_dirs: font_path,
+        font_dirs: font_dir,
+        include_system_fonts: system_fonts,
         source_name: input
             .file_name()
             .and_then(|n| n.to_str())
@@ -90,7 +110,7 @@ fn run_convert(input: PathBuf, output: Option<PathBuf>, font_path: Vec<PathBuf>)
         }
         Err(err @ OfficeError::Unsupported { .. }) => {
             eprintln!("{err}");
-            if let Ok(json) = profile(&bytes, format).and_then(|p| {
+            if let Ok(json) = profile_with_options(&bytes, format, &opts).and_then(|p| {
                 serde_json::to_string_pretty(&p).map_err(|e| OfficeError::Internal(e.to_string()))
             }) {
                 eprintln!("{json}");
@@ -104,7 +124,7 @@ fn run_convert(input: PathBuf, output: Option<PathBuf>, font_path: Vec<PathBuf>)
     }
 }
 
-fn run_profile(input: PathBuf) -> ExitCode {
+fn run_profile(input: PathBuf, font_dir: Vec<PathBuf>, system_fonts: bool) -> ExitCode {
     let Some(format) = format_for(&input) else {
         eprintln!("unknown or unsupported extension: {}", input.display());
         return ExitCode::from(2);
@@ -116,7 +136,12 @@ fn run_profile(input: PathBuf) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match profile(&bytes, format) {
+    let options = ConvertOptions {
+        font_dirs: font_dir,
+        include_system_fonts: system_fonts,
+        ..ConvertOptions::default()
+    };
+    match profile_with_options(&bytes, format, &options) {
         Ok(p) => match serde_json::to_string_pretty(&p) {
             Ok(json) => {
                 println!("{json}");

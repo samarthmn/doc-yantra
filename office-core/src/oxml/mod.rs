@@ -95,6 +95,7 @@ fn guard_xml_depth(bytes: &[u8], label: &str) -> Result<()> {
 }
 
 pub mod dml;
+pub mod font_table;
 pub mod numbering;
 pub mod omml;
 pub mod pml;

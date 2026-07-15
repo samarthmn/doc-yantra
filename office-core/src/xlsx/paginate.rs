@@ -191,10 +191,13 @@ impl XlsxDoc {
             });
         }
 
-        let mut fonts = FontDb::with_system(&opts.font_dirs);
+        let mut fonts = FontDb::with_sources(&opts.font_dirs, opts.include_system_fonts);
+        fonts.set_resolution_mode(opts.resolution_mode);
         for fb in &opts.font_bytes {
             fonts.register(fb.clone())?;
         }
+        crate::register_runtime_fonts(&mut fonts)?;
+        fonts.mark_hash_pinned(&opts.font_hash_pins);
 
         Ok(XlsxDoc {
             workbook,

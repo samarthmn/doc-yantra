@@ -5,8 +5,8 @@
 use super::GlyphRun;
 use super::assemble::WordDoc;
 use crate::Result;
-use crate::fonts::matching;
 use crate::fonts::metrics::FaceMetrics;
+use crate::fonts::{FontSlot, matching};
 use crate::oxml::numbering::{LabelJustification, LevelDef, LevelSuffix, NumFmt, format_number};
 use crate::oxml::wml::{NumRef, ParaProps, Paragraph};
 use crate::oxml::{Rgb, Rgba};
@@ -112,11 +112,7 @@ pub fn build_label(
     let eff = doc.styles.run_props(&para.props, &level.rpr);
     let size = eff.size_pt.unwrap_or(11.0);
     let color = Rgba::opaque(Rgb::new(0, 0, 0));
-    let family = matching::numbering_label_family(
-        eff.fonts.ascii.as_deref(),
-        eff.fonts.h_ansi.as_deref(),
-        doc.theme.minor_latin.as_deref(),
-    );
+    let family = matching::wml_run_family(&eff.fonts, FontSlot::Ascii, &doc.theme);
 
     // Symbol/Wingdings mapping is the first normalization layer.
     let symbol_mapped: String = label_text

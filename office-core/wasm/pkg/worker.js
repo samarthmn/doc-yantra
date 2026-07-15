@@ -6,6 +6,11 @@ const {
   EngineWorkerError,
   errorFor,
 } = require('./worker-client.cjs');
+const {
+  MemoryFontCache,
+  mergeHostTelemetry,
+  resolveAndRegisterFonts,
+} = require('./font-provider.cjs');
 
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 
@@ -97,6 +102,16 @@ function invokeValidated(client, op, input, validate) {
 
 function createOfficeEngineWorker(options = {}) {
   options = requireRecord(options, 'options');
+  const fontProvider = options.fontProvider;
+  const fontMemoryCache = options.fontMemoryCache ?? new MemoryFontCache();
+  const fontPersistentCache = options.fontPersistentCache;
+  const fontProviderTimeoutMs = options.fontProviderTimeoutMs;
+  const negativeFontTtlMs = options.negativeFontTtlMs;
+  const maxFontBytes = options.maxFontBytes;
+  const defaultFontMode = options.fontMode ?? 'compatible';
+  if (!['strict', 'compatible'].includes(defaultFontMode)) {
+    throw errorFor('invalid_input', `unsupported font resolution mode ${defaultFontMode}`);
+  }
   const extraFontDirs = options.extraFontDirs === undefined
     ? []
     : requireStringArray(options.extraFontDirs, 'extraFontDirs');
@@ -112,6 +127,71 @@ function createOfficeEngineWorker(options = {}) {
     },
   }, options);
 
+  async function onDemand(input, includePdf) {
+    const op = includePdf ? 'convertOnDemand' : 'profileOnDemand';
+    const startedAt = Date.now();
+    const snapshot = requireRecord(input, `${op} input`);
+    const invocation = client.createInvocation(op, snapshot.timeoutMs, startedAt);
+    const { bytes, extension } = validateInput(snapshot, op);
+    const mode = snapshot.mode ?? defaultFontMode;
+    if (!['strict', 'compatible'].includes(mode)) {
+      throw errorFor('invalid_input', `unsupported font resolution mode ${mode}`);
+    }
+    if (snapshot.signal !== undefined &&
+        (snapshot.signal === null || typeof snapshot.signal !== 'object' ||
+         isProxy(snapshot.signal) || typeof snapshot.signal.aborted !== 'boolean' ||
+         typeof snapshot.signal.addEventListener !== 'function' ||
+         typeof snapshot.signal.removeEventListener !== 'function')) {
+      throw errorFor('invalid_input', 'signal must be an AbortSignal');
+    }
+    const invoke = (workerOp, args) => {
+      client.assertInvocationActive(invocation);
+      return client.invoke(workerOp, args, Math.max(1, invocation.deadlineAt - Date.now()));
+    };
+    const requests = await invoke('fontRequests', { bytes, extension });
+    if (requests.length > 0 && fontProvider === undefined) {
+      throw errorFor('missing_asset', 'on-demand Office conversion requires a fontProvider');
+    }
+    const remainingProviderMs = Math.max(1, invocation.deadlineAt - Date.now());
+    const providerResults = requests.length === 0 ? [] : await resolveAndRegisterFonts(
+      requests,
+      (fontBytes, expectation) => invoke('registerFont', {
+        bytes: fontBytes,
+        expectation,
+      }),
+      {
+        provider: fontProvider,
+        memoryCache: fontMemoryCache,
+        persistentCache: fontPersistentCache,
+        signal: snapshot.signal,
+        timeoutMs: fontProviderTimeoutMs === undefined
+          ? remainingProviderMs
+          : Math.min(fontProviderTimeoutMs, remainingProviderMs),
+        negativeTtlMs: negativeFontTtlMs,
+        maxFontBytes,
+      },
+    );
+    const encodedOptions = JSON.stringify({ mode });
+    const profile = mergeHostTelemetry(await invoke('profileWithOptions', {
+      bytes,
+      extension,
+      options: encodedOptions,
+    }), providerResults);
+    const result = {
+      profile,
+      fonts: profile.fonts ?? [],
+      providerResults,
+    };
+    if (includePdf) {
+      result.pdf = await invoke('convertWithOptions', {
+        bytes,
+        extension,
+        options: encodedOptions,
+      });
+    }
+    return result;
+  }
+
   const api = {
     convert(input) {
       return invokeValidated(client, 'convert', input, (snapshot) => {
@@ -125,6 +205,8 @@ function createOfficeEngineWorker(options = {}) {
         return { bytes, extension };
       });
     },
+    convertOnDemand: (input) => onDemand(input, true),
+    profileOnDemand: (input) => onDemand(input, false),
     close: () => client.close(),
     engineVersion: () => client.engineVersion(),
   };

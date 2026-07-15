@@ -3,7 +3,7 @@
 use office_core::layout::{EncodedImage, Item, Page};
 use office_core::testkit::zip_package;
 use office_core::xlsx::{XlsxDoc, numfmt, render_xlsx};
-use office_core::{ConvertOptions, OfficeFormat, convert, profile};
+use office_core::{ConvertOptions, OfficeFormat, convert, profile, profile_with_options};
 
 fn opts() -> ConvertOptions {
     ConvertOptions::default()
@@ -890,15 +890,16 @@ fn xlsx_cluster_fallback_shapes_cjk_and_arabic_cells() {
     let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1" t="inlineStr"><is><t>你好</t></is></c><c r="B1" s="1" t="inlineStr"><is><t>مرحبا</t></is></c></row></sheetData></worksheet>"#;
     let styles = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><name val="Calibri"/></font><font><name val="Arial"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf fontId="0"/><xf fontId="1"/></cellXfs></styleSheet>"#;
     let bytes = minimal_xlsx(sheet, Some(styles));
-    let prof = profile(&bytes, OfficeFormat::Xlsx).unwrap();
+    let options = unicode_opts();
+    let prof = profile_with_options(&bytes, OfficeFormat::Xlsx, &options).unwrap();
     assert!(prof.supported, "reasons: {:?}", prof.reasons);
-    let doc = XlsxDoc::open(&bytes, &opts()).unwrap();
+    let doc = XlsxDoc::open(&bytes, &options).unwrap();
     let (laid, _) = render_xlsx(&doc).unwrap();
     let text = page_text(&laid.pages[0]);
     for expected in ['你', '好', 'م', 'ر', 'ح', 'ب', 'ا'] {
         assert!(text.contains(expected), "missing {expected:?}: {text:?}");
     }
-    assert!(convert(&bytes, OfficeFormat::Xlsx, &opts()).is_ok());
+    assert!(convert(&bytes, OfficeFormat::Xlsx, &options).is_ok());
 }
 
 #[test]

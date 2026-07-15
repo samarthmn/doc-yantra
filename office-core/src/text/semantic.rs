@@ -241,7 +241,9 @@ mod tests {
 
     #[test]
     fn complex_clusters_are_serialized_once_in_logical_order_without_changing_appearance() {
-        let source = "e\u{301} é لا שָׁ क्षि ก้ 𠀀 ⌚️ 👍🏽 👩‍💻 LTR שלום 123";
+        // Use the deterministic repository CJK fixture rather than relying on
+        // an implicitly scanned OS font for Extension-B coverage.
+        let source = "e\u{301} é لا שָׁ क्षि ก้ 日 ⌚️ 👍🏽 👩‍💻 LTR שלום 123";
         let db = FontDb::with_system(&["../pdf-core/wasm/pkg/fonts".into()]);
         let faces: Vec<_> = db.faces().iter().collect();
         let shaped =

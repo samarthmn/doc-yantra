@@ -33,9 +33,22 @@ pub mod xlsx;
 pub mod testkit;
 
 pub use error::{OfficeError, Result, UnsupportedCode};
+pub use fonts::{
+    EmbeddingPermission, FontExactness, FontExpectation, FontIdentity, FontRequest, FontResolution,
+    FontResolutionEvent, FontResolutionSource, FontSlot, SelectedFontIdentity, VariationCoordinate,
+};
 pub use profile::DocProfile;
 
-static RUNTIME_FONTS: LazyLock<RwLock<Vec<Vec<u8>>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+#[derive(Clone)]
+struct RuntimeFont {
+    bytes: Vec<u8>,
+    face_index: u32,
+    hash_pinned: bool,
+    sha256: String,
+}
+
+static RUNTIME_FONTS: LazyLock<RwLock<Vec<RuntimeFont>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Output and layout work grows at least linearly per emitted page.
 const MAX_EMITTED_PAGES: usize = 2_000;
@@ -50,25 +63,61 @@ fn guard_page_count(count: usize) -> Result<()> {
     Ok(())
 }
 
-/// Registers every face in an sfnt or collection for subsequent conversions
-/// and profiles in this process. Registration validates all bytes before the
-/// process-global registry is changed.
+/// Registers the first face in an SFNT or collection for subsequent conversions
+/// and profiles in this process. Use [`register_font_validated`] with a
+/// [`FontExpectation::face_index`] to select a different collection face.
 pub fn register_font(bytes: &[u8]) -> Result<()> {
-    let mut validation = fonts::FontDb::new();
-    validation.register(bytes.to_vec())?;
-    RUNTIME_FONTS
+    register_font_validated(bytes, None).map(|_| ())
+}
+
+/// Validates and registers one SFNT/OTF/TTC face for subsequent profiles and
+/// conversions. The registry changes only after every identity, digest,
+/// coverage, variation-axis, and embedding-policy check succeeds.
+pub fn register_font_validated(
+    bytes: &[u8],
+    expectation: Option<FontExpectation>,
+) -> Result<FontIdentity> {
+    let identity = fonts::validate_font(bytes, expectation.as_ref())?;
+    let hash_pinned = expectation
+        .as_ref()
+        .is_some_and(|expectation| expectation.sha256.is_some());
+    let mut registry = RUNTIME_FONTS
         .write()
-        .map_err(|_| OfficeError::Internal("font registry lock is poisoned".into()))?
-        .push(bytes.to_vec());
-    Ok(())
+        .map_err(|_| OfficeError::Internal("font registry lock is poisoned".into()))?;
+    if let Some(existing) = registry
+        .iter_mut()
+        .find(|font| font.sha256 == identity.sha256 && font.face_index == identity.face_index)
+    {
+        existing.hash_pinned |= hash_pinned;
+        return Ok(identity);
+    }
+    registry.push(RuntimeFont {
+        bytes: bytes.to_vec(),
+        face_index: identity.face_index,
+        hash_pinned,
+        sha256: identity.sha256.clone(),
+    });
+    Ok(identity)
 }
 
 fn effective_options(opts: &ConvertOptions) -> ConvertOptions {
-    let mut effective = opts.clone();
-    if let Ok(fonts) = RUNTIME_FONTS.read() {
-        effective.font_bytes.extend(fonts.iter().cloned());
+    opts.clone()
+}
+
+pub(crate) fn register_runtime_fonts(db: &mut fonts::FontDb) -> Result<()> {
+    let registry = RUNTIME_FONTS
+        .read()
+        .map_err(|_| OfficeError::Internal("font registry lock is poisoned".into()))?;
+    for font in registry.iter() {
+        db.register_face(font.bytes.clone(), font.face_index)?;
     }
-    effective
+    let pinned = registry
+        .iter()
+        .filter(|font| font.hash_pinned)
+        .map(|font| font.sha256.clone())
+        .collect::<Vec<_>>();
+    db.mark_hash_pinned(&pinned);
+    Ok(())
 }
 
 /// The Office document formats the engine understands.
@@ -97,16 +146,51 @@ impl OfficeFormat {
 }
 
 /// Optional inputs to [`convert`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ConvertOptions {
     /// Extra font directories to scan (native only; ignored on wasm).
     pub font_dirs: Vec<std::path::PathBuf>,
     /// Raw font files to register (brand fonts; the wasm `register_font` path).
     pub font_bytes: Vec<Vec<u8>>,
+    /// SHA-256 digests whose registered identities were caller-pinned. Ordinary
+    /// consumers use [`register_font_validated`]; this field preserves metadata
+    /// when hosts construct per-call font sets directly.
+    pub font_hash_pins: Vec<String>,
+    /// Whether native conversion may scan OS-managed font directories. Defaults
+    /// to false; explicit `font_dirs` remain caller-authorized inputs.
+    pub include_system_fonts: bool,
+    /// Exact-only or compatible font resolution policy.
+    pub resolution_mode: ResolutionMode,
     /// The original input file name, used by fields such as XLSX `&F`.
     pub source_name: Option<String>,
     /// Restrict XLSX conversion to these sheet names (by exact name). `None` = all.
     pub sheet_filter: Option<Vec<String>>,
+}
+
+impl Default for ConvertOptions {
+    fn default() -> Self {
+        ConvertOptions {
+            font_dirs: Vec::new(),
+            font_bytes: Vec::new(),
+            font_hash_pins: Vec::new(),
+            include_system_fonts: false,
+            resolution_mode: ResolutionMode::Compatible,
+            source_name: None,
+            sheet_filter: None,
+        }
+    }
+}
+
+/// Font-resolution behavior after embedded and runtime-registered exact faces
+/// have been considered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionMode {
+    /// Exact embedded/registered faces only; unresolved faces fail closed.
+    Strict,
+    /// Allow the documented substitution and family-class fallback ladder.
+    #[default]
+    Compatible,
 }
 
 /// The successful result of [`convert`].
@@ -118,6 +202,9 @@ pub struct ConvertOutput {
     pub page_count: u32,
     /// Non-fatal, documented-lossy warnings accumulated during conversion.
     pub warnings: Vec<profile::Warning>,
+    /// Font resolution telemetry, byte-for-byte equivalent to profile state
+    /// under the same registry and options.
+    pub fonts: Vec<FontResolution>,
 }
 
 /// Convert an Office document to PDF.
@@ -157,6 +244,7 @@ fn convert_xlsx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         pdf,
         page_count,
         warnings,
+        fonts: prof.fonts,
     })
 }
 
@@ -183,6 +271,7 @@ fn convert_pptx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         pdf,
         page_count,
         warnings,
+        fonts: prof.fonts,
     })
 }
 
@@ -217,6 +306,7 @@ fn convert_docx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         pdf,
         page_count,
         warnings,
+        fonts: prof.fonts,
     })
 }
 
@@ -239,8 +329,29 @@ fn document_id(bytes: &[u8]) -> [u8; 16] {
 /// container-level failures (invalid/encrypted/legacy), which the wasm boundary
 /// maps to JSON via [`DocProfile::from_error`].
 pub fn profile(bytes: &[u8], format: OfficeFormat) -> Result<DocProfile> {
-    let opts = effective_options(&ConvertOptions::default());
+    profile_with_options(bytes, format, &ConvertOptions::default())
+}
+
+/// Cheap envelope check using explicit font-resolution and host-access options.
+pub fn profile_with_options(
+    bytes: &[u8],
+    format: OfficeFormat,
+    opts: &ConvertOptions,
+) -> Result<DocProfile> {
+    let opts = effective_options(opts);
     profile::run_with_options(bytes, format, &opts)
+}
+
+/// Performs the layout-free profile walk and returns deduplicated, canonical
+/// font metadata for host resolution. Document text is never included, and
+/// exact document-embedded or already-registered faces are omitted.
+pub fn font_requests(
+    bytes: &[u8],
+    format: OfficeFormat,
+    opts: &ConvertOptions,
+) -> Result<Vec<FontRequest>> {
+    let opts = effective_options(opts);
+    profile::run_with_options(bytes, format, &opts).map(|profile| profile.font_requests)
 }
 
 #[cfg(test)]

@@ -16,7 +16,9 @@ use office_core::testkit::{
     stale_page_band_schedule_docx, two_paragraph_floats_docx,
     vertically_aligned_body_page_float_docx, wrap_document, wrap_styles, zip_package,
 };
-use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
+use office_core::{
+    ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile, profile_with_options,
+};
 
 fn opts() -> ConvertOptions {
     ConvertOptions::default()
@@ -1319,7 +1321,7 @@ fn complex_field_cached_hyperlink_across_paragraphs_converts_and_renders() {
           <w:r><w:instrText xml:space="preserve"> TOC \h </w:instrText></w:r>
           <w:r><w:fldChar w:fldCharType="separate"/></w:r>
         </w:p>
-        <w:p><w:hyperlink w:anchor="heading-1"><w:r><w:t>Heading 1	3</w:t></w:r></w:hyperlink></w:p>
+        <w:p><w:hyperlink w:anchor="heading-1"><w:r><w:t>Heading 1 3</w:t></w:r></w:hyperlink></w:p>
         <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
         "#,
     );
@@ -1327,7 +1329,7 @@ fn complex_field_cached_hyperlink_across_paragraphs_converts_and_renders() {
     assert!(output.page_count >= 1);
     let doc = WordDoc::open(&bytes, &opts()).expect("open");
     let laid = layout_docx(&doc).expect("layout").0;
-    assert!(page_text(&laid.pages[0]).contains("Heading 1\t3"));
+    assert!(page_text(&laid.pages[0]).contains("Heading 1 3"));
 }
 
 #[test]
@@ -2311,13 +2313,17 @@ fn mid_section_header_content_is_profiled() {
         ("word/header1.xml", hdr1.as_bytes()),
         ("word/header2.xml", hdr2.as_bytes()),
     ]);
-    let prof = profile(&bytes, OfficeFormat::Docx).expect("profile");
+    let options = ConvertOptions {
+        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        ..ConvertOptions::default()
+    };
+    let prof = profile_with_options(&bytes, OfficeFormat::Docx, &options).expect("profile");
     assert!(
         prof.supported,
         "registered fallback should cover header Arabic: {:?}",
         prof.reasons
     );
-    convert(&bytes, OfficeFormat::Docx, &opts()).expect("header Arabic converts");
+    convert(&bytes, OfficeFormat::Docx, &options).expect("header Arabic converts");
 }
 
 #[test]

@@ -6,8 +6,9 @@
 //! well-formed calls — container failures serialize via `DocProfile::from_error`.
 
 use office_core::{
-    ConvertOptions, DocProfile, OfficeError, OfficeFormat, UnsupportedCode, convert, profile,
-    register_font as register_core_font,
+    ConvertOptions, DocProfile, FontExpectation, OfficeError, OfficeFormat, ResolutionMode,
+    UnsupportedCode, convert, font_requests, profile, profile_with_options,
+    register_font as register_core_font, register_font_validated,
 };
 use wasm_bindgen::prelude::*;
 
@@ -50,7 +51,8 @@ fn envelope(code: &str, message: &str, detail: Option<(&str, &str)>) -> JsError 
 /// taxonomy. Matching enum variants, not message prose.
 fn taxonomy_code(code: UnsupportedCode) -> &'static str {
     match code {
-        UnsupportedCode::MissingGlyph => "missing_glyph",
+        UnsupportedCode::MissingGlyph | UnsupportedCode::FontCoverageMismatch => "missing_glyph",
+        UnsupportedCode::FontUnresolved => "missing_asset",
         UnsupportedCode::InputTooLarge
         | UnsupportedCode::DecompressionLimit
         | UnsupportedCode::ImageDimensionsExceedLimit
@@ -117,6 +119,32 @@ pub fn office_profile(bytes: &[u8], extension: &str) -> Result<String, JsError> 
     serde_json::to_string(&prof).map_err(internal_err)
 }
 
+/// Text-free canonical font requests for host resolution. Exact registered and
+/// document-embedded faces are omitted.
+#[wasm_bindgen]
+pub fn office_font_requests(bytes: &[u8], extension: &str) -> Result<String, JsError> {
+    let Some(format) = format_for(extension) else {
+        return Err(envelope(
+            "invalid_input",
+            &format!("invalid: unsupported extension {extension}"),
+            None,
+        ));
+    };
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(envelope(
+            "resource_limit",
+            &format!(
+                "invalid: input ({} bytes) exceeds the in-process limit",
+                bytes.len()
+            ),
+            None,
+        ));
+    }
+    let requests = font_requests(bytes, format, &ConvertOptions::default())
+        .map_err(|error| office_err(&error))?;
+    serde_json::to_string(&requests).map_err(internal_err)
+}
+
 /// PDF bytes for a document. Throws a `JsError` whose message begins with
 /// `"unsupported:<code>: "` for envelope misses (DocKosha parses this prefix),
 /// `"invalid: …"` / `"internal: …"` otherwise. Same 50 MiB pre-copy guard.
@@ -151,11 +179,125 @@ pub fn office_to_pdf(bytes: &[u8], extension: &str) -> Result<Vec<u8>, JsError> 
     Ok(pdf)
 }
 
+/// Font-aware profile using JSON options (`{"mode":"strict|compatible"}`).
+#[wasm_bindgen]
+pub fn office_profile_with_options(
+    bytes: &[u8],
+    extension: &str,
+    options_json: &str,
+) -> Result<String, JsError> {
+    let Some(format) = format_for(extension) else {
+        return Err(envelope(
+            "invalid_input",
+            &format!("invalid: unsupported extension {extension}"),
+            None,
+        ));
+    };
+    if bytes.len() > MAX_INPUT_BYTES {
+        let error = OfficeError::unsupported(
+            UnsupportedCode::InputTooLarge,
+            format!("{} bytes exceeds the in-process limit", bytes.len()),
+        );
+        return serde_json::to_string(&DocProfile::from_error(format, &error))
+            .map_err(internal_err);
+    }
+    let options = parse_options(options_json)?;
+    let profile = match profile_with_options(bytes, format, &options) {
+        Ok(profile) => profile,
+        Err(error) => DocProfile::from_error(format, &error),
+    };
+    serde_json::to_string(&profile).map_err(internal_err)
+}
+
+/// Font-aware conversion using JSON options (`{"mode":"strict|compatible"}`).
+#[wasm_bindgen]
+pub fn office_to_pdf_with_options(
+    bytes: &[u8],
+    extension: &str,
+    options_json: &str,
+) -> Result<Vec<u8>, JsError> {
+    let Some(format) = format_for(extension) else {
+        return Err(envelope(
+            "invalid_input",
+            &format!("invalid: unsupported extension {extension}"),
+            None,
+        ));
+    };
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(envelope(
+            "resource_limit",
+            &format!(
+                "invalid: input ({} bytes) exceeds the in-process limit",
+                bytes.len()
+            ),
+            None,
+        ));
+    }
+    let options = parse_options(options_json)?;
+    let pdf = convert(bytes, format, &options)
+        .map(|output| output.pdf)
+        .map_err(|error| office_err(&error))?;
+    office_core::output_limit::ensure_output_within_limit(
+        pdf.len(),
+        office_core::output_limit::MAX_OUTPUT_BYTES,
+    )
+    .map_err(|error| office_err(&error))?;
+    Ok(pdf)
+}
+
+fn parse_options(options_json: &str) -> Result<ConvertOptions, JsError> {
+    let value: serde_json::Value = serde_json::from_str(options_json).map_err(|error| {
+        envelope(
+            "invalid_input",
+            &format!("invalid: malformed Office options JSON: {error}"),
+            None,
+        )
+    })?;
+    let mode = match value.get("mode").and_then(serde_json::Value::as_str) {
+        None | Some("compatible") => ResolutionMode::Compatible,
+        Some("strict") => ResolutionMode::Strict,
+        Some(other) => {
+            return Err(envelope(
+                "invalid_input",
+                &format!("invalid: unsupported font resolution mode {other}"),
+                None,
+            ));
+        }
+    };
+    Ok(ConvertOptions {
+        resolution_mode: mode,
+        ..ConvertOptions::default()
+    })
+}
+
 /// Adds a font to the process-global font database (brand fonts). Errors on
 /// unparseable font bytes.
 #[wasm_bindgen]
 pub fn register_font(bytes: &[u8]) -> Result<(), JsError> {
     register_core_font(bytes).map_err(|e| office_err(&e))
+}
+
+/// Validates and registers one font, returning its reproducible identity JSON.
+#[wasm_bindgen]
+pub fn office_register_font(
+    bytes: &[u8],
+    expectation_json: Option<String>,
+) -> Result<String, JsError> {
+    let expectation = expectation_json
+        .filter(|json| !json.trim().is_empty())
+        .map(|json| {
+            serde_json::from_str::<FontExpectation>(&json).map_err(|error| {
+                envelope(
+                    "invalid_input",
+                    &format!("invalid: malformed font expectation JSON: {error}"),
+                    None,
+                )
+            })
+        })
+        .transpose()?;
+    let identity = register_font_validated(bytes, expectation)
+        .map_err(|error| office_err(&error))?;
+    serde_json::to_string(&identity).map_err(internal_err)
 }
 
 /// The stable `snake_case` slug for an unsupported code (matches profile reasons).

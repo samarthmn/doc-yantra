@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const MARKER = "DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1";
 const HELPERS = `
 const ${MARKER} = 50 * 1024 * 1024;
+const DOC_YANTRA_OFFICE_FONT_PRECOPY_LIMIT = 10 * 1024 * 1024;
 
 function dyEnvelopeError(code, message) {
     return new Error(JSON.stringify({ dy: 1, code, message }));
@@ -41,6 +42,7 @@ function guardOfficeProfileInput(bytes, extension) {
             fontsUsed: [],
             fontsMissing: [],
         },
+        fonts: [],
     });
 }
 
@@ -48,6 +50,11 @@ function guardOfficeConversionInput(bytes, extension) {
     if (bytes.byteLength <= ${MARKER}) return;
     officeFormatForInputGuard(extension);
     throw dyEnvelopeError("resource_limit", \`invalid: input (\${bytes.byteLength} bytes) exceeds the in-process limit\`);
+}
+
+function guardOfficeFontInput(bytes) {
+    if (bytes.byteLength <= DOC_YANTRA_OFFICE_FONT_PRECOPY_LIMIT) return;
+    throw dyEnvelopeError("resource_limit", \`invalid: font input (\${bytes.byteLength} bytes) exceeds the registration limit\`);
 }
 `;
 
@@ -66,19 +73,25 @@ function countOccurrences(source, needle) {
 function assertPatched(source, label) {
   const profileCall = "guardOfficeProfileInput(bytes, extension);";
   const conversionCall = "guardOfficeConversionInput(bytes, extension);";
+  const fontCall = "guardOfficeFontInput(bytes);";
   if (
     countOccurrences(source, `const ${MARKER} =`) !== 1 ||
-    countOccurrences(source, profileCall) !== 1 ||
-    countOccurrences(source, conversionCall) !== 1
+    countOccurrences(source, profileCall) !== 2 ||
+    countOccurrences(source, conversionCall) !== 3 ||
+    countOccurrences(source, fontCall) !== 1
   ) {
     throw new Error(`${label}: expected exactly one pre-copy guard per Office export`);
   }
 
-  for (const [name, guard] of [
-    ["office_profile", profileCall],
-    ["office_to_pdf", conversionCall],
+  for (const [name, signatureArgs, guard] of [
+    ["office_profile", "bytes, extension", profileCall],
+    ["office_profile_with_options", "bytes, extension, options_json", profileCall],
+    ["office_font_requests", "bytes, extension", conversionCall],
+    ["office_to_pdf", "bytes, extension", conversionCall],
+    ["office_to_pdf_with_options", "bytes, extension, options_json", conversionCall],
+    ["office_register_font", "bytes, expectation_json", fontCall],
   ]) {
-    const signature = new RegExp(`^(?:export )?function ${name}\\(bytes, extension\\) \\{$`, "m");
+    const signature = new RegExp(`^(?:export )?function ${name}\\(${signatureArgs}\\) \\{$`, "m");
     const match = source.match(signature);
     if (match === null) throw new Error(`${label}: missing generated ${name} export`);
     const functionStart = match.index;
@@ -106,8 +119,26 @@ export function transformOfficeGlue(source, label = "office wasm glue") {
       "    const oversizedProfile = guardOfficeProfileInput(bytes, extension);\n    if (oversizedProfile !== undefined) return oversizedProfile;",
     ],
     ["office_to_pdf", "    guardOfficeConversionInput(bytes, extension);"],
+    ["office_font_requests", "    guardOfficeConversionInput(bytes, extension);"],
+    [
+      "office_profile_with_options",
+      "    const oversizedProfile = guardOfficeProfileInput(bytes, extension);\n    if (oversizedProfile !== undefined) return oversizedProfile;",
+    ],
+    ["office_to_pdf_with_options", "    guardOfficeConversionInput(bytes, extension);"],
+    ["office_register_font", "    guardOfficeFontInput(bytes);"],
   ]) {
-    const signature = new RegExp(`^(?:export )?function ${name}\\(bytes, extension\\) \\{$`, "gm");
+    const argumentsByName = {
+      office_profile: "bytes, extension",
+      office_to_pdf: "bytes, extension",
+      office_font_requests: "bytes, extension",
+      office_profile_with_options: "bytes, extension, options_json",
+      office_to_pdf_with_options: "bytes, extension, options_json",
+      office_register_font: "bytes, expectation_json",
+    };
+    const signature = new RegExp(
+      `^(?:export )?function ${name}\\(${argumentsByName[name]}\\) \\{$`,
+      "gm",
+    );
     const matches = [...output.matchAll(signature)];
     if (matches.length !== 1) {
       throw new Error(`${label}: expected exactly one generated ${name} export`);

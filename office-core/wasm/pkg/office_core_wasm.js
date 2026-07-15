@@ -1,6 +1,7 @@
 /* @ts-self-types="./office_core_wasm.d.ts" */
 
 const DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1 = 50 * 1024 * 1024;
+const DOC_YANTRA_OFFICE_FONT_PRECOPY_LIMIT = 10 * 1024 * 1024;
 
 function dyEnvelopeError(code, message) {
     return new Error(JSON.stringify({ dy: 1, code, message }));
@@ -36,6 +37,7 @@ function guardOfficeProfileInput(bytes, extension) {
             fontsUsed: [],
             fontsMissing: [],
         },
+        fonts: [],
     });
 }
 
@@ -45,10 +47,47 @@ function guardOfficeConversionInput(bytes, extension) {
     throw dyEnvelopeError("resource_limit", `invalid: input (${bytes.byteLength} bytes) exceeds the in-process limit`);
 }
 
+function guardOfficeFontInput(bytes) {
+    if (bytes.byteLength <= DOC_YANTRA_OFFICE_FONT_PRECOPY_LIMIT) return;
+    throw dyEnvelopeError("resource_limit", `invalid: font input (${bytes.byteLength} bytes) exceeds the registration limit`);
+}
+
 function init() {
     wasm.init();
 }
 exports.init = init;
+
+/**
+ * Text-free canonical font requests for host resolution. Exact registered and
+ * document-embedded faces are omitted.
+ * @param {Uint8Array} bytes
+ * @param {string} extension
+ * @returns {string}
+ */
+function office_font_requests(bytes, extension) {
+    guardOfficeConversionInput(bytes, extension);
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(extension, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.office_font_requests(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+exports.office_font_requests = office_font_requests;
 
 /**
  * The DocProfile JSON for a document. Never throws for well-formed calls;
@@ -86,6 +125,72 @@ function office_profile(bytes, extension) {
 exports.office_profile = office_profile;
 
 /**
+ * Font-aware profile using JSON options (`{"mode":"strict|compatible"}`).
+ * @param {Uint8Array} bytes
+ * @param {string} extension
+ * @param {string} options_json
+ * @returns {string}
+ */
+function office_profile_with_options(bytes, extension, options_json) {
+    const oversizedProfile = guardOfficeProfileInput(bytes, extension);
+    if (oversizedProfile !== undefined) return oversizedProfile;
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(extension, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(options_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.office_profile_with_options(ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+exports.office_profile_with_options = office_profile_with_options;
+
+/**
+ * Validates and registers one font, returning its reproducible identity JSON.
+ * @param {Uint8Array} bytes
+ * @param {string | null} [expectation_json]
+ * @returns {string}
+ */
+function office_register_font(bytes, expectation_json) {
+    guardOfficeFontInput(bytes);
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(expectation_json) ? 0 : passStringToWasm0(expectation_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.office_register_font(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+exports.office_register_font = office_register_font;
+
+/**
  * PDF bytes for a document. Throws a `JsError` whose message begins with
  * `"unsupported:<code>: "` for envelope misses (DocKosha parses this prefix),
  * `"invalid: …"` / `"internal: …"` otherwise. Same 50 MiB pre-copy guard.
@@ -108,6 +213,31 @@ function office_to_pdf(bytes, extension) {
     return v3;
 }
 exports.office_to_pdf = office_to_pdf;
+
+/**
+ * Font-aware conversion using JSON options (`{"mode":"strict|compatible"}`).
+ * @param {Uint8Array} bytes
+ * @param {string} extension
+ * @param {string} options_json
+ * @returns {Uint8Array}
+ */
+function office_to_pdf_with_options(bytes, extension, options_json) {
+    guardOfficeConversionInput(bytes, extension);
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(extension, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(options_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.office_to_pdf_with_options(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
+}
+exports.office_to_pdf_with_options = office_to_pdf_with_options;
 
 /**
  * Adds a font to the process-global font database (brand fonts). Errors on
@@ -209,6 +339,10 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function isLikeNone(x) {
+    return x === undefined || x === null;
 }
 
 function passArray8ToWasm0(arg, malloc) {

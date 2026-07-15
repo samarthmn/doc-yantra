@@ -3,6 +3,9 @@
 //! and family-class fallback, plus symbol-font bullet mapping.
 
 use super::db::{FaceId, FontDb};
+use super::requests::FontSlot;
+use crate::oxml::theme::Theme;
+use crate::oxml::wml::RunFonts;
 use crate::profile::Warning;
 
 /// The result of resolving a font request.
@@ -19,15 +22,35 @@ pub struct Resolved {
 /// Resolves `(family, weight, italic)` following the documented order:
 /// embedded → exact → metric-compatible substitution → family-class fallback.
 pub fn resolve(db: &FontDb, family: &str, weight: u16, italic: bool) -> Resolved {
+    resolve_with_stretch(db, family, weight, italic, 5)
+}
+
+/// Resolves a face while preserving the requested OS/2 width class.
+pub fn resolve_with_stretch(
+    db: &FontDb,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    stretch: u16,
+) -> Resolved {
     let mut out = Resolved::default();
     if db.is_empty() {
         out.missing = Some(family.to_string());
         return out;
     }
 
-    // 1 & 2: exact family match (embedded faces sort first via `pick_in_family`).
-    if let Some(pick) = pick_in_family(db, family, weight, italic) {
+    if db.resolution_mode() == crate::ResolutionMode::Strict {
+        out.face = resolve_exact_with_stretch(db, family, weight, italic, stretch);
+        if out.face.is_none() {
+            out.missing = Some(family.to_string());
+        }
+        return out;
+    }
+
+    // 1 & 2: family match (embedded faces sort first via `pick_in_family`).
+    if let Some(pick) = pick_in_family(db, family, weight, italic, stretch) {
         out.face = Some(pick.face);
+        push_style_warning(&mut out, db, family, weight, italic, stretch, &pick);
         if pick.synthetic_italic {
             out.warnings.push(Warning::new(
                 "synthetic_style_unavailable",
@@ -39,13 +62,14 @@ pub fn resolve(db: &FontDb, family: &str, weight: u16, italic: bool) -> Resolved
 
     // 3: metric-compatible substitution.
     if let Some(target) = substitute(family)
-        && let Some(pick) = pick_in_family(db, target, weight, italic)
+        && let Some(pick) = pick_in_family(db, target, weight, italic, stretch)
     {
         out.face = Some(pick.face);
         out.warnings.push(Warning::new(
             "font_substituted",
             format!("{family} -> {target}"),
         ));
+        push_style_warning(&mut out, db, target, weight, italic, stretch, &pick);
         if pick.synthetic_italic {
             out.warnings.push(Warning::new(
                 "synthetic_style_unavailable",
@@ -57,7 +81,7 @@ pub fn resolve(db: &FontDb, family: &str, weight: u16, italic: bool) -> Resolved
 
     // 4: family-class fallback by name heuristic.
     let fallback = fallback_class(family);
-    if let Some(pick) = pick_in_family(db, fallback, weight, italic) {
+    if let Some(pick) = pick_in_family(db, fallback, weight, italic, stretch) {
         out.face = Some(pick.face);
         out.warnings.push(Warning::new(
             "font_fallback",
@@ -72,10 +96,45 @@ pub fn resolve(db: &FontDb, family: &str, weight: u16, italic: bool) -> Resolved
     out
 }
 
+/// Returns an exact family, weight, and italic face without substitution or
+/// synthetic styling. Embedded faces win deterministic ties.
+pub fn resolve_exact(db: &FontDb, family: &str, weight: u16, italic: bool) -> Option<FaceId> {
+    resolve_exact_with_stretch(db, family, weight, italic, 5)
+}
+
+/// Returns an exact family, weight, italic, and width-class face.
+pub fn resolve_exact_with_stretch(
+    db: &FontDb,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    stretch: u16,
+) -> Option<FaceId> {
+    let key = family_key(family);
+    db.faces()
+        .iter()
+        .enumerate()
+        .filter(|(_, face)| {
+            (family_key(&face.family_name) == key
+                || face
+                    .full_name
+                    .as_deref()
+                    .is_some_and(|name| family_key(name) == key))
+                && face.weight == weight
+                && face.italic == italic
+                && face.stretch == stretch
+        })
+        .min_by_key(|(index, face)| (u8::from(!face.embedded), *index))
+        .map(|(index, _)| FaceId(index))
+}
+
 /// Returns deterministic coverage-fallback candidates after `primary`.
 /// Embedded document faces win, then packaged Noto faces, then metric-compatible
 /// bundled faces, with style distance breaking ties inside each class.
 pub fn coverage_fallbacks(db: &FontDb, primary: FaceId, weight: u16, italic: bool) -> Vec<FaceId> {
+    if db.resolution_mode() == crate::ResolutionMode::Strict {
+        return vec![primary];
+    }
     let mut ids: Vec<FaceId> = (0..db.len()).map(FaceId).collect();
     ids.retain(|id| {
         *id == primary || !family_key(&db.faces()[id.0].family_name).contains("lastresort")
@@ -142,11 +201,18 @@ pub fn substitute_bullet_char(db: &FontDb, faces: &[FaceId], ch: char) -> Option
 struct Pick {
     face: FaceId,
     synthetic_italic: bool,
+    style_compatible: bool,
 }
 
 /// Picks the best face in `family` (case-insensitive, matching family / full /
 /// name), scored by italic match then weight distance. Embedded faces win ties.
-fn pick_in_family(db: &FontDb, family: &str, weight: u16, italic: bool) -> Option<Pick> {
+fn pick_in_family(
+    db: &FontDb,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    stretch: u16,
+) -> Option<Pick> {
     let key = family_key(family);
     let mut best: Option<(FaceId, i64, bool)> = None; // (id, score, italic_match)
     for (i, face) in db.faces().iter().enumerate() {
@@ -162,7 +228,9 @@ fn pick_in_family(db: &FontDb, family: &str, weight: u16, italic: bool) -> Optio
         let italic_match = face.italic == italic;
         let weight_dist = (face.weight as i64 - weight as i64).abs();
         // Lower score is better: prioritise italic match, then weight distance,
-        // then prefer embedded faces.
+        // then prefer embedded faces. Compatible mode deliberately preserves
+        // the pre-fontless face tie-break; strict/exact matching enforces the
+        // requested stretch above without moving legacy native fidelity.
         let score = (if italic_match { 0 } else { 100_000 })
             + weight_dist
             + if face.embedded { -1 } else { 0 };
@@ -172,10 +240,38 @@ fn pick_in_family(db: &FontDb, family: &str, weight: u16, italic: bool) -> Optio
             _ => best = Some((id, score, italic_match)),
         }
     }
-    best.map(|(face, _, italic_match)| Pick {
-        face,
-        synthetic_italic: italic && !italic_match,
+    best.map(|(face, _, italic_match)| {
+        let selected = &db.faces()[face.0];
+        Pick {
+            face,
+            synthetic_italic: italic && !italic_match,
+            style_compatible: selected.weight != weight
+                || selected.italic != italic
+                || selected.stretch != stretch,
+        }
     })
+}
+
+fn push_style_warning(
+    out: &mut Resolved,
+    db: &FontDb,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    stretch: u16,
+    pick: &Pick,
+) {
+    if !pick.style_compatible {
+        return;
+    }
+    let selected = &db.faces()[pick.face.0];
+    out.warnings.push(Warning::new(
+        "font_style_compatible",
+        format!(
+            "{family} weight={weight} italic={italic} stretch={stretch} -> weight={} italic={} stretch={}",
+            selected.weight, selected.italic, selected.stretch
+        ),
+    ));
 }
 
 /// Normalizes a family name for case-insensitive comparison.
@@ -224,6 +320,52 @@ pub fn numbering_label_family(
         .or(theme_minor_latin)
         .unwrap_or("Calibri")
         .to_string()
+}
+
+/// Resolves one effective WML script slot through direct and theme-backed
+/// `w:rFonts` values, using the same cascade in profile and layout.
+pub fn wml_run_family(fonts: &RunFonts, slot: FontSlot, theme: &Theme) -> String {
+    let direct = match slot {
+        FontSlot::Ascii => fonts.ascii.clone().or_else(|| fonts.h_ansi.clone()),
+        FontSlot::HAnsi => fonts.h_ansi.clone().or_else(|| fonts.ascii.clone()),
+        FontSlot::EastAsia => fonts
+            .east_asia
+            .clone()
+            .or_else(|| fonts.h_ansi.clone())
+            .or_else(|| fonts.ascii.clone()),
+        FontSlot::Cs => fonts
+            .cs
+            .clone()
+            .or_else(|| fonts.ascii.clone())
+            .or_else(|| fonts.h_ansi.clone()),
+    };
+    if let Some(family) = direct {
+        return family;
+    }
+    let reference = match slot {
+        FontSlot::Ascii => fonts
+            .ascii_theme
+            .as_deref()
+            .or(fonts.h_ansi_theme.as_deref()),
+        FontSlot::HAnsi => fonts
+            .h_ansi_theme
+            .as_deref()
+            .or(fonts.ascii_theme.as_deref()),
+        FontSlot::EastAsia => fonts
+            .east_asia_theme
+            .as_deref()
+            .or(fonts.h_ansi_theme.as_deref())
+            .or(fonts.ascii_theme.as_deref()),
+        FontSlot::Cs => fonts
+            .cs_theme
+            .as_deref()
+            .or(fonts.ascii_theme.as_deref())
+            .or(fonts.h_ansi_theme.as_deref()),
+    };
+    reference
+        .and_then(|reference| theme.resolve_font_reference(reference))
+        .or_else(|| theme.minor_latin.clone())
+        .unwrap_or_else(|| "Calibri".to_string())
 }
 
 /// Maps a symbol-font code point (Symbol/Wingdings/Webdings, commonly in the

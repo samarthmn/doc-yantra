@@ -9,7 +9,7 @@ use super::{
     Decor, GlyphRun, ImageId, Item, LinkTarget, PlacedGlyph, SemanticCluster, SemanticRun, Stroke,
 };
 use crate::fonts::metrics::FaceMetrics;
-use crate::fonts::{FaceId, FontDb, matching};
+use crate::fonts::{FaceId, FontDb, FontSlot, matching};
 use crate::oxml::numbering::LabelJustification;
 use crate::oxml::numbering::LevelSuffix;
 use crate::oxml::wml::{
@@ -1219,13 +1219,15 @@ pub fn apply_line_spacing(spacing: Option<LineSpacing>, natural: f64) -> f64 {
 
 /// Resolves a run's font to a face id, warning as needed.
 fn resolve_face(doc: &WordDoc, warnings: &mut Vec<Warning>, props: &RunProps) -> Option<FaceId> {
-    let family = (props.rtl == Some(true))
-        .then(|| props.fonts.cs.clone())
-        .flatten()
-        .or_else(|| props.fonts.ascii.clone())
-        .or_else(|| props.fonts.h_ansi.clone())
-        .or_else(|| doc.theme.minor_latin.clone())
-        .unwrap_or_else(|| "Calibri".to_string());
+    let family = matching::wml_run_family(
+        &props.fonts,
+        if props.rtl == Some(true) {
+            FontSlot::Cs
+        } else {
+            FontSlot::Ascii
+        },
+        &doc.theme,
+    );
     let weight = if props.bold == Some(true) { 700 } else { 400 };
     let italic = props.italic == Some(true);
     let resolved = matching::resolve(&doc.fonts, &family, weight, italic);
@@ -2862,12 +2864,7 @@ fn para_mark_height(doc: &WordDoc, para: &Paragraph, use_mark_rpr: bool) -> f64 
     let eff = doc.styles.run_props(&para.props, &mark);
     let size = eff.size_pt.unwrap_or(DEFAULT_SIZE_PT);
     // Use the resolved face's metrics when available.
-    let family = eff
-        .fonts
-        .ascii
-        .clone()
-        .or_else(|| doc.theme.minor_latin.clone())
-        .unwrap_or_else(|| "Calibri".to_string());
+    let family = matching::wml_run_family(&eff.fonts, FontSlot::Ascii, &doc.theme);
     if let Some(face) = matching::resolve(&doc.fonts, &family, 400, false).face
         && let Some(parsed) = doc.fonts.face(face).and_then(|f| f.parsed())
     {

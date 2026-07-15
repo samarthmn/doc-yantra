@@ -1,8 +1,12 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const office_font_requests: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const office_profile: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const office_profile_with_options: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const office_register_font: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const office_to_pdf: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const office_to_pdf_with_options: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const register_font: (a: number, b: number) => [number, number];
 export const version: () => [number, number];
 export const init: () => void;

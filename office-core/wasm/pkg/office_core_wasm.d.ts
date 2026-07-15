@@ -4,6 +4,12 @@
 export function init(): void;
 
 /**
+ * Text-free canonical font requests for host resolution. Exact registered and
+ * document-embedded faces are omitted.
+ */
+export function office_font_requests(bytes: Uint8Array, extension: string): string;
+
+/**
  * The DocProfile JSON for a document. Never throws for well-formed calls;
  * container-level failures serialize via `DocProfile::from_error`. Oversized
  * input returns the `input_too_large` profile. The generated JS package
@@ -12,11 +18,26 @@ export function init(): void;
 export function office_profile(bytes: Uint8Array, extension: string): string;
 
 /**
+ * Font-aware profile using JSON options (`{"mode":"strict|compatible"}`).
+ */
+export function office_profile_with_options(bytes: Uint8Array, extension: string, options_json: string): string;
+
+/**
+ * Validates and registers one font, returning its reproducible identity JSON.
+ */
+export function office_register_font(bytes: Uint8Array, expectation_json?: string | null): string;
+
+/**
  * PDF bytes for a document. Throws a `JsError` whose message begins with
  * `"unsupported:<code>: "` for envelope misses (DocKosha parses this prefix),
  * `"invalid: …"` / `"internal: …"` otherwise. Same 50 MiB pre-copy guard.
  */
 export function office_to_pdf(bytes: Uint8Array, extension: string): Uint8Array;
+
+/**
+ * Font-aware conversion using JSON options (`{"mode":"strict|compatible"}`).
+ */
+export function office_to_pdf_with_options(bytes: Uint8Array, extension: string, options_json: string): Uint8Array;
 
 /**
  * Adds a font to the process-global font database (brand fonts). Errors on

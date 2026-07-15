@@ -329,6 +329,10 @@ pub struct NumRef {
 }
 
 /// Inline content within a paragraph.
+// `Run` intentionally stays inline: boxing it would break this public AST API,
+// while font-cascade metadata makes its owned representation exceed Clippy's
+// generic enum-size heuristic.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum InlineContent {
     /// A zero-width internal-link destination.
@@ -663,6 +667,14 @@ pub struct RunFonts {
     pub east_asia: Option<String>,
     /// Complex-script slot.
     pub cs: Option<String>,
+    /// Theme reference for the ASCII slot.
+    pub ascii_theme: Option<String>,
+    /// Theme reference for the high-ANSI slot.
+    pub h_ansi_theme: Option<String>,
+    /// Theme reference for the East-Asian slot.
+    pub east_asia_theme: Option<String>,
+    /// Theme reference for the complex-script slot.
+    pub cs_theme: Option<String>,
 }
 
 impl RunFonts {
@@ -673,6 +685,19 @@ impl RunFonts {
             h_ansi: self.h_ansi.clone().or_else(|| base.h_ansi.clone()),
             east_asia: self.east_asia.clone().or_else(|| base.east_asia.clone()),
             cs: self.cs.clone().or_else(|| base.cs.clone()),
+            ascii_theme: self
+                .ascii_theme
+                .clone()
+                .or_else(|| base.ascii_theme.clone()),
+            h_ansi_theme: self
+                .h_ansi_theme
+                .clone()
+                .or_else(|| base.h_ansi_theme.clone()),
+            east_asia_theme: self
+                .east_asia_theme
+                .clone()
+                .or_else(|| base.east_asia_theme.clone()),
+            cs_theme: self.cs_theme.clone().or_else(|| base.cs_theme.clone()),
         }
     }
 }
@@ -3358,6 +3383,12 @@ fn parse_run_fonts(node: Node) -> RunFonts {
         h_ansi: attr(node, W, "hAnsi").map(str::to_string),
         east_asia: attr(node, W, "eastAsia").map(str::to_string),
         cs: attr(node, W, "cs").map(str::to_string),
+        ascii_theme: attr(node, W, "asciiTheme").map(str::to_string),
+        h_ansi_theme: attr(node, W, "hAnsiTheme").map(str::to_string),
+        east_asia_theme: attr(node, W, "eastAsiaTheme").map(str::to_string),
+        cs_theme: attr(node, W, "cstheme")
+            .or_else(|| attr(node, W, "csTheme"))
+            .map(str::to_string),
     }
 }
 

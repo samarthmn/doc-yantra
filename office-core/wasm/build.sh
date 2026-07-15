@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 OWNER="samarthmn"                          # GitHub owner (user/org) == npm scope
 REPO="doc-yantra"                          # GitHub repo name
 PKG_NAME="@samarthmn/doc-yantra-office"    # published npm package name
-MAX_WASM_MB=25                             # size budget (engine + 20 bundled fonts)
+MAX_WASM_MB=8                              # fontless engine budget; font payload is forbidden
 WASM_PACK_VERSION="0.15.0"                 # generated glue is committed; upgrades are deliberate
 
 wasmpack() {
@@ -62,7 +62,10 @@ node ./postprocess-glue.mjs \
 # Server worker API. Runtime is single-source at repo root; only engine op
 # tables and public facades are package-specific.
 cp ../../wasm-worker/worker-client.cjs ../../wasm-worker/worker-entry.cjs pkg/
-cp worker.js worker.d.ts worker-ops.cjs pkg/
+cp worker.js worker.d.ts worker-ops.cjs index.cjs index.d.ts font-provider.cjs font-provider.d.ts pkg/
+cp web-index.js web-index.d.ts pkg/web/
+cp font-provider-web.js pkg/web/font-provider.js
+cp font-provider-web.d.ts pkg/web/font-provider.d.ts
 
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \
 node -e '
@@ -71,19 +74,22 @@ node -e '
   j.name = process.env.PKG_NAME;
   j.repository = { type: "git", url: process.env.REPO_URL };
   j.license = "UNLICENSED";
+  j.main = "index.cjs";
+  j.types = "index.d.ts";
   j.publishConfig = { registry: "https://npm.pkg.github.com" };
-  j.files = Array.from(new Set([...(j.files || []), "web", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json"]));
+  j.files = Array.from(new Set([...(j.files || []), "web", "index.cjs", "index.d.ts", "font-provider.cjs", "font-provider.d.ts", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json"]));
   j.exports = {
     ".": {
-      types: "./office_core_wasm.d.ts",
-      require: "./office_core_wasm.js",
-      default: "./office_core_wasm.js",
+      types: "./index.d.ts",
+      require: "./index.cjs",
+      default: "./index.cjs",
     },
     "./web": {
-      types: "./web/office_core_wasm.d.ts",
-      import: "./web/office_core_wasm.js",
-      default: "./web/office_core_wasm.js",
+      types: "./web/web-index.d.ts",
+      import: "./web/web-index.js",
+      default: "./web/web-index.js",
     },
+    "./web/font-provider": { types: "./web/font-provider.d.ts", import: "./web/font-provider.js" },
     "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
     "./worker": { types: "./worker.d.ts", require: "./worker.js", default: "./worker.js" },
     "./package.json": "./package.json",
@@ -102,7 +108,7 @@ echo "Sizes:"
 ls -la pkg/office_core_wasm_bg.wasm pkg/web/office_core_wasm_bg.wasm | awk '{print $5, $9}'
 if [ "${WASM_MB}" -ge "${MAX_WASM_MB}" ]; then
   echo "error: nodejs wasm is ${WASM_MB} MB, over the ${MAX_WASM_MB} MB budget." >&2
-  echo "       subset the bundled fonts to WinAnsi+Latin-Extended at vendor time." >&2
+  echo "       investigate engine growth; font binaries are forbidden in this artifact." >&2
   exit 1
 fi
 echo "Done (${WASM_MB} MB < ${MAX_WASM_MB} MB). Package ready at office-core/wasm/pkg (commit it)."

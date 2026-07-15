@@ -103,6 +103,19 @@ pub enum UnsupportedCode {
     UnknownElement,
     /// No available font face maps one or more required Unicode code points.
     MissingGlyph,
+    /// One or more requested font faces could not be resolved under the active
+    /// strict/compatible policy.
+    FontUnresolved,
+    /// A supplied font's name/style metadata does not match the requested face.
+    FontIdentityMismatch,
+    /// A supplied font does not match its caller-pinned SHA-256 digest.
+    FontHashMismatch,
+    /// A supplied font does not cover a required script or code point.
+    FontCoverageMismatch,
+    /// A supplied font's embedding permission forbids safe PDF embedding.
+    FontLicenseRestricted,
+    /// A supplied font format or collection face is outside the SFNT contract.
+    FontFormatUnsupported,
     /// The input exceeds the in-process size guard.
     InputTooLarge,
     /// The package decompresses past the entry/part/total budgets. A local

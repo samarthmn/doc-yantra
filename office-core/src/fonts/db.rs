@@ -24,10 +24,18 @@ pub struct Face {
     pub subfamily: String,
     /// OS/2 usWeightClass (100–900; 400 regular, 700 bold).
     pub weight: u16,
+    /// OS/2 width class (1–9; 5 is normal).
+    pub stretch: u16,
     /// Whether the face is italic/oblique.
     pub italic: bool,
     /// Whether this face came from the document's embedded fonts (top priority).
     pub embedded: bool,
+    /// SHA-256 of the complete source artifact.
+    pub sha256: String,
+    /// Whether the host pinned this artifact digest.
+    pub hash_pinned: bool,
+    /// Decoded OS/2 policy governing PDF embedding and subsetting.
+    pub embedding_permission: super::registration::EmbeddingPermission,
     /// The raw sfnt bytes (shared; a TTC is shared across its faces).
     pub data: Arc<Vec<u8>>,
     /// Face index within a TrueType Collection (0 for a single font).
@@ -45,6 +53,7 @@ impl Face {
 #[derive(Debug, Clone, Default)]
 pub struct FontDb {
     faces: Vec<Face>,
+    resolution_mode: crate::ResolutionMode,
 }
 
 impl FontDb {
@@ -67,19 +76,29 @@ impl FontDb {
         db
     }
 
-    /// A database with the bundled fonts plus native system font directories and
-    /// any `extra_dirs`. On wasm this is identical to [`FontDb::with_bundled`].
+    /// A database with bundled fonts plus explicitly authorized native system
+    /// font directories and any caller-owned `extra_dirs`.
     pub fn with_system(extra_dirs: &[PathBuf]) -> FontDb {
+        FontDb::with_sources(extra_dirs, true)
+    }
+
+    /// Builds a database from bundled fonts, caller-owned directories, and—only
+    /// when `include_system_fonts` is true—OS-managed font directories. On wasm
+    /// only bundled and subsequently registered byte sources are available.
+    pub fn with_sources(extra_dirs: &[PathBuf], include_system_fonts: bool) -> FontDb {
         // `db` is only mutated in the native scan below.
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut db = FontDb::with_bundled();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut dirs: Vec<PathBuf> = SYSTEM_FONT_DIRS.iter().map(PathBuf::from).collect();
-            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-                dirs.push(home.join("Library/Fonts"));
-                dirs.push(home.join(".fonts"));
-                dirs.push(home.join(".local/share/fonts"));
+            let mut dirs = Vec::new();
+            if include_system_fonts {
+                dirs.extend(SYSTEM_FONT_DIRS.iter().map(PathBuf::from));
+                if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                    dirs.push(home.join("Library/Fonts"));
+                    dirs.push(home.join(".fonts"));
+                    dirs.push(home.join(".local/share/fonts"));
+                }
             }
             dirs.extend(extra_dirs.iter().cloned());
             for dir in dirs {
@@ -87,13 +106,14 @@ impl FontDb {
             }
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = extra_dirs;
+        let _ = (extra_dirs, include_system_fonts);
         db
     }
 
     /// Registers a font from raw bytes at runtime (wasm `register_font`). Unlike
     /// system fonts, a parse failure here is an error.
     pub fn register(&mut self, bytes: Vec<u8>) -> Result<()> {
+        super::registration::validate_font(&bytes, None)?;
         let data = Arc::new(bytes);
         let declared = ttf_parser::fonts_in_collection(&data).unwrap_or(1).max(1) as usize;
         if self.faces.len().saturating_add(declared) > MAX_FONT_FACES {
@@ -109,6 +129,39 @@ impl FontDb {
         Ok(())
     }
 
+    /// Registers only one validated face from an SFNT collection.
+    pub fn register_face(&mut self, bytes: Vec<u8>, face_index: u32) -> Result<()> {
+        let identity = super::registration::validate_font_index(&bytes, face_index)?;
+        if self.faces.len() >= MAX_FONT_FACES {
+            return Err(OfficeError::unsupported(
+                crate::UnsupportedCode::DecompressionLimit,
+                format!("font face count exceeds limit {MAX_FONT_FACES}"),
+            ));
+        }
+        let data = Arc::new(bytes);
+        let face = ttf_parser::Face::parse(&data, face_index)
+            .map_err(|_| OfficeError::Font("unparseable font bytes".into()))?;
+        let family = face_name(&face, ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+            .or_else(|| face_name(&face, ttf_parser::name_id::FAMILY))
+            .unwrap_or_else(|| "Unknown".to_string());
+        self.faces.push(Face {
+            family_name: family,
+            full_name: face_name(&face, ttf_parser::name_id::FULL_NAME),
+            subfamily: face_name(&face, ttf_parser::name_id::SUBFAMILY)
+                .unwrap_or_else(|| "Regular".to_string()),
+            weight: identity.weight,
+            stretch: identity.stretch,
+            italic: identity.italic,
+            embedded: false,
+            sha256: identity.sha256,
+            hash_pinned: false,
+            embedding_permission: identity.fs_type,
+            data,
+            index: face_index,
+        });
+        Ok(())
+    }
+
     /// Registers a document-embedded face (top matching priority). The family
     /// hint from `fontTable.xml` is authoritative; bold/italic come from the
     /// embed slot rather than the (possibly stripped) name table.
@@ -120,6 +173,7 @@ impl FontDb {
         italic: bool,
     ) {
         let data = Arc::new(bytes);
+        let sha256 = sha256_hex(&data);
         // Try the real name table but override identity with the embed slot.
         let remaining = MAX_FONT_FACES.saturating_sub(self.faces.len()) as u32;
         let count = ttf_parser::fonts_in_collection(&data)
@@ -129,13 +183,22 @@ impl FontDb {
         let mut any = false;
         for index in 0..count {
             if ttf_parser::Face::parse(&data, index).is_ok() {
+                let parsed = ttf_parser::Face::parse(&data, index).expect("face parsed above");
+                let embedding_permission = super::registration::embedding_permission(&parsed);
+                if !embedding_permission.allows_outline_embedding() {
+                    continue;
+                }
                 self.faces.push(Face {
                     family_name: family_hint.to_string(),
                     full_name: None,
                     subfamily: style_name(bold, italic).to_string(),
                     weight: if bold { 700 } else { 400 },
+                    stretch: 5,
                     italic,
                     embedded: true,
+                    sha256: sha256.clone(),
+                    hash_pinned: false,
+                    embedding_permission,
                     data: data.clone(),
                     index,
                 });
@@ -149,8 +212,12 @@ impl FontDb {
                 full_name: None,
                 subfamily: style_name(bold, italic).to_string(),
                 weight: if bold { 700 } else { 400 },
+                stretch: 5,
                 italic,
                 embedded: true,
+                sha256,
+                hash_pinned: false,
+                embedding_permission: super::registration::EmbeddingPermission::Unknown,
                 data,
                 index: 0,
             });
@@ -177,15 +244,40 @@ impl FontDb {
         self.faces.is_empty()
     }
 
+    /// Selects exact-only or compatible family resolution for this database.
+    pub fn set_resolution_mode(&mut self, mode: crate::ResolutionMode) {
+        self.resolution_mode = mode;
+    }
+
+    /// The active exact-only or compatible family resolution policy.
+    pub fn resolution_mode(&self) -> crate::ResolutionMode {
+        self.resolution_mode
+    }
+
+    /// Marks registered faces whose complete artifacts were digest-pinned by
+    /// the host, enabling reproducible exactness telemetry.
+    pub fn mark_hash_pinned(&mut self, hashes: &[String]) {
+        for face in &mut self.faces {
+            face.hash_pinned |= hashes
+                .iter()
+                .any(|hash| hash.eq_ignore_ascii_case(&face.sha256));
+        }
+    }
+
     /// Parses `bytes` as a single font or a collection, pushing each face.
     /// Returns the number of faces added. `hint` overrides the family name.
     fn add_sfnt(&mut self, data: Arc<Vec<u8>>, embedded: bool, hint: Option<&str>) -> usize {
+        let sha256 = sha256_hex(&data);
         let count = ttf_parser::fonts_in_collection(&data).unwrap_or(1).max(1);
         let mut added = 0;
         for index in 0..count {
             let Ok(face) = ttf_parser::Face::parse(&data, index) else {
                 continue;
             };
+            let embedding_permission = super::registration::embedding_permission(&face);
+            if !embedding_permission.allows_outline_embedding() {
+                continue;
+            }
             let family = hint
                 .map(str::to_string)
                 .or_else(|| face_name(&face, ttf_parser::name_id::TYPOGRAPHIC_FAMILY))
@@ -197,8 +289,12 @@ impl FontDb {
                 subfamily: face_name(&face, ttf_parser::name_id::SUBFAMILY)
                     .unwrap_or_else(|| "Regular".to_string()),
                 weight: face.weight().to_number(),
+                stretch: face.width().to_number(),
                 italic: face.is_italic() || face.is_oblique(),
                 embedded,
+                sha256: sha256.clone(),
+                hash_pinned: false,
+                embedding_permission,
                 data: data.clone(),
                 index,
             });
@@ -231,6 +327,11 @@ impl FontDb {
             }
         }
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn style_name(bold: bool, italic: bool) -> &'static str {
@@ -289,5 +390,30 @@ mod tests {
                 "missing bundled family {family}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_font_directory_remains_authorized_when_system_scan_is_disabled() {
+        let db = FontDb::with_sources(&[PathBuf::from("../pdf-core/wasm/pkg/fonts")], false);
+        assert!(
+            db.faces().iter().any(|face| {
+                face.parsed()
+                    .and_then(|parsed| parsed.glyph_index('\u{0634}'))
+                    .is_some()
+            }),
+            "explicit directory did not load Arabic coverage: {:?}",
+            db.faces()
+                .iter()
+                .map(|face| &face.family_name)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            db.faces().iter().any(|face| {
+                face.parsed()
+                    .and_then(|parsed| parsed.glyph_index('\u{65E5}'))
+                    .is_some()
+            }),
+            "explicit directory did not load CJK coverage"
+        );
     }
 }

@@ -48,6 +48,40 @@ pub fn subset_for_pdf(
     gids.sort_unstable();
     gids.dedup();
 
+    if !face.embedding_permission.allows_outline_embedding() {
+        return Err(OfficeError::unsupported(
+            crate::UnsupportedCode::FontLicenseRestricted,
+            format!(
+                "font {} has embedding policy {:?}",
+                face.family_name, face.embedding_permission
+            ),
+        ));
+    }
+    if !face.embedding_permission.allows_subsetting() {
+        const MAX_WHOLE_FONT_BYTES: usize = 20 * 1024 * 1024;
+        if face.data.len() > MAX_WHOLE_FONT_BYTES || face.data.starts_with(b"ttcf") {
+            return Err(OfficeError::unsupported(
+                crate::UnsupportedCode::FontLicenseRestricted,
+                format!(
+                    "font {} forbids subsetting and cannot be embedded whole within policy",
+                    face.family_name
+                ),
+            ));
+        }
+        let remap: BTreeMap<u16, u16> = gids.iter().map(|&glyph| (glyph, glyph)).collect();
+        return Ok(build(
+            face.data.as_ref().clone(),
+            remap,
+            &metrics,
+            used_chars,
+            is_cff,
+            Some(Warning::new(
+                "font_embedded_whole",
+                face.family_name.clone(),
+            )),
+        ));
+    }
+
     let mapper = subsetter::GlyphRemapper::new_from_glyphs(&gids);
     match subsetter::subset(&face.data, face.index, &mapper) {
         Ok(data) => {
@@ -124,5 +158,31 @@ mod tests {
         assert!(!subset.data.is_empty());
         assert!(subset.remap.contains_key(&0), ".notdef retained");
         assert!(subset.widths.iter().all(|&(_, w)| w <= 3000));
+    }
+
+    #[test]
+    fn no_subsetting_policy_embeds_the_complete_sfnt() {
+        let db = FontDb::with_bundled();
+        let Some(source) = db.faces().first() else {
+            return;
+        };
+        let mut face = source.clone();
+        face.embedding_permission =
+            crate::fonts::registration::EmbeddingPermission::InstallableNoSubsetting;
+        let metrics = FaceMetrics::new(face.parsed().unwrap());
+        let glyph = metrics.glyph_id('A').expect("A glyph");
+        let subset = subset_for_pdf(
+            &face,
+            &BTreeSet::from([glyph]),
+            &BTreeMap::from([(glyph, 'A')]),
+        )
+        .expect("whole-font embedding");
+
+        assert_eq!(subset.data.len(), face.data.len());
+        assert_eq!(subset.remap.get(&glyph.0), Some(&glyph.0));
+        assert_eq!(
+            subset.warning.as_ref().map(|warning| warning.code),
+            Some("font_embedded_whole")
+        );
     }
 }

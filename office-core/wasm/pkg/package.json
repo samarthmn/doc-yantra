@@ -7,6 +7,10 @@
     "office_core_wasm.js",
     "office_core_wasm.d.ts",
     "web",
+    "index.cjs",
+    "index.d.ts",
+    "font-provider.cjs",
+    "font-provider.d.ts",
     "worker.js",
     "worker.d.ts",
     "worker-client.cjs",
@@ -14,8 +18,8 @@
     "worker-ops.cjs",
     "build-fingerprint.json"
   ],
-  "main": "office_core_wasm.js",
-  "types": "office_core_wasm.d.ts",
+  "main": "index.cjs",
+  "types": "index.d.ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/samarthmn/doc-yantra.git"
@@ -26,14 +30,18 @@
   },
   "exports": {
     ".": {
-      "types": "./office_core_wasm.d.ts",
-      "require": "./office_core_wasm.js",
-      "default": "./office_core_wasm.js"
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
     },
     "./web": {
-      "types": "./web/office_core_wasm.d.ts",
-      "import": "./web/office_core_wasm.js",
-      "default": "./web/office_core_wasm.js"
+      "types": "./web/web-index.d.ts",
+      "import": "./web/web-index.js",
+      "default": "./web/web-index.js"
+    },
+    "./web/font-provider": {
+      "types": "./web/font-provider.d.ts",
+      "import": "./web/font-provider.js"
     },
     "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
     "./worker": {

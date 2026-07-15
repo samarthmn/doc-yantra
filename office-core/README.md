@@ -84,15 +84,25 @@ officecore profile report.docx | jq .            # DocProfile JSON
 
 ```js
 const engine = require("@samarthmn/doc-yantra-office");
-const json = engine.office_profile(bytes, "docx");     // never throws for valid input
-const pdf  = engine.office_to_pdf(bytes, "docx");       // throws "unsupported:<code>: …" off-envelope
-engine.register_font(brandFontTtf);                     // optional brand fonts
+const result = await engine.convertOnDemand(bytes, "docx", {
+  provider,                                      // trusted, batched FontProvider
+  mode: "compatible",                          // or "strict"
+  persistentCache: new engine.NodeFontCache(cacheDirectory),
+});
+const pdf = result.pdf;
+
+// Advanced staged flow:
+engine.office_font_requests(bytes, "docx");     // metadata only; never text
+engine.office_register_font(fontBytes, expectationJson);
+engine.office_profile(bytes, "docx");
+engine.office_to_pdf(bytes, "docx");
 ```
 
 The server worker also accepts `extraFontDirs: string[]`. At boot it registers
 every `.ttf`, `.ttc`, `.otf`, and `.otc` file found there in deterministic path
-order, after the bundled faces. DocKosha can point this at the PDF package's
-`fonts/` directory so CJK and emoji assets are shipped once for both engines.
+order. This is an explicit host-authorized asset path; the production wasm
+package itself contains no fonts. `convertOnDemand` and `profileOnDemand`
+resolve missing faces through the configured provider and caches.
 
 The `unsupported:` message prefix and the 50 MiB pre-copy input guard are a
 stable API (DocKosha parses them). Trap contract is identical to `pdf-core`:
@@ -128,7 +138,7 @@ within 0.3 pt of Word. The executable core gate is 0.90, and the rebuilt
 six-page fixture passes with a minimum SSIM of 0.9374006584. PDF.js extracts zero NUL or
 U+FFFE characters and finds the expected headings and body phrases. The final
 package source fingerprint is
-`5a3bae6d1117c39ac24fe55c13b961bffbc4e19156f0208437e18ca412175ade`.
+`b618638e6fea70ecfa6934a2d22af4e4a64c178df5e53dc2f02dce665a795807`.
 Focused native PDFium and package-level PDF.js regressions preserve logical
 source order, line ownership, and selection geometry for decomposed Latin,
 Arabic and Hebrew mark stacks, and wrapped right-to-left text.
@@ -144,11 +154,13 @@ outlines and antialiasing therefore still differ.
   emission order, `/ID` = first 16 bytes of `SHA-256(input ‖ version)`,
   CreationDate/ModDate from `docProps/core.xml` (else a fixed literal), streams
   FlateDecode-compressed.
-- **Fonts.** Bundled metric-compatible OFL fonts (Carlito↔Calibri,
-  Caladea↔Cambria, Liberation↔Arial/Times/Courier), OS/2 Windows metrics for
-  line-height parity, subset Type0/CIDFontType2 embedding with ToUnicode.
+- **Fonts.** Native default builds bundle metric-compatible OFL fonts for
+  hermetic fidelity. Production wasm is fontless and accepts validated
+  provider/host-supplied SFNT faces; output uses subset Type0/CIDFontType2
+  embedding with ToUnicode (or policy-bounded whole-font embedding when
+  `fsType` forbids subsetting).
 - **wasm-first.** The engine compiles to `wasm32-unknown-unknown` from day one;
-  CI enforces it. `--no-default-features --features wasm,bundled-fonts`.
+  CI enforces it. Production: `--no-default-features --features wasm`.
 
 ## Deferred (record, don't build)
 
@@ -160,5 +172,3 @@ outlines and antialiasing therefore still differ.
 - **PDF/A-2b** output — for archival requirements.
 - **Complex-script shaping** via `harfrust` — Arabic/Indic/Thai + bidi reorder.
 - **Charts** — own vector renderer rather than routing to the service.
-- **Slim web builds** — an in-browser font-fetch strategy instead of bundling all
-  20 faces.

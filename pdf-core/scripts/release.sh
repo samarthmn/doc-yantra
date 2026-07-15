@@ -112,6 +112,8 @@ echo "  running fidelity harness unit tests ..."
 echo "  running blocking DOCX fidelity corpus ..."
 ( cd ../office-core && cargo run --quiet -p fidelity -- run --format docx )
 echo "  running package tests against the rebuilt pkg ..."
+# The Office suite configures its deterministic local mock provider; release
+# verification must never depend on a public font CDN.
 ( cd "$REPO_ROOT" && node --test tests/all.test.mjs )
 
 # ─── 3. Commit, tag, push ──────────────────────────────────────────────────

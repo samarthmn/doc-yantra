@@ -61,10 +61,13 @@ impl WordDoc {
         let settings = optional(&pkg, "word/settings.xml", Settings::parse)?.unwrap_or_default();
         let theme = optional(&pkg, "word/theme/theme1.xml", Theme::parse)?.unwrap_or_default();
 
-        let mut fonts = FontDb::with_system(&opts.font_dirs);
+        let mut fonts = FontDb::with_sources(&opts.font_dirs, opts.include_system_fonts);
+        fonts.set_resolution_mode(opts.resolution_mode);
         for fb in &opts.font_bytes {
             fonts.register(fb.clone())?;
         }
+        crate::register_runtime_fonts(&mut fonts)?;
+        fonts.mark_hash_pinned(&opts.font_hash_pins);
         register_embedded_fonts(&pkg, &mut fonts);
 
         // Collect the rels for the main part and every header/footer part.
@@ -308,7 +311,7 @@ fn rel_map(pkg: &Package, source_part: &str) -> HashMap<String, String> {
 }
 
 /// Parses `word/fontTable.xml` and registers each embedded (ODTTF) font.
-fn register_embedded_fonts(pkg: &Package, fonts: &mut FontDb) {
+pub(crate) fn register_embedded_fonts(pkg: &Package, fonts: &mut FontDb) {
     let Some(bytes) = pkg.part("word/fontTable.xml") else {
         return;
     };

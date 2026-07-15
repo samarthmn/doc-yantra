@@ -229,10 +229,13 @@ impl PptxDoc {
             .unwrap_or_default();
 
         // PPTX embedded fonts are rare; bundled + system cover the envelope.
-        let mut fonts = FontDb::with_system(&opts.font_dirs);
+        let mut fonts = FontDb::with_sources(&opts.font_dirs, opts.include_system_fonts);
+        fonts.set_resolution_mode(opts.resolution_mode);
         for fb in &opts.font_bytes {
             fonts.register(fb.clone())?;
         }
+        crate::register_runtime_fonts(&mut fonts)?;
+        fonts.mark_hash_pinned(&opts.font_hash_pins);
 
         let (mut images, image_by_part, image_errors_by_part, mut total_image_pixels) =
             decode_images(&pkg);
