@@ -66,11 +66,10 @@ When DocKosha telemetry surfaces new real-world failures: reproduce with either 
 
 Phase 6 is **on-demand fonts via Fontsource** (owner direction, final revision 2026-07-15): the published package ships zero font binaries; the worker keeps one local fallback family; everything else is fetched on demand. See `agent-tasks-6b-on-demand-ubuntu.md`.
 
-1. **One-time Ubuntu lineage check:** fetch `api.fontsource.org/v1/fonts/ubuntu/latin-400-normal.ttf` (and the `ubuntu-mono` equivalent), read the internal version strings (`otfinfo -v`, `ttx -t name`, or the engine's registration report), and confirm the **classic 0.83 / 0.80 lineage** — NOT the 2023 "Ubuntu Sans" redesign (which lives under a separate family name). Record the verified Fontsource package versions as the two pins in the provider config.
-2. If the lineage check fails (Fontsource's copy differs materially from the ground truth's embedded 0.83), point the two pins at the jsDelivr gh/google-fonts fallback source at a pinned commit instead, and note the commit.
-3. **Fallback family:** obtain the four **Noto Sans** static TTFs (Regular/Bold/Italic/Bold Italic, SIL OFL 1.1) and stage them as worker deployment assets (DocKosha-side). **Not** committed to this repository or any npm package — the fontless-artifact gate enforces purity.
-4. Settle the open CI provisioning choice (6B §F5): mock-provider local fixture fonts vs seeded cache.
-5. Expected outcome: provider config carries the two verified pins; the worker boots with Noto Sans registered; the phase-6 gate run (`run --case gdocs-anchors-toc`) can begin.
+1. **Ubuntu lineage check — ✅ DONE 2026-07-15 (agent-run, no human action needed).** Downloaded Fontsource `ubuntu@v21` and `ubuntu-mono@v19` TTFs (bytes served by jsDelivr; metadata by api.fontsource.org) and parsed their `name` tables: **Ubuntu Regular/Bold = version `0.83`**, **Ubuntu Mono = `Version 0.80`** — exact match to the ground-truth embeds. Non-variable weights [300,400,500,700] confirm the classic family; the redesign is the separate id `ubuntu-sans`. **Pins recorded: `ubuntu@v21`, `ubuntu-mono@v19`.** No fallback-source substitution needed.
+2. **Fallback family (human/deployment):** obtain the four **Noto Sans** static TTFs (Regular/Bold/Italic/Bold Italic, SIL OFL 1.1) and stage them as worker deployment assets (DocKosha-side). **Not** committed to this repository or any npm package — the fontless-artifact gate enforces purity.
+3. **CI provisioning choice (6B §F5):** mock-provider local fixture fonts vs seeded cache — settle at implementation.
+4. Expected outcome: provider config carries the two verified pins; the worker boots with Noto Sans registered; the phase-6 gate run (`run --case gdocs-anchors-toc`) can begin.
 
 ## H7. Diagnostic ground truths for the table probe (WITH agent phase 7; ~20 min)
 
