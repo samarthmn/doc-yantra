@@ -7,8 +7,9 @@ Status: stopped at the owner's request; worktree changes are preserved and uncom
 
 > **Continuation (2026-07-15):** the owner decisions recorded here are resolved and
 > the next round of work is specified in
-> [`../agent-tasks-6-metric-overlay.md`](../agent-tasks-6-metric-overlay.md)
-> (metric-compatibility overlays → `gdocs-anchors-toc`) and
+> [`../agent-tasks-6-on-demand-fonts.md`](../agent-tasks-6-on-demand-fonts.md)
+> (on-demand exact-font acquisition, fontless package → `gdocs-anchors-toc`;
+> supersedes the same-day metric-overlay design) and
 > [`../agent-tasks-7-table-geometry.md`](../agent-tasks-7-table-geometry.md)
 > (vector geometry probe + table edge conventions → `gdocs-tables-longdoc`).
 > See the Resolutions section of

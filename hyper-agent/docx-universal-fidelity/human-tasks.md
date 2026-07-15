@@ -62,14 +62,14 @@ Consequences (already reflected in the agent tasks — no further human action):
 
 When DocKosha telemetry surfaces new real-world failures: reproduce with either a synthetic equivalent (never customer text) or a verified public sample, add a `fidelity-corpus/docx/<case>/`, export ground truth per H2's provenance rules, and hand the failing case to a coding agent. Candidates already known from this analysis: a scientific-notation/superscript-heavy case (locks task 4.5's behavior), and a Google-Docs export carrying `⮚`/`♦` deep-level bullets (locks task 4.4).
 
-## H6. Ubuntu metrics extraction (WITH agent phase 6; ~15 min)
+## H6. Provision the font-broker catalog entries (WITH agent phase 6; ~30 min)
 
-Phase 6 replaces the earlier "vendor Ubuntu TTFs?" question with **metric-compatibility overlays** (owner decision, 2026-07-15): only compact advance/metric *data* is committed, not font binaries. TTF vendoring stays pre-approved as the contingency (agent-tasks-6 T6.7).
+Phase 6 is now **on-demand exact-font acquisition** (owner direction, 2026-07-15, superseding the same-day metric-overlay decision): the published package ships **zero font binaries**; fonts are resolved at runtime through a host-configured provider against a versioned, hash-pinned catalog. See `agent-tasks-6-on-demand-fonts.md` §N.
 
-1. Download Canonical's official archives (agents must not fetch binaries): **Ubuntu Font Family 0.83** and **Ubuntu Mono 0.80** — https://design.ubuntu.com/font (licence: https://canonical.com/legal/font-licence). These legacy versions match the ground-truth PDF embeds; do NOT use the current redesigned Ubuntu release.
-2. Run the generator the agent builds in T6.1: `cargo run --bin extract_metrics -- <path>/Ubuntu-R.ttf <path>/Ubuntu-B.ttf <path>/Ubuntu-RI.ttf <path>/Ubuntu-BI.ttf <path>/UbuntuMono-R.ttf <path>/UbuntuMono-B.ttf <path>/UbuntuMono-RI.ttf <path>/UbuntuMono-BI.ttf`.
-3. Commit the generated `office-core/src/fonts/metrics_db/ubuntu*.rs` modules (headers carry each source file's SHA-256, version, and UFL-1.0 notice). Expected size: ~15 KB total.
-4. Expected outcome: `officecore convert 1.docx` resolves Ubuntu with a `font_metrics_overlay` warning instead of `font_fallback`, and the phase-6 gate run can begin.
+1. Obtain Canonical's official legacy archives: **Ubuntu Font Family 0.83** and **Ubuntu Mono 0.80** — https://design.ubuntu.com/font (licence: https://canonical.com/legal/font-licence). These versions match the ground-truth PDF embeds; do NOT substitute the current redesigned Ubuntu release.
+2. Provision broker/catalog entries for Ubuntu 0.83 Regular, Bold, Italic, Bold Italic and the Ubuntu Mono 0.80 styles the fixture's preflight demands. Record per artifact: source, license (UFL-1.0), internal family and PostScript names, version string, SHA-256, face index, OS/2 fsType embedding permissions, CORS behavior of the serving endpoint, and the broker catalog identifier.
+3. **Do NOT commit these font binaries to the repository or the npm package.** Development and CI retrieve them through the configured broker or a local untracked cache; the phase-6 fontless-artifact gate enforces package purity.
+4. Expected outcome: the mock/broker provider resolves all requested Ubuntu faces as `hash_pinned_exact`, and the phase-6 gate run (`run --case gdocs-anchors-toc`) can begin.
 
 ## H7. Diagnostic ground truths for the table probe (WITH agent phase 7; ~20 min)
 
