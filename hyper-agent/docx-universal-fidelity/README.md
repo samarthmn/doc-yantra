@@ -42,6 +42,8 @@ Five agent phases plus human tasks. Phase 1 alone brings **all three files insid
 | 3 | `agent-tasks-3-columns-and-sections.md` | correct section-transition semantics; per-page column blocks with balancing | 1 (parallel with 2) |
 | 4 | `agent-tasks-4-fidelity-and-robustness.md` | footnote numbering; internal link destinations; bullet/superscript glyph strategy; small fixes | 1–3 |
 | 5 | `agent-tasks-5-corpus-and-gates.md` | three frozen corpus cases + manifests; provenance matcher for online-service exports; package-level tests; docs | 1–4, H1–H2 |
+| 6 | `agent-tasks-6-metric-overlay.md` | metric-compatibility overlays (requested-font advances + vertical metrics over substitute outlines); Ubuntu 0.83 DB entries; `/W` per overlay instance — unblocks `gdocs-anchors-toc` | 1–5 executed (see `implementation-handoff-2026-07-15/`), H6 |
+| 7 | `agent-tasks-7-table-geometry.md` | vector geometry probe (content-stream diff vs Word GT); fragment-aware outer border edges; vertical-seam shared-edge painter — unblocks `gdocs-tables-longdoc` | 1–5 executed, H7 (parallel with 6) |
 
 **Execution order:** H1 (fixtures) + H2 (provenance) can happen any time before phase 5 → agent phase 1 → agent phases 2 ∥ 3 → H3 review gate (fidelity run on gdocs cases, expect layout-level convergence) → agent phase 4 → agent phase 5 → H3 final review gate → H4 release + DocKosha pin bump. Log every layout-constant adjustment in `office-core/LAYOUT_CALIBRATION.md` per its invariant.
 

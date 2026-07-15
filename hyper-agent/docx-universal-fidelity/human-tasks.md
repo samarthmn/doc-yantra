@@ -62,6 +62,22 @@ Consequences (already reflected in the agent tasks — no further human action):
 
 When DocKosha telemetry surfaces new real-world failures: reproduce with either a synthetic equivalent (never customer text) or a verified public sample, add a `fidelity-corpus/docx/<case>/`, export ground truth per H2's provenance rules, and hand the failing case to a coding agent. Candidates already known from this analysis: a scientific-notation/superscript-heavy case (locks task 4.5's behavior), and a Google-Docs export carrying `⮚`/`♦` deep-level bullets (locks task 4.4).
 
+## H6. Ubuntu metrics extraction (WITH agent phase 6; ~15 min)
+
+Phase 6 replaces the earlier "vendor Ubuntu TTFs?" question with **metric-compatibility overlays** (owner decision, 2026-07-15): only compact advance/metric *data* is committed, not font binaries. TTF vendoring stays pre-approved as the contingency (agent-tasks-6 T6.7).
+
+1. Download Canonical's official archives (agents must not fetch binaries): **Ubuntu Font Family 0.83** and **Ubuntu Mono 0.80** — https://design.ubuntu.com/font (licence: https://canonical.com/legal/font-licence). These legacy versions match the ground-truth PDF embeds; do NOT use the current redesigned Ubuntu release.
+2. Run the generator the agent builds in T6.1: `cargo run --bin extract_metrics -- <path>/Ubuntu-R.ttf <path>/Ubuntu-B.ttf <path>/Ubuntu-RI.ttf <path>/Ubuntu-BI.ttf <path>/UbuntuMono-R.ttf <path>/UbuntuMono-B.ttf <path>/UbuntuMono-RI.ttf <path>/UbuntuMono-BI.ttf`.
+3. Commit the generated `office-core/src/fonts/metrics_db/ubuntu*.rs` modules (headers carry each source file's SHA-256, version, and UFL-1.0 notice). Expected size: ~15 KB total.
+4. Expected outcome: `officecore convert 1.docx` resolves Ubuntu with a `font_metrics_overlay` warning instead of `font_fallback`, and the phase-6 gate run can begin.
+
+## H7. Diagnostic ground truths for the table probe (WITH agent phase 7; ~20 min)
+
+1. The agent (T7.3) authors six single-variable diagnostic DOCX fixtures and hands them to you.
+2. Export each to PDF via word.cloud.microsoft — the same flow used for H2.
+3. Place them at `office-core/fidelity/diag/<name>/ground-truth.pdf`. These are probe diagnostics only — **not** under `fidelity-corpus/` (everything there gates releases), no manifests, no SSIM thresholds.
+4. Expected outcome: `cargo run -p fidelity -- probe --diag <name>` reports paired geometry deltas for each fixture.
+
 ## No other human work
 
 No infrastructure, env vars, or third-party dashboards are involved in this repo. Toolchain prerequisites are unchanged from the office-engine plan (Rust ≥ 1.89 with `wasm32-unknown-unknown`, wasm-pack, one-time `pdf-core/scripts/fetch-pdfium.sh` for the harness).

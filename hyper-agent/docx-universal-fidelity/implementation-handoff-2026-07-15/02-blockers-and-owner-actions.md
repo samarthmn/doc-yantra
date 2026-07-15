@@ -1,5 +1,7 @@
 # Blockers and owner actions
 
+> **Resolution status (2026-07-15, owner + planner):** every decision below is now resolved — see the "Resolutions" section at the end of this file. Continuation work is specified in [`../agent-tasks-6-metric-overlay.md`](../agent-tasks-6-metric-overlay.md) and [`../agent-tasks-7-table-geometry.md`](../agent-tasks-7-table-geometry.md).
+
 ## 1. Frozen fidelity gates
 
 The release gate requires 0.90 SSIM and exact page counts. Page counts pass;
@@ -132,3 +134,12 @@ unimplemented visible constructs. To drive failures down:
 - add profile/convert parity and geometry tests before widening support;
 - add a frozen Word ground truth only after provenance and content review;
 - never replace an explicit unsupported error with silent content loss.
+
+---
+
+## Resolutions (2026-07-15, owner + planner — planning thread cmrki1y8p0ixg06adbyatevrz)
+
+1. **Ubuntu font policy (§2) — RESOLVED, superseded by metric-compatibility overlays.** The owner chose NOT to vendor the TTF binaries. Instead the engine gains overlay entries carrying Ubuntu 0.83 / Ubuntu Mono 0.80 **advance widths and vertical metrics as compiled-in data** (~15 KB), applied over bundled substitute outlines — see `../agent-tasks-6-metric-overlay.md` (design rationale: with `liga` always off and `w:kern` absent from these exports, Word's wrap points are a pure function of advances). Human task H6 covers the one-time metrics extraction from Canonical's archives; **TTF vendoring per §2 steps 1–5 remains pre-approved as the contingency** if any anchors-toc page stays below 0.90 after the overlay (agent-tasks-6 T6.7).
+2. **Microsoft font policy (§3) — AFFIRMED as written.** Carlito stays; no Calibri extraction; the longdoc gate is pursued as geometry, not typography. The overlay mechanism from resolution 1 additionally becomes the future lever for proprietary-family *wrap parity* (metrics-as-data), should the product ever need it.
+3. **Longdoc displacement (§1) — continuation specified.** `../agent-tasks-7-table-geometry.md` adds a vector geometry probe (content-stream diff against the Word ground truth), a synthetic single-variable bisect matrix (human task H7), code-grounded hypotheses (fragment-edge half-stroke reservation, x-axis outer-border reservation, `tblInd` reference edge), the confirmed-convention fixes, and the vertical-seam completion of the shared-edge border painter. Global offsets remain forbidden, per this file's own measurements.
+4. **Sequencing:** the stopped 21-file worktree patch is reviewed, verified, and committed **before** phase 6/7 work starts (step 0 in both task files).

@@ -5,6 +5,16 @@ Branch: `hyper-agent/docx-universal-fidelity`
 Current commit: `69525d0`  
 Status: stopped at the owner's request; worktree changes are preserved and uncommitted
 
+> **Continuation (2026-07-15):** the owner decisions recorded here are resolved and
+> the next round of work is specified in
+> [`../agent-tasks-6-metric-overlay.md`](../agent-tasks-6-metric-overlay.md)
+> (metric-compatibility overlays → `gdocs-anchors-toc`) and
+> [`../agent-tasks-7-table-geometry.md`](../agent-tasks-7-table-geometry.md)
+> (vector geometry probe + table edge conventions → `gdocs-tables-longdoc`).
+> See the Resolutions section of
+> [02-blockers-and-owner-actions.md](./02-blockers-and-owner-actions.md).
+> Step 0 everywhere: review, verify, and commit the stopped worktree patch first.
+
 This folder records the state of the `docx-universal-fidelity` implementation,
 the two remaining frozen fidelity failures, the unverified remediation in the
 worktree, and the decisions needed to continue. It is the permanent handoff;
