@@ -27,11 +27,12 @@ use crate::oxml::wml::{
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
 use crate::{OfficeError, Result, UnsupportedCode};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 const MIN_TEXT_WINDOW_PT: f64 = 36.0;
 const PAGE_FLOAT_REFLOW_LIMIT: usize = 3;
 const FOOTNOTE_REFLOW_LIMIT: usize = 4;
+const NOTE_SEPARATOR_GAP_PT: f64 = 8.0;
 
 /// A single flow unit (one paragraph line or one table row).
 struct Unit {
@@ -439,7 +440,14 @@ pub(crate) fn layout_docx_with_internal_links(
     let run_layouts = pass.runs;
     let mut pages = pass.pages;
     align_body_vertically(&section_runs, &run_layouts, &units, &mut pages);
-    place_footnotes(doc, &mut warnings, &run_layouts, &note_sequence, &mut pages)?;
+    place_footnotes(
+        doc,
+        &mut warnings,
+        &units,
+        &run_layouts,
+        &note_sequence,
+        &mut pages,
+    )?;
 
     let mut endnote_refs = Vec::new();
     for unit in &units {
@@ -705,7 +713,14 @@ fn run_document_pass(
             column_offsets,
         });
     }
-    let pages = paginate_with_footnote_reservations(&units, section_runs, &runs, &table_headers)?;
+    let pages = paginate_with_footnote_reservations(
+        doc,
+        &units,
+        section_runs,
+        &runs,
+        &table_headers,
+        note_sequence,
+    )?;
     for page in &pages {
         validate_page_bands(
             std::slice::from_ref(page),
@@ -1453,7 +1468,7 @@ fn paginate(
     section_runs: &[SectionRun<'_>],
     run_layouts: &[RunLayout],
     table_headers: &HashMap<usize, Vec<Unit>>,
-    reserved_footnote_pages: &BTreeSet<usize>,
+    footnote_reservations: &BTreeMap<usize, f64>,
 ) -> Vec<WorkPage> {
     let first_geo = &run_layouts[0].geo;
     let mut pages: Vec<WorkPage> = Vec::new();
@@ -1483,8 +1498,13 @@ fn paginate(
             effective_gap_before(unit, band_top, geo.content_top_pt)
         });
         let mut band_extent = y;
-        let mut full_bottom =
-            body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
+        let mut full_bottom = body_content_bottom(
+            geo,
+            footnote_reservations
+                .get(&pages.len())
+                .copied()
+                .unwrap_or(0.0),
+        );
         let should_balance = run_layout.column_widths.len() > 1
             && (run_index + 1 == section_runs.len()
                 || section_runs[run_index + 1].sect.sect_type == SectType::Continuous);
@@ -1535,8 +1555,13 @@ fn paginate(
                 };
                 band_extent = y;
                 column = 0;
-                full_bottom =
-                    body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
+                full_bottom = body_content_bottom(
+                    geo,
+                    footnote_reservations
+                        .get(&pages.len())
+                        .copied()
+                        .unwrap_or(0.0),
+                );
                 content_bottom = column_band_bottom(
                     units,
                     first_unit_index,
@@ -1566,8 +1591,13 @@ fn paginate(
                     );
                     band_extent = y;
                     column = 0;
-                    full_bottom =
-                        body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
+                    full_bottom = body_content_bottom(
+                        geo,
+                        footnote_reservations
+                            .get(&pages.len())
+                            .copied()
+                            .unwrap_or(0.0),
+                    );
                     content_bottom = column_band_bottom(
                         units,
                         first_unit_index,
@@ -1636,34 +1666,37 @@ fn paginate(
 }
 
 fn paginate_with_footnote_reservations(
+    doc: &WordDoc,
     units: &[Unit],
     section_runs: &[SectionRun<'_>],
     run_layouts: &[RunLayout],
     table_headers: &HashMap<usize, Vec<Unit>>,
+    note_sequence: Option<&NoteSequence>,
 ) -> Result<Vec<WorkPage>> {
-    let mut reserved_pages = BTreeSet::new();
+    let mut reservations = BTreeMap::new();
+    let Some(note_sequence) = note_sequence else {
+        return Ok(paginate(
+            units,
+            section_runs,
+            run_layouts,
+            table_headers,
+            &reservations,
+        ));
+    };
     for _ in 0..FOOTNOTE_REFLOW_LIMIT {
         let pages = paginate(
             units,
             section_runs,
             run_layouts,
             table_headers,
-            &reserved_pages,
+            &reservations,
         );
-        let discovered_pages = pages
-            .iter()
-            .enumerate()
-            .filter_map(|(page_index, page)| {
-                page.note_refs
-                    .iter()
-                    .any(|(kind, _)| *kind == NoteKind::Footnote)
-                    .then_some(page_index)
-            })
-            .collect::<BTreeSet<_>>();
-        if discovered_pages == reserved_pages {
+        let measured =
+            measure_footnote_reservations(doc, units, &pages, run_layouts, note_sequence)?;
+        if measured == reservations {
             return Ok(pages);
         }
-        reserved_pages = discovered_pages;
+        reservations = measured;
     }
     Err(OfficeError::unsupported(
         UnsupportedCode::Footnotes,
@@ -1671,12 +1704,8 @@ fn paginate_with_footnote_reservations(
     ))
 }
 
-fn body_content_bottom(geo: &PageGeometry, reserves_footnotes: bool) -> f64 {
-    if reserves_footnotes {
-        geo.content_bottom_pt - geo.content_height_pt() * 0.25
-    } else {
-        geo.content_bottom_pt
-    }
+fn body_content_bottom(geo: &PageGeometry, footnote_reservation_pt: f64) -> f64 {
+    geo.content_bottom_pt - footnote_reservation_pt
 }
 
 fn parity_blank_needed(next_page_number: usize, sect_type: SectType) -> bool {
@@ -2320,9 +2349,206 @@ fn note_marker(sequence: &NoteSequence, kind: NoteKind, id: i64) -> String {
     format_number(&NumFmt::Decimal, i64::from(value)).unwrap_or_else(|_| value.to_string())
 }
 
+fn blocks_with_inline_note_marker(
+    blocks: &[BlockContent],
+    sequence: &NoteSequence,
+    kind: NoteKind,
+    id: i64,
+) -> Result<Vec<BlockContent>> {
+    fn resolve_inlines(inlines: &mut [InlineContent], kind: NoteKind, marker: &str) -> bool {
+        let mut found = false;
+        for inline in inlines {
+            match inline {
+                InlineContent::Run(run) => {
+                    for content in &mut run.content {
+                        if matches!(content, RunContent::NoteMarker { kind: marker_kind } if *marker_kind == kind)
+                        {
+                            *content = RunContent::Text(marker.to_string());
+                            found = true;
+                        }
+                    }
+                }
+                InlineContent::Hyperlink { runs, .. } => {
+                    for run in runs {
+                        for content in &mut run.content {
+                            if matches!(content, RunContent::NoteMarker { kind: marker_kind } if *marker_kind == kind)
+                            {
+                                *content = RunContent::Text(marker.to_string());
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                InlineContent::SimpleField(field) | InlineContent::ComplexFieldRegion(field) => {
+                    found |= resolve_inlines(&mut field.content, kind, marker);
+                }
+                InlineContent::Bookmark(_) | InlineContent::Math(_) => {}
+            }
+        }
+        found
+    }
+
+    let marker = note_marker(sequence, kind, id);
+    let mut resolved = blocks.to_vec();
+    let mut found = false;
+    for block in &mut resolved {
+        if let BlockContent::Paragraph(paragraph) = block {
+            found |= resolve_inlines(&mut paragraph.runs, kind, &marker);
+        }
+    }
+    if !found {
+        let first_paragraph = resolved.iter_mut().find_map(|block| match block {
+            BlockContent::Paragraph(paragraph) => Some(paragraph),
+            BlockContent::Table(_) => None,
+        });
+        let Some(first_paragraph) = first_paragraph else {
+            return Err(OfficeError::unsupported(
+                match kind {
+                    NoteKind::Footnote => UnsupportedCode::Footnotes,
+                    NoteKind::Endnote => UnsupportedCode::Endnotes,
+                },
+                format!("note {id} has no paragraph for its inline marker"),
+            ));
+        };
+        first_paragraph.runs.insert(
+            0,
+            InlineContent::Run(Run {
+                props: RunProps {
+                    vert_align: Some(VertAlign::Super),
+                    ..RunProps::default()
+                },
+                content: vec![RunContent::Text(format!("{marker} "))],
+            }),
+        );
+    }
+    Ok(resolved)
+}
+
+fn build_footnote_units(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    geo: &PageGeometry,
+    refs: &[(NoteKind, i64)],
+    note_sequence: &NoteSequence,
+) -> Result<Vec<Unit>> {
+    let mut note_units = Vec::new();
+    let mut counters = ListCounters::default();
+    let mut table_headers = HashMap::new();
+    let mut build_state = UnitBuildState::default();
+    for &(kind, id) in refs {
+        let Some((blocks, rels)) = doc.note_content(kind, id) else {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::Footnotes,
+                format!("missing footnote {id}"),
+            ));
+        };
+        if blocks_contain_anchors(blocks) {
+            return Err(OfficeError::unsupported(
+                UnsupportedCode::AnchoredDrawing,
+                "anchored drawing in a footnote or endnote",
+            ));
+        }
+        let blocks_with_marker = blocks_with_inline_note_marker(blocks, note_sequence, kind, id)?;
+        note_units.extend(build_units(
+            doc,
+            warnings,
+            &blocks_with_marker,
+            rels,
+            geo.content_width_pt(),
+            &mut counters,
+            &mut table_headers,
+            PageHorizontalContext {
+                content_left_pt: geo.content_left_pt,
+                page_width_pt: geo.width_pt,
+            },
+            None,
+            None,
+            Some(note_sequence),
+            &mut build_state,
+        )?);
+    }
+    Ok(note_units)
+}
+
+fn note_block_reservation(units: &[Unit]) -> f64 {
+    let mut y = 0.0;
+    for unit in units {
+        y += effective_gap_before(unit, y, 0.0) + unit.height;
+    }
+    NOTE_SEPARATOR_GAP_PT + y
+}
+
+fn bounded_note_reservation(
+    note_units: &[Unit],
+    body_units: &[Unit],
+    page: &WorkPage,
+    geo: &PageGeometry,
+) -> Result<f64> {
+    let carrier_indices = page
+        .unit_ys
+        .iter()
+        .map(|(index, _)| *index)
+        .filter(|index| {
+            body_units[*index]
+                .note_refs
+                .iter()
+                .any(|(kind, _)| *kind == NoteKind::Footnote)
+        })
+        .collect::<Vec<_>>();
+    let runs = coalesce_runs(body_units, 0, body_units.len(), geo.content_height_pt());
+    let mut carrier_height = 0.0_f64;
+    for run in runs {
+        if !carrier_indices.iter().any(|index| run.contains(index)) {
+            continue;
+        }
+        let mut y = geo.content_top_pt;
+        for index in run {
+            let unit = &body_units[index];
+            y += effective_gap_before(unit, y, geo.content_top_pt) + unit.height;
+        }
+        carrier_height = carrier_height.max(y - geo.content_top_pt);
+    }
+    let maximum = (geo.content_height_pt() - carrier_height).max(0.0);
+    if maximum <= NOTE_SEPARATOR_GAP_PT + 0.01 {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::Footnotes,
+            "footnote reference carrier leaves no bounded space for note content",
+        ));
+    }
+    Ok(note_block_reservation(note_units).min(maximum))
+}
+
+fn measure_footnote_reservations(
+    doc: &WordDoc,
+    body_units: &[Unit],
+    pages: &[WorkPage],
+    run_layouts: &[RunLayout],
+    note_sequence: &NoteSequence,
+) -> Result<BTreeMap<usize, f64>> {
+    let mut reservations = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        let refs = page
+            .note_refs
+            .iter()
+            .copied()
+            .filter(|(kind, _)| *kind == NoteKind::Footnote)
+            .collect::<Vec<_>>();
+        if refs.is_empty() {
+            continue;
+        }
+        let geo = &run_layouts[page.governing_run].geo;
+        let note_units = build_footnote_units(doc, &mut warnings, geo, &refs, note_sequence)?;
+        let reservation = bounded_note_reservation(&note_units, body_units, page, geo)?;
+        reservations.insert(page_index, reservation);
+    }
+    Ok(reservations)
+}
+
 fn place_footnotes(
     doc: &WordDoc,
     warnings: &mut Vec<Warning>,
+    body_units: &[Unit],
     run_layouts: &[RunLayout],
     note_sequence: &NoteSequence,
     pages: &mut Vec<WorkPage>,
@@ -2341,69 +2567,22 @@ fn place_footnotes(
         }
         let governing_run = pages[page_index].governing_run;
         let geo = &run_layouts[governing_run].geo;
-
-        let mut note_units = Vec::new();
-        let mut counters = ListCounters::default();
-        let mut table_headers = HashMap::new();
-        let mut build_state = UnitBuildState::default();
-        for (kind, id) in refs {
-            let Some((blocks, rels)) = doc.note_content(kind, id) else {
-                return Err(OfficeError::unsupported(
-                    UnsupportedCode::Footnotes,
-                    format!("missing footnote {id}"),
-                ));
-            };
-            if blocks_contain_anchors(blocks) {
-                return Err(OfficeError::unsupported(
-                    UnsupportedCode::AnchoredDrawing,
-                    "anchored drawing in a footnote or endnote",
-                ));
-            }
-            let marker = Paragraph {
-                runs: vec![InlineContent::Run(Run {
-                    props: RunProps {
-                        vert_align: Some(VertAlign::Super),
-                        ..RunProps::default()
-                    },
-                    content: vec![RunContent::Text(format!(
-                        "{} ",
-                        note_marker(note_sequence, kind, id)
-                    ))],
-                })],
-                ..Paragraph::default()
-            };
-            let mut blocks_with_marker = vec![BlockContent::Paragraph(marker)];
-            blocks_with_marker.extend_from_slice(blocks);
-            note_units.extend(build_units(
-                doc,
-                warnings,
-                &blocks_with_marker,
-                rels,
-                geo.content_width_pt(),
-                &mut counters,
-                &mut table_headers,
-                PageHorizontalContext {
-                    content_left_pt: geo.content_left_pt,
-                    page_width_pt: geo.width_pt,
-                },
-                None,
-                None,
-                Some(note_sequence),
-                &mut build_state,
-            )?);
-        }
-
-        let note_top = geo.content_bottom_pt - geo.content_height_pt() * 0.25 + 8.0;
+        let note_units = build_footnote_units(doc, warnings, geo, &refs, note_sequence)?;
+        let reservation =
+            bounded_note_reservation(&note_units, body_units, &pages[page_index], geo)?;
+        let separator_y = geo.content_bottom_pt - reservation;
+        let note_top = separator_y + NOTE_SEPARATOR_GAP_PT;
         let mut target = page_index;
         let mut y = note_top;
-        add_note_separator(&mut pages[target], geo, false);
+        add_note_separator(&mut pages[target], geo, false, separator_y);
         for unit in &note_units {
             let needed = effective_gap_before(unit, y, note_top) + unit.height;
             if y + needed > geo.content_bottom_pt && y > note_top {
                 target += 1;
                 pages.insert(target, new_page(geo, governing_run));
-                y = note_top;
-                add_note_separator(&mut pages[target], geo, true);
+                let continuation_separator_y = geo.content_top_pt;
+                y = continuation_separator_y + NOTE_SEPARATOR_GAP_PT;
+                add_note_separator(&mut pages[target], geo, true, continuation_separator_y);
             }
             place_unit(&mut pages[target], &mut y, geo, 0.0, unit, usize::MAX);
         }
@@ -2412,8 +2591,7 @@ fn place_footnotes(
     Ok(())
 }
 
-fn add_note_separator(page: &mut WorkPage, geo: &PageGeometry, continuation: bool) {
-    let y = geo.content_bottom_pt - geo.content_height_pt() * 0.25;
+fn add_note_separator(page: &mut WorkPage, geo: &PageGeometry, continuation: bool, y: f64) {
     page.page.items.push(Positioned {
         x_pt: geo.content_left_pt,
         y_pt: y,
@@ -2456,21 +2634,7 @@ fn append_endnotes(
                 "anchored drawing in a footnote or endnote",
             ));
         }
-        let marker = Paragraph {
-            runs: vec![InlineContent::Run(Run {
-                props: RunProps {
-                    vert_align: Some(VertAlign::Super),
-                    ..RunProps::default()
-                },
-                content: vec![RunContent::Text(format!(
-                    "{} ",
-                    note_marker(note_sequence, kind, id)
-                ))],
-            })],
-            ..Paragraph::default()
-        };
-        let mut note_blocks = vec![BlockContent::Paragraph(marker)];
-        note_blocks.extend_from_slice(blocks);
+        let note_blocks = blocks_with_inline_note_marker(blocks, note_sequence, kind, id)?;
         units.extend(build_units(
             doc,
             warnings,
@@ -2557,7 +2721,7 @@ fn render_headers_footers(
                 ctx.clone(),
                 content_w,
                 geo,
-                geo.header_top_pt,
+                HfVerticalAnchor::Top(geo.header_top_pt),
                 wp,
             )?;
         }
@@ -2576,7 +2740,7 @@ fn render_headers_footers(
                 ctx,
                 content_w,
                 geo,
-                geo.footer_top_pt,
+                HfVerticalAnchor::Bottom(geo.footer_top_pt),
                 wp,
             )?;
         }
@@ -2661,6 +2825,12 @@ fn select_hf<'a>(
     }
 }
 
+#[derive(Clone, Copy)]
+enum HfVerticalAnchor {
+    Top(f64),
+    Bottom(f64),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn place_hf(
     doc: &WordDoc,
@@ -2669,7 +2839,7 @@ fn place_hf(
     ctx: FieldContext,
     content_w: f64,
     geo: &PageGeometry,
-    band_top: f64,
+    vertical_anchor: HfVerticalAnchor,
     wp: &mut WorkPage,
 ) -> Result<()> {
     let Some((blocks, rels)) = doc.header_content(rel_id) else {
@@ -2714,7 +2884,11 @@ fn place_hf(
             }
         }
     }
-    if band_top <= geo.content_top_pt {
+    let band_top = match vertical_anchor {
+        HfVerticalAnchor::Top(top) => top,
+        HfVerticalAnchor::Bottom(bottom) => bottom - block_y,
+    };
+    if matches!(vertical_anchor, HfVerticalAnchor::Top(_)) && band_top <= geo.content_top_pt {
         let overlap = (band_top + block_y - geo.content_top_pt).max(0.0);
         if overlap > 0.0 {
             for positioned in &mut wp.page.items {
@@ -2801,7 +2975,7 @@ mod tests {
     use crate::layout::paragraph::Line;
 
     #[test]
-    fn transitive_keep_next_chain_keeps_the_complete_following_paragraph() {
+    fn transitive_keep_next_chain_uses_bounded_terminal_fallback_groups() {
         let mut units = Vec::new();
         let mut group = 0;
         let mut next_group = || {
@@ -2870,10 +3044,28 @@ mod tests {
             2,
         );
 
+        let groups = units.iter().map(|unit| unit.group).collect::<Vec<_>>();
+        let fallback_groups = units
+            .iter()
+            .map(|unit| unit.fallback_group)
+            .collect::<Vec<_>>();
         assert!(
-            units.iter().all(|unit| unit.group == units[0].group),
-            "transitive keep-next must keep the complete terminal paragraph: {:?}",
-            units.iter().map(|unit| unit.group).collect::<Vec<_>>()
+            groups.iter().all(|group| *group == groups[0]),
+            "the primary group keeps a fitting terminal paragraph with the transitive chain: {groups:?}"
+        );
+        assert!(
+            fallback_groups[..4]
+                .iter()
+                .all(|group| *group == fallback_groups[0]),
+            "the oversized fallback keeps only the chain and terminal first widow pair: {fallback_groups:?}"
+        );
+        assert_ne!(
+            fallback_groups[4], fallback_groups[0],
+            "the oversized terminal remainder must stay normally splittable: {fallback_groups:?}"
+        );
+        assert_eq!(
+            fallback_groups[8], fallback_groups[9],
+            "the oversized terminal paragraph must retain its trailing widow pair: {fallback_groups:?}"
         );
     }
 

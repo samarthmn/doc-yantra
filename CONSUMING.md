@@ -131,8 +131,9 @@ The signatures of `office_profile`, `office_to_pdf`, and `register_font` are
 unchanged. The DOCX envelope now additionally covers bounded page/paragraph
 anchors, floating-table side wrap, sequential notes, internal destinations,
 and balanced continuous-column bands; supported profiles may add the warning
-codes `bullet_substituted`, `superscript_synthesized`, and
-`floating_table_block_fallback`.
+codes `bullet_substituted` and `floating_table_block_fallback`. Supported
+superscripts use bundled U+207x glyph coverage; uncovered glyphs fail closed as
+`missing_glyph` and are not synthesized.
 
 - `office_to_pdf` throws a `JsError` whose message begins with
   `"unsupported:<code>: "` for envelope misses (e.g. `unsupported:footnotes: …`),

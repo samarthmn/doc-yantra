@@ -1857,6 +1857,7 @@ impl<'a> Collector<'a> {
                         self.note_refs.push((*kind, *id));
                     }
                 }
+                RunContent::NoteMarker { .. } => {}
                 RunContent::Symbol { font, char_code } => {
                     if let Some(ch) = matching::map_symbol_char(font, *char_code) {
                         text.push(ch);

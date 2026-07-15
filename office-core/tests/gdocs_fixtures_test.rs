@@ -7,7 +7,6 @@ const DOCUMENTED_WARNING_CODES: &[&str] = &[
     "floating_table_block_fallback",
     "font_fallback",
     "font_substituted",
-    "superscript_synthesized",
 ];
 
 fn fixture(name: &str) -> Vec<u8> {

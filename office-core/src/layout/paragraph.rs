@@ -11,6 +11,7 @@ use super::{
 use crate::fonts::metrics::FaceMetrics;
 use crate::fonts::{FaceId, FontDb, matching};
 use crate::oxml::numbering::LabelJustification;
+use crate::oxml::numbering::LevelSuffix;
 use crate::oxml::wml::{
     AnchorOrigin, AnchorProps, BreakKind, Field, FrameAlign, InlineContent, Jc, LineSpacing,
     NoteKind, Paragraph, Run, RunColor, RunContent, RunProps, TabAlign, TabLeader, TabStop,
@@ -40,8 +41,8 @@ pub struct FieldContext {
 const DEFAULT_SIZE_PT: f64 = 11.0;
 /// Super/subscript size factor.
 const SCRIPT_SCALE: f64 = 0.65;
-/// Super/subscript baseline rise (fraction of size).
-const SCRIPT_RISE: f64 = 0.35;
+/// Super/subscript baseline rise when a face has no OS/2 script metrics.
+const SCRIPT_RISE_FALLBACK: f64 = 0.35;
 /// Security envelope for authored tab-leader gaps. This is an allocation cap,
 /// not a visual calibration constant: a ten-page horizontal gap is never a
 /// useful paragraph layout request.
@@ -341,6 +342,9 @@ struct RunStyle {
     rise_pt: f64,
     ascent_pt: f64,
     line_height_pt: f64,
+    line_box_size_pt: f64,
+    line_box_ascent_pt: f64,
+    line_box_height_pt: f64,
     link: Option<RunLink>,
 }
 
@@ -578,13 +582,34 @@ fn layout_paragraph_with_wrap_context(
         .right
         .as_ref()
         .filter(|border| !matches!(border.val.as_str(), "nil" | "none"));
-    let right_border_reserve = right_border
-        .map(|border| border.space_pt + border.size_pt)
-        .unwrap_or(0.0);
-    let right = right_indent + right_border_reserve;
+    let right = right_indent;
     let hanging = eff_para.indent.hanging_pt.or(label_hanging).unwrap_or(0.0);
     let first_line = eff_para.indent.first_line_pt.unwrap_or(0.0);
-    let first_offset = (first_line - hanging).max(-left);
+    let first_offset = if let Some(label) = label.as_ref() {
+        let label_width: f64 = label
+            .runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .map(|glyph| glyph.advance_pt)
+            .sum();
+        let area_left = (left - hanging).max(0.0);
+        let label_x = match label.justification {
+            LabelJustification::Start => area_left,
+            LabelJustification::Center => area_left + (hanging - label_width).max(0.0) / 2.0,
+            LabelJustification::End => (left - label_width).max(area_left),
+        };
+        let text_x = match label.suffix {
+            // Word's default numbering suffix tabs to the level's text
+            // position (`w:ind/@w:left`). The hanging area positions only the
+            // label and must not pull item text back over it.
+            LevelSuffix::Tab => left,
+            LevelSuffix::Nothing => label_x + label_width,
+            LevelSuffix::Space => label_x + label_width + label.suffix_space_advance_pt,
+        };
+        (text_x - left + first_line.max(0.0)).max(-left)
+    } else {
+        (first_line - hanging).max(-left)
+    };
 
     // A hanging indent moves the list label into the area before `left`; it
     // does not grant the first text line extra room at the right edge. Only a
@@ -617,7 +642,7 @@ fn layout_paragraph_with_wrap_context(
     let nominal_natural_height = atoms
         .iter()
         .filter_map(|atom| match atom {
-            Atom::Glyph { style, .. } => Some(style.line_height_pt),
+            Atom::Glyph { style, .. } => Some(style.line_box_height_pt),
             _ => None,
         })
         .chain(label.as_ref().map(|value| value.line_height_pt))
@@ -627,7 +652,7 @@ fn layout_paragraph_with_wrap_context(
     let nominal_baseline_offset = atoms
         .iter()
         .filter_map(|atom| match atom {
-            Atom::Glyph { style, .. } => Some(style.ascent_pt),
+            Atom::Glyph { style, .. } => Some(style.line_box_ascent_pt),
             _ => None,
         })
         .chain(label.as_ref().map(|value| value.ascent_pt))
@@ -774,7 +799,10 @@ fn layout_paragraph_with_wrap_context(
                 });
             }
             WrapMode::TopAndBottom => {
-                top_bottom_reserve = Some((anchor.y_pt + h_pt + anchor.distances_pt[1]).max(0.0));
+                top_bottom_reserve = Some((
+                    (anchor.y_pt - anchor.distances_pt[0]).max(0.0),
+                    (anchor.y_pt + h_pt + anchor.distances_pt[1]).max(0.0),
+                ));
             }
             WrapMode::None => {}
         }
@@ -830,13 +858,9 @@ fn layout_paragraph_with_wrap_context(
         default_tab,
         &tab_stops,
         |line_index, base_width| {
-            let base_x = left
-                + if line_index == 0 {
-                    first_offset.max(0.0)
-                } else {
-                    0.0
-                };
-            constrained_width(line_index, base_width, base_x).0
+            let base_x = left + if line_index == 0 { first_offset } else { 0.0 };
+            let (width, constrained_x, _) = constrained_width(line_index, base_width, base_x);
+            (width, constrained_x)
         },
     );
     let n = broken.len();
@@ -849,7 +873,7 @@ fn layout_paragraph_with_wrap_context(
         } else {
             content_rest
         };
-        let initial_x = left + if is_first { first_offset.max(0.0) } else { 0.0 };
+        let initial_x = left + if is_first { first_offset } else { 0.0 };
         let (content_w, base_x, clearance_pt) = constrained_width(i, base_content_w, initial_x);
         let this_label = if is_first { label.as_ref() } else { None };
         let mut line = place_line(
@@ -886,6 +910,14 @@ fn layout_paragraph_with_wrap_context(
         });
     }
 
+    // A paragraph-relative drawing is anchored to the paragraph, not the
+    // broken line that happened to contain its source run. Carry it on the
+    // first unit so its authored y offset is measured from the paragraph top.
+    let mut paragraph_anchors = Vec::new();
+    for line in &mut lines {
+        paragraph_anchors.append(&mut line.anchored_items);
+    }
+
     full_width_bands.sort_by(|left, right| {
         left.top_pt
             .partial_cmp(&right.top_pt)
@@ -915,17 +947,18 @@ fn layout_paragraph_with_wrap_context(
         }
     }
 
-    if let Some(reserve_bottom) = top_bottom_reserve {
-        let occupied: f64 = lines.iter().map(|line| line.height_pt).sum();
-        if reserve_bottom > occupied + 0.01
-            && let Some(last_line) = lines.last_mut()
-        {
-            last_line.height_pt += reserve_bottom - occupied;
-        }
+    if let Some((band_top, band_bottom)) = top_bottom_reserve {
+        apply_top_bottom_band(&mut lines, band_top, band_bottom);
+    }
+    if let Some(first_line) = lines.first_mut() {
+        first_line.anchored_items = paragraph_anchors;
     }
 
     if let Some(fill) = eff_para.shading.map(Rgba::opaque) {
-        let width = (avail_width_pt - left - right_indent).max(0.0);
+        let external_right = right_border
+            .map(|border| border.space_pt + border.size_pt)
+            .unwrap_or(0.0);
+        let width = (avail_width_pt - left - right_indent + external_right).max(0.0);
         for line in &mut lines {
             line.items.insert(
                 0,
@@ -975,7 +1008,7 @@ fn layout_paragraph_with_wrap_context(
     if let Some(border) = right_border {
         let paragraph_height: f64 = lines.iter().map(|line| line.height_pt).sum();
         let width_pt = border.size_pt;
-        let border_x = (avail_width_pt - right_indent - width_pt / 2.0).max(0.0);
+        let border_x = (avail_width_pt - right_indent + border.space_pt + width_pt / 2.0).max(0.0);
         if let Some(first_line) = lines.first_mut() {
             first_line.items.push(LineItem {
                 x_pt: border_x,
@@ -1102,6 +1135,49 @@ fn prepend_line_clearance(lines: &mut [Line], clearance_pt: f64) {
             item.y_pt += clearance_pt;
         }
         first.height_pt += clearance_pt;
+    }
+}
+
+/// Applies a paragraph-relative `wrapTopAndBottom` exclusion in paragraph
+/// coordinates. Lines wholly above the band retain their authored positions;
+/// the first intersecting line is cleared to the bottom. When every line is
+/// above the band, the paragraph still occupies through the bottom so the next
+/// block cannot overlap the drawing. Anchored items are deliberately not moved:
+/// their y coordinates remain relative to the authored paragraph origin.
+fn apply_top_bottom_band(lines: &mut [Line], top_pt: f64, bottom_pt: f64) {
+    if bottom_pt <= 0.01 || lines.is_empty() {
+        return;
+    }
+    let mut line_top = 0.0;
+    for index in 0..lines.len() {
+        let line_bottom = line_top + lines[index].height_pt;
+        if line_bottom <= top_pt + 0.01 {
+            line_top = line_bottom;
+            continue;
+        }
+
+        let clearance = (bottom_pt - line_top).max(0.0);
+        if clearance <= 0.01 {
+            return;
+        }
+        if index == 0 {
+            for item in &mut lines[0].items {
+                item.y_pt += clearance;
+            }
+            for link in &mut lines[0].internal_links {
+                link.y_pt += clearance;
+            }
+            lines[0].height_pt += clearance;
+        } else {
+            lines[index - 1].height_pt += clearance;
+        }
+        return;
+    }
+
+    // Every text line ends before the exclusion begins. Preserve those line
+    // positions while extending block occupancy through the drawing band.
+    if let Some(last) = lines.last_mut() {
+        last.height_pt += (bottom_pt - line_top).max(0.0);
     }
 }
 
@@ -1316,8 +1392,18 @@ fn flatten_run(
 
     let base_size = eff.size_pt.unwrap_or(DEFAULT_SIZE_PT);
     let (size, rise) = match eff.vert_align {
-        Some(VertAlign::Super) => (base_size * SCRIPT_SCALE, SCRIPT_RISE * base_size),
-        Some(VertAlign::Sub) => (base_size * SCRIPT_SCALE, -SCRIPT_RISE * base_size),
+        Some(VertAlign::Super) => (
+            base_size * SCRIPT_SCALE,
+            metrics
+                .superscript_y_offset_pt(base_size)
+                .unwrap_or(SCRIPT_RISE_FALLBACK * base_size),
+        ),
+        Some(VertAlign::Sub) => (
+            base_size * SCRIPT_SCALE,
+            -metrics
+                .subscript_y_offset_pt(base_size)
+                .unwrap_or(SCRIPT_RISE_FALLBACK * base_size),
+        ),
         _ => (base_size, 0.0),
     };
     let (u_pos, u_thick) = metrics.underline_pt(size);
@@ -1337,6 +1423,9 @@ fn flatten_run(
         rise_pt: rise,
         ascent_pt: metrics.ascent_pt(size),
         line_height_pt: metrics.line_height_pt(size),
+        line_box_size_pt: base_size,
+        line_box_ascent_pt: metrics.ascent_pt(base_size),
+        line_box_height_pt: metrics.line_height_pt(base_size),
         link,
     });
 
@@ -1583,6 +1672,11 @@ fn flatten_run(
                     &Rc::new(note_style),
                     atoms,
                 )?;
+            }
+            RunContent::NoteMarker { .. } => {
+                return Err(OfficeError::Internal(
+                    "unresolved inline note marker reached paragraph layout".into(),
+                ));
             }
         }
     }
@@ -1998,6 +2092,13 @@ fn fallback_style(fonts: &FontDb, face: FaceId, base: &RunStyle) -> Rc<RunStyle>
         line_height_pt: metrics
             .as_ref()
             .map_or(base.line_height_pt, |m| m.line_height_pt(base.size_pt)),
+        line_box_size_pt: base.line_box_size_pt,
+        line_box_ascent_pt: metrics.as_ref().map_or(base.line_box_ascent_pt, |m| {
+            m.ascent_pt(base.line_box_size_pt)
+        }),
+        line_box_height_pt: metrics.as_ref().map_or(base.line_box_height_pt, |m| {
+            m.line_height_pt(base.line_box_size_pt)
+        }),
         link: base.link.clone(),
     })
 }
@@ -2017,20 +2118,20 @@ fn break_lines(
     width_rest: f64,
     default_tab: f64,
     tab_stops: &[TabStop],
-    width_for_line: impl Fn(usize, f64) -> f64,
+    line_metrics: impl Fn(usize, f64) -> (f64, f64),
 ) -> Vec<Vec<usize>> {
     let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     let mut width_used = 0.0_f64;
     let mut last_break: Option<usize> = None;
 
-    let width_of = |line_index: usize| {
+    let metrics_of = |line_index: usize| {
         let base = if line_index == 0 {
             width_first
         } else {
             width_rest
         };
-        width_for_line(line_index, base)
+        line_metrics(line_index, base)
     };
 
     let mut i = 0;
@@ -2048,8 +2149,16 @@ fn break_lines(
                 let following = (i + 1..atoms.len())
                     .take_while(|index| !matches!(atoms[*index], Atom::Tab { .. } | Atom::Break(_)))
                     .collect::<Vec<_>>();
-                width_used =
-                    tab_placement(atoms, &following, width_used, default_tab, tab_stops).aligned;
+                let (_, tab_origin_x) = metrics_of(lines.len());
+                width_used = tab_placement(
+                    atoms,
+                    &following,
+                    width_used,
+                    tab_origin_x,
+                    default_tab,
+                    tab_stops,
+                )
+                .aligned;
                 current.push(i);
                 last_break = Some(current.len());
                 i += 1;
@@ -2059,7 +2168,7 @@ fn break_lines(
         }
 
         let adv = atoms[i].advance();
-        let avail = width_of(lines.len());
+        let (avail, _) = metrics_of(lines.len());
         let is_space = atoms[i].is_space();
         let allows_break_after = atoms[i].allows_line_break_after();
 
@@ -2117,13 +2226,15 @@ fn tab_placement(
     atoms: &[Atom],
     following: &[usize],
     current_x: f64,
+    tab_origin_x: f64,
     default_tab: f64,
     tab_stops: &[TabStop],
 ) -> TabPlacement {
-    let target = next_tab_stop(current_x, default_tab, tab_stops);
-    let stop_index = tab_stops
-        .iter()
-        .position(|stop| stop.alignment != TabAlign::Clear && (stop.pos_pt - target).abs() < 0.01);
+    let current_from_left = current_x + tab_origin_x;
+    let target_from_left = next_tab_stop(current_from_left, default_tab, tab_stops);
+    let stop_index = tab_stops.iter().position(|stop| {
+        stop.alignment != TabAlign::Clear && (stop.pos_pt - target_from_left).abs() < 0.01
+    });
     let segment = following
         .iter()
         .copied()
@@ -2135,16 +2246,16 @@ fn tab_placement(
         .take_while(|index| !matches!(atoms[**index], Atom::Glyph { ch: '.', .. }))
         .map(|index| atoms[*index].advance())
         .sum();
-    let aligned = match stop_index.map(|index| tab_stops[index].alignment) {
-        Some(TabAlign::Center) => target - segment_width / 2.0,
-        Some(TabAlign::Right) => target - segment_width,
-        Some(TabAlign::Decimal) => target - decimal_width,
-        _ => target,
+    let aligned_from_left = match stop_index.map(|index| tab_stops[index].alignment) {
+        Some(TabAlign::Center) => target_from_left - segment_width / 2.0,
+        Some(TabAlign::Right) => target_from_left - segment_width,
+        Some(TabAlign::Decimal) => target_from_left - decimal_width,
+        _ => target_from_left,
     }
-    .max(current_x);
+    .max(current_from_left);
     TabPlacement {
-        target,
-        aligned,
+        target: target_from_left - tab_origin_x,
+        aligned: aligned_from_left - tab_origin_x,
         stop_index,
     }
 }
@@ -2170,11 +2281,15 @@ fn place_line(
     let visual_indices = visual_run_order(atoms, indices, rtl);
     let indices = visual_indices.as_slice();
     // Natural width and expandable space count.
+    let tab_origin_x = base_x;
     let mut natural = 0.0_f64;
     let mut spaces = 0usize;
     for &k in indices {
         match &atoms[k] {
-            Atom::Tab { .. } => natural = next_tab_stop(natural, default_tab, tab_stops),
+            Atom::Tab { .. } => {
+                natural =
+                    next_tab_stop(natural + tab_origin_x, default_tab, tab_stops) - tab_origin_x
+            }
             Atom::Glyph {
                 advance_pt,
                 is_space,
@@ -2226,18 +2341,21 @@ fn place_line(
     for &k in indices {
         match &atoms[k] {
             Atom::Glyph { style, .. } => {
-                natural_h = natural_h.max(style.line_height_pt);
-                text_natural_h = text_natural_h.max(style.line_height_pt);
-                ascent = ascent.max(style.ascent_pt);
-                descent = descent.max((style.line_height_pt - style.ascent_pt).max(0.0));
+                natural_h = natural_h.max(style.line_box_height_pt);
+                text_natural_h = text_natural_h.max(style.line_box_height_pt);
+                ascent = ascent.max(style.line_box_ascent_pt);
+                descent =
+                    descent.max((style.line_box_height_pt - style.line_box_ascent_pt).max(0.0));
             }
             Atom::Tab { leaders } => {
                 for (_, leader) in leaders {
-                    natural_h = natural_h.max(leader.style.line_height_pt);
-                    text_natural_h = text_natural_h.max(leader.style.line_height_pt);
-                    ascent = ascent.max(leader.style.ascent_pt);
-                    descent = descent
-                        .max((leader.style.line_height_pt - leader.style.ascent_pt).max(0.0));
+                    natural_h = natural_h.max(leader.style.line_box_height_pt);
+                    text_natural_h = text_natural_h.max(leader.style.line_box_height_pt);
+                    ascent = ascent.max(leader.style.line_box_ascent_pt);
+                    descent = descent.max(
+                        (leader.style.line_box_height_pt - leader.style.line_box_ascent_pt)
+                            .max(0.0),
+                    );
                 }
             }
             Atom::Image { h_pt, .. } => {
@@ -2427,7 +2545,14 @@ fn place_line(
                 );
                 let relative_x = x - base_x;
                 let following = &indices[visual_position + 1..];
-                let placement = tab_placement(atoms, following, relative_x, default_tab, tab_stops);
+                let placement = tab_placement(
+                    atoms,
+                    following,
+                    relative_x,
+                    tab_origin_x,
+                    default_tab,
+                    tab_stops,
+                );
                 let target = placement.target;
                 let aligned = placement.aligned;
                 let stop = placement.stop_index.map(|index| &tab_stops[index]);

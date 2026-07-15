@@ -7,7 +7,7 @@ use super::assemble::WordDoc;
 use crate::Result;
 use crate::fonts::matching;
 use crate::fonts::metrics::FaceMetrics;
-use crate::oxml::numbering::{LabelJustification, LevelDef, NumFmt, format_number};
+use crate::oxml::numbering::{LabelJustification, LevelDef, LevelSuffix, NumFmt, format_number};
 use crate::oxml::wml::{NumRef, ParaProps, Paragraph};
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
@@ -29,6 +29,10 @@ pub struct PlacedLabel {
     pub hanging_pt: Option<f64>,
     /// Label justification inside the hanging area.
     pub justification: LabelJustification,
+    /// Separator between the label and item text. An omitted `w:suff` is Tab.
+    pub suffix: LevelSuffix,
+    /// Shaped advance of the explicit `space` suffix.
+    pub suffix_space_advance_pt: f64,
 }
 
 /// Stateful list counters. `advance` increments the referenced level and resets
@@ -158,6 +162,21 @@ pub fn build_label(
         .filter_map(|id| doc.fonts.face(id).map(|font| (id, font)))
         .unzip();
     let kern = eff.kern_min_pt.is_some_and(|min| size >= min);
+    let suffix_space_advance_pt = if level.suffix == LevelSuffix::Space {
+        shape::require_glyphs(shape::shape_with_fallback(
+            " ",
+            &fallback_faces,
+            size,
+            0.0,
+            kern,
+        ))?
+        .glyphs
+        .iter()
+        .map(|glyph| glyph.advance_pt)
+        .sum()
+    } else {
+        0.0
+    };
     let shaped = shape::require_glyphs(shape::shape_with_fallback(
         &mapped,
         &fallback_faces,
@@ -216,6 +235,8 @@ pub fn build_label(
         left_pt: level.indent.left_pt,
         hanging_pt: level.indent.hanging_pt,
         justification: level.justification,
+        suffix: level.suffix,
+        suffix_space_advance_pt,
     }))
 }
 

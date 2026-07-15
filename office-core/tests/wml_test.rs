@@ -114,6 +114,33 @@ fn styles_cascade() {
     assert_eq!(ppr.outline_lvl, Some(0));
 }
 
+#[test]
+fn first_line_and_hanging_indents_clear_each_other_across_cascade_levels() {
+    let inherited_first = ParaProps {
+        indent: office_core::oxml::wml::Indent {
+            first_line_pt: Some(21.6),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let direct_hanging = ParaProps {
+        indent: office_core::oxml::wml::Indent {
+            hanging_pt: Some(36.0),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let hanging = direct_hanging.merge_over(&inherited_first);
+    assert_eq!(hanging.indent.first_line_pt, None);
+    assert_eq!(hanging.indent.hanging_pt, Some(36.0));
+
+    let inherited_hanging = direct_hanging;
+    let direct_first = inherited_first;
+    let first = direct_first.merge_over(&inherited_hanging);
+    assert_eq!(first.indent.first_line_pt, Some(21.6));
+    assert_eq!(first.indent.hanging_pt, None);
+}
+
 /// Fixture: numbering definitions resolve per (numId, ilvl) with formats.
 #[test]
 fn numbering_resolves() {

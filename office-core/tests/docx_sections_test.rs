@@ -312,14 +312,14 @@ fn only_the_page_with_a_footnote_reserves_the_note_band() {
 }
 
 #[test]
-fn oscillating_footnote_reservation_has_profile_convert_parity() {
-    let leading = (0..7)
+fn measured_footnote_reservation_converges_with_profile_convert_parity() {
+    let leading = (0..10)
         .map(|index| exact_paragraph(&format!("OSCILLATION LEAD {index}")))
         .collect::<String>();
     let reference = r#"<w:p><w:pPr><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>OSCILLATING NOTE</w:t><w:footnoteReference w:id="1"/></w:r></w:p>"#;
     let body = format!("{leading}{reference}<w:sectPr>{SHORT_SECTION}</w:sectPr>");
     let footnotes = format!(
-        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="1"><w:p><w:r><w:t>OSCILLATING NOTE TEXT</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="1"><w:p><w:r><w:t>OSCILLATING NOTE TEXT A</w:t><w:br/><w:t>OSCILLATING NOTE TEXT B</w:t></w:r></w:p></w:footnote></w:footnotes>"#
     );
     let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
     let bytes = package_with_parts(
@@ -328,18 +328,44 @@ fn oscillating_footnote_reservation_has_profile_convert_parity() {
         vec![("word/footnotes.xml", footnotes.into_bytes())],
     );
 
-    assert!(matches!(
-        convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()),
-        Err(OfficeError::Unsupported {
-            code: UnsupportedCode::Footnotes,
-            detail,
-        }) if detail == "footnote page reservation did not converge"
-    ));
-    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile oscillating footnote");
-    assert!(predicted.reasons.iter().any(|reason| {
-        reason.code == UnsupportedCode::Footnotes
-            && reason.detail == "footnote page reservation did not converge"
-    }));
+    let converted = convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
+        .expect("measured reservation converges");
+    let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile measured footnote");
+    assert!(
+        predicted.supported,
+        "profile reasons: {:?}",
+        predicted.reasons
+    );
+
+    let laid = open_layout(&bytes);
+    assert_eq!(converted.page_count as usize, laid.pages.len());
+    let reference_page = laid
+        .pages
+        .iter()
+        .position(|page| page_text(page).contains("OSCILLATING NOTE"))
+        .expect("reference page");
+    let note_page = laid
+        .pages
+        .iter()
+        .position(|page| page_text(page).contains("OSCILLATING NOTE TEXT A"))
+        .expect("note page");
+    assert_eq!(reference_page, note_page);
+    let separator_y = laid.pages[note_page]
+        .items
+        .iter()
+        .find_map(|positioned| match &positioned.item {
+            Item::Line { dx_pt, dy_pt, .. }
+                if (*dx_pt - 36.0).abs() < 0.01 && dy_pt.abs() < 0.01 =>
+            {
+                Some(positioned.y_pt)
+            }
+            _ => None,
+        })
+        .expect("footnote separator");
+    assert!(
+        text_position(&laid.pages[reference_page], "OSCILLATING NOTE").1 < separator_y,
+        "reference must stay above the measured note reservation"
+    );
 }
 
 #[test]
@@ -372,10 +398,30 @@ fn late_second_column_footnote_reserves_the_entire_physical_page() {
     );
     assert!(page_text(&laid.pages[0]).contains("LATE NOTE TEXT"));
     assert!(page_text(&laid.pages[1]).contains("AFTER NOTE PAGE"));
+    let separator_y = laid.pages[0]
+        .items
+        .iter()
+        .find_map(|positioned| match &positioned.item {
+            Item::Line { dx_pt, dy_pt, .. }
+                if (*dx_pt - 36.0).abs() < 0.01 && dy_pt.abs() < 0.01 =>
+            {
+                Some(positioned.y_pt)
+            }
+            _ => None,
+        })
+        .expect("footnote separator");
     assert!(
-        text_position(&laid.pages[0], "COLUMN BODY 6").0 > 200.0,
-        "the first column crossed the page-local footnote boundary"
+        text_position(&laid.pages[0], "LATE COLUMN NOTE").0 > 200.0,
+        "the late note reference must remain in the second column"
     );
+    for index in 0..9 {
+        let position = text_position(&laid.pages[0], &format!("COLUMN BODY {index}"));
+        assert!(
+            position.1 < separator_y,
+            "COLUMN BODY {index} overlaps the measured page-local note reservation: y={}, separator={separator_y}",
+            position.1
+        );
+    }
 }
 
 #[test]
@@ -457,6 +503,41 @@ fn oversized_keep_next_chain_splits_at_widow_groups() {
         "a keep-next chain taller than a page must split safely"
     );
     assert!(page_text(&laid.pages[0]).contains("OVERSIZED KEEP HEADING"));
+}
+
+#[test]
+fn transitive_keep_next_moves_the_widow_group_but_splits_the_long_body_remainder() {
+    let body_lines = (0..20)
+        .map(|index| {
+            let br = if index != 19 { "<w:br/>" } else { "" };
+            format!(r#"<w:t>BODY {index:02}</w:t>{br}"#)
+        })
+        .collect::<String>();
+    let body = format!(
+        r#"<w:p><w:pPr><w:spacing w:line="3360" w:lineRule="exact"/></w:pPr><w:r><w:t>LEAD</w:t></w:r></w:p>
+        <w:p><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>CHAIN HEADING</w:t></w:r></w:p>
+        <w:p><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>CHAIN MARK</w:t></w:r></w:p>
+        <w:p><w:pPr><w:widowControl/><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r>{body_lines}</w:r></w:p>
+        <w:sectPr>{SHORT_SECTION}</w:sectPr>"#
+    );
+    let laid = open_layout(&minimal_docx(&body));
+
+    assert_eq!(
+        laid.pages.len(),
+        3,
+        "page text: {:?}",
+        laid.pages.iter().map(page_text).collect::<Vec<_>>()
+    );
+    assert!(!page_text(&laid.pages[0]).contains("CHAIN HEADING"));
+    let chain_page = page_text(&laid.pages[1]);
+    assert!(chain_page.contains("CHAIN HEADING"), "{chain_page:?}");
+    assert!(chain_page.contains("CHAIN MARK"), "{chain_page:?}");
+    assert!(chain_page.contains("BODY 00"), "{chain_page:?}");
+    assert!(
+        !chain_page.contains("BODY 19"),
+        "body remainder must split: {chain_page:?}"
+    );
+    assert!(page_text(&laid.pages[2]).contains("BODY 19"));
 }
 
 #[test]

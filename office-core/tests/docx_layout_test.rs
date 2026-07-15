@@ -11,9 +11,10 @@ use office_core::testkit::{
     opposite_page_floats_docx, overlapping_page_floats_docx, page_center_float_docx,
     page_floats_without_text_window_docx, page_top_bottom_float_docx,
     paragraph_column_top_bottom_float_docx, paragraph_float_with_page_horizontal_origin_docx,
+    paragraph_top_bottom_anchor_after_text_docx, paragraph_top_bottom_anchor_order_docx,
     single_narrow_page_float_docx, stacked_full_then_side_page_floats_docx,
     stale_page_band_schedule_docx, two_paragraph_floats_docx,
-    vertically_aligned_body_page_float_docx, wrap_document, zip_package,
+    vertically_aligned_body_page_float_docx, wrap_document, wrap_styles, zip_package,
 };
 use office_core::{ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile};
 
@@ -26,6 +27,29 @@ fn layout_body(body: &str) -> LaidOutDocument {
     let bytes = minimal_docx(body);
     let doc = WordDoc::open(&bytes, &opts()).expect("open");
     layout_docx(&doc).expect("layout").0
+}
+
+fn layout_body_with_styles(body: &str, styles_inner: &str) -> LaidOutDocument {
+    let document = wrap_document(body);
+    let styles = wrap_styles(styles_inner);
+    let content_types = r#"<?xml version="1.0"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        </Types>"#;
+    let root_rels = r#"<?xml version="1.0"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/styles.xml", styles.as_bytes()),
+    ]);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open styled docx");
+    layout_docx(&doc).expect("layout styled docx").0
 }
 
 /// All glyph text on a page, in item (paint) order.
@@ -261,6 +285,123 @@ fn column_paragraph_top_bottom_float_reserves_full_width_band() {
     assert!(
         below.2 >= image.y_pt + 19.0 - 0.15,
         "image={image:?}, below={below:?}"
+    );
+}
+
+#[test]
+fn paragraph_top_bottom_anchor_after_text_clears_the_same_paragraph_lines() {
+    let bytes = paragraph_top_bottom_anchor_after_text_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let page = &laid.pages[0];
+    let image = page
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("paragraph float image");
+    let text_runs = glyph_runs(page)
+        .into_iter()
+        .filter(|(text, ..)| text.contains("Visible") || text.contains("anchored paragraph"))
+        .collect::<Vec<_>>();
+    assert!(text_rows(page) >= 2, "fixture must wrap: {text_runs:?}");
+    let first_baseline = text_runs
+        .iter()
+        .map(|(_, _, y, _)| *y)
+        .min_by(f64::total_cmp)
+        .expect("visible text");
+    assert!(
+        first_baseline >= image.y_pt + 72.0 + 9.0 - 0.15,
+        "the paragraph-level image stays at the paragraph top and every same-paragraph text line clears its bottom: image={image:?}, text={text_runs:?}"
+    );
+}
+
+#[test]
+fn paragraph_top_bottom_wrap_is_independent_of_anchor_xml_order() {
+    let text = "Same text must have identical baselines on both sides of the source-order pair. "
+        .repeat(12);
+    let layouts = [false, true].map(|anchor_after_text| {
+        let bytes = paragraph_top_bottom_anchor_order_docx(
+            anchor_after_text,
+            0,
+            &text,
+            Some("Following paragraph"),
+        );
+        let doc = WordDoc::open(&bytes, &opts()).expect("open order fixture");
+        layout_docx(&doc).expect("layout order fixture").0
+    });
+    let image_bounds = layouts.each_ref().map(|laid| {
+        laid.pages[0]
+            .items
+            .iter()
+            .find_map(|positioned| match positioned.item {
+                Item::Image { w_pt, h_pt, .. } => {
+                    Some((positioned.x_pt, positioned.y_pt, w_pt, h_pt))
+                }
+                _ => None,
+            })
+            .expect("paragraph anchor image")
+    });
+    assert_eq!(image_bounds[0], image_bounds[1]);
+    let baselines = layouts.each_ref().map(|laid| {
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .map(|(_, _, y, _)| y)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(baselines[0], baselines[1]);
+}
+
+#[test]
+fn positive_y_top_bottom_band_preserves_lines_wholly_above_it() {
+    let text = "Line-sized words keep wrapping so the geometric band has text above and below it. "
+        .repeat(18);
+    let bytes = paragraph_top_bottom_anchor_order_docx(false, 381_000, &text, None);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open positive-y fixture");
+    let laid = layout_docx(&doc).expect("layout positive-y fixture").0;
+    let page = &laid.pages[0];
+    let image = page
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("paragraph anchor image");
+    let mut baselines = glyph_runs(page)
+        .into_iter()
+        .map(|(_, _, y, _)| y)
+        .collect::<Vec<_>>();
+    baselines.sort_by(f64::total_cmp);
+    assert!(
+        baselines.iter().filter(|y| **y < image.y_pt).count() >= 2,
+        "authored positive y must preserve complete lines above the band: image={image:?}, baselines={baselines:?}"
+    );
+    let bottom = image.y_pt + 20.0 + 9.0;
+    assert!(
+        baselines.iter().any(|y| *y >= bottom),
+        "the first intersecting line must clear to the band bottom: image={image:?}, baselines={baselines:?}"
+    );
+    assert!(
+        baselines.iter().all(|y| *y < image.y_pt || *y >= bottom),
+        "no text baseline may occupy the top-and-bottom band: image={image:?}, baselines={baselines:?}"
+    );
+}
+
+#[test]
+fn anchor_only_paragraph_occupies_through_top_bottom_band() {
+    let bytes = paragraph_top_bottom_anchor_order_docx(false, 381_000, "", Some("After band"));
+    let doc = WordDoc::open(&bytes, &opts()).expect("open anchor-only fixture");
+    let laid = layout_docx(&doc).expect("layout anchor-only fixture").0;
+    let page = &laid.pages[0];
+    let image = page
+        .items
+        .iter()
+        .find(|positioned| matches!(positioned.item, Item::Image { .. }))
+        .expect("paragraph anchor image");
+    let after = glyph_runs(page)
+        .into_iter()
+        .find(|(text, ..)| text.contains("After band"))
+        .expect("trailing paragraph");
+    assert!(
+        after.2 >= image.y_pt + 20.0 + 9.0,
+        "the following paragraph must begin below the complete band: image={image:?}, after={after:?}"
     );
 }
 
@@ -836,6 +977,259 @@ fn hanging_indent_does_not_expand_the_first_line_past_the_right_text_edge() {
 }
 
 #[test]
+fn hanging_indent_moves_only_the_first_text_line_into_the_hanging_area() {
+    let text = "first line starts at the content edge while continuation lines retain the authored left indent ".repeat(12);
+    let laid = layout_body(&format!(
+        r#"<w:p><w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#,
+    ));
+    let mut lines = glyph_runs(&laid.pages[0]);
+    lines.sort_by(|left, right| left.2.total_cmp(&right.2));
+    assert!(lines.len() >= 2, "expected wrapped text: {lines:?}");
+    assert!(
+        ((lines[1].1 - lines[0].1) - 36.0).abs() < 0.1,
+        "w:left=720/w:hanging=720 puts line 1 at the content edge and continuations 36pt right: {lines:?}"
+    );
+}
+
+#[test]
+fn direct_hanging_indent_clears_an_inherited_first_line_indent() {
+    let text = "first line starts at the content edge while continuation lines retain the authored left indent ".repeat(12);
+    let laid = layout_body_with_styles(
+        &format!(
+            r#"<w:p><w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#,
+        ),
+        r#"<w:docDefaults><w:pPrDefault><w:pPr><w:ind w:firstLine="432"/></w:pPr></w:pPrDefault></w:docDefaults>"#,
+    );
+    let mut lines = glyph_runs(&laid.pages[0]);
+    lines.sort_by(|left, right| left.2.total_cmp(&right.2));
+    assert!(lines.len() >= 2, "expected wrapped text: {lines:?}");
+    assert!(
+        (lines[0].1 - 72.0).abs() < 0.1,
+        "the direct hanging indent must clear inherited firstLine and start at the content edge: {lines:?}"
+    );
+    assert!(
+        ((lines[1].1 - lines[0].1) - 36.0).abs() < 0.1,
+        "continuations retain the direct 36pt left indent: {lines:?}"
+    );
+}
+
+#[test]
+fn inherited_first_line_indent_does_not_move_a_right_tab_past_the_paragraph_edge() {
+    let laid = layout_body_with_styles(
+        r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9350"/></w:tabs></w:pPr><w:r><w:t>Title</w:t><w:tab/><w:t>9</w:t></w:r></w:p>"#,
+        r#"<w:docDefaults><w:pPrDefault><w:pPr><w:ind w:firstLine="432"/></w:pPr></w:pPrDefault></w:docDefaults>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let title = runs
+        .iter()
+        .find(|(text, ..)| text == "Title")
+        .expect("title run");
+    let digit = runs
+        .iter()
+        .find(|(text, ..)| text == "9")
+        .expect("right-tab digit");
+    assert!(
+        (title.2 - digit.2).abs() < 0.1,
+        "firstLine only moves the initial text; the right-tab digit remains on that line: {runs:?}"
+    );
+    assert!(
+        ((digit.1 + digit.3) - (72.0 + 467.5)).abs() < 0.1,
+        "the right tab is paragraph-left-relative: {runs:?}"
+    );
+}
+
+#[test]
+fn left_and_first_line_indents_do_not_shift_a_margin_relative_right_tab() {
+    let laid = layout_body(
+        r#"<w:p><w:pPr><w:ind w:left="240" w:firstLine="192"/><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9350"/></w:tabs></w:pPr><w:r><w:t>Subentry</w:t><w:tab/><w:t>9</w:t></w:r></w:p>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let title = runs
+        .iter()
+        .find(|(text, ..)| text == "Subentry")
+        .expect("subentry run");
+    let digit = runs
+        .iter()
+        .find(|(text, ..)| text == "9")
+        .expect("right-tab digit");
+    assert!(
+        (title.2 - digit.2).abs() < 0.1,
+        "paragraph indents must not wrap the margin-relative right-tab digit: {runs:?}"
+    );
+    assert!(
+        ((digit.1 + digit.3) - (72.0 + 467.5)).abs() < 0.1,
+        "the tab stop remains relative to the page-margin content origin: {runs:?}"
+    );
+}
+
+#[test]
+fn right_paragraph_border_and_shading_extend_outside_the_text_edge() {
+    let laid = layout_body(
+        r#"<w:p><w:pPr><w:shd w:val="clear" w:fill="D9D9D9"/><w:pBdr><w:right w:val="single" w:sz="4" w:space="4" w:color="000000"/></w:pBdr><w:tabs><w:tab w:val="right" w:pos="9350"/></w:tabs></w:pPr><w:r><w:t>Title</w:t><w:tab/><w:t>9</w:t></w:r></w:p>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let title = runs
+        .iter()
+        .find(|(text, ..)| text == "Title")
+        .expect("title run");
+    let digit = runs
+        .iter()
+        .find(|(text, ..)| text == "9")
+        .expect("right-tab digit");
+    assert!(
+        (title.2 - digit.2).abs() < 0.1,
+        "the external right border must not reduce the normal text width: {runs:?}"
+    );
+
+    let shading_right = laid.pages[0]
+        .items
+        .iter()
+        .find_map(|positioned| match positioned.item {
+            Item::Rect {
+                w_pt,
+                fill: Some(_),
+                ..
+            } => Some(positioned.x_pt + w_pt),
+            _ => None,
+        })
+        .expect("paragraph shading");
+    let border_x = laid.pages[0]
+        .items
+        .iter()
+        .find_map(|positioned| match positioned.item {
+            Item::Line {
+                dx_pt,
+                dy_pt,
+                ref stroke,
+            } if dx_pt.abs() < 0.01 && dy_pt > 1.0 && (stroke.width_pt - 0.5).abs() < 0.01 => {
+                Some(positioned.x_pt)
+            }
+            _ => None,
+        })
+        .expect("right paragraph border");
+    assert!(
+        (shading_right - 544.5).abs() < 0.1,
+        "shading reaches the outer border edge: {shading_right}"
+    );
+    assert!(
+        (border_x - 544.25).abs() < 0.1,
+        "border center is 4pt outside the 540pt text edge: {border_x}"
+    );
+}
+
+#[test]
+fn scripted_large_run_keeps_the_unscaled_base_em_for_auto_line_spacing() {
+    let document = |vert_align: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:line="951" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:sz w:val="195"/><w:vertAlign w:val="{vert_align}"/></w:rPr><w:t>D</w:t></w:r></w:p><w:p><w:r><w:t>NEXT</w:t></w:r></w:p>"#,
+        )
+    };
+    let scripted = layout_body(&document("subscript"));
+    let baseline = layout_body(&document("baseline"));
+    let next_y = |page: &Page| {
+        glyph_runs(page)
+            .into_iter()
+            .find(|(text, ..)| text.contains("NEXT"))
+            .expect("NEXT glyph run")
+            .2
+    };
+    assert!(
+        (next_y(&scripted.pages[0]) - next_y(&baseline.pages[0])).abs() < 0.5,
+        "subscript transforms the glyph but must not shrink the authored 97.5pt auto-spaced line box: scripted={:?}, baseline={:?}",
+        glyph_runs(&scripted.pages[0]),
+        glyph_runs(&baseline.pages[0]),
+    );
+    let scripted_size = scripted.pages[0]
+        .items
+        .iter()
+        .find_map(|positioned| match &positioned.item {
+            Item::Glyphs(run)
+                if run.glyphs.iter().map(|glyph| glyph.ch).collect::<String>() == "D" =>
+            {
+                Some(run.size_pt)
+            }
+            _ => None,
+        })
+        .expect("scripted D glyph run");
+    assert!(
+        (scripted_size - 97.5 * 0.65).abs() < 0.01,
+        "the rendered glyph itself remains script-scaled: {scripted_size}"
+    );
+}
+
+#[test]
+fn scripted_glyph_position_uses_the_face_os2_y_offset() {
+    let document = |vert_align: &str| {
+        format!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="80"/><w:vertAlign w:val="{vert_align}"/></w:rPr><w:t>D</w:t></w:r></w:p>"#,
+        )
+    };
+    let baseline = layout_body(&document("baseline"));
+    let subscript = layout_body(&document("subscript"));
+    let superscript = layout_body(&document("superscript"));
+    let y = |laid: &LaidOutDocument| {
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .find(|(text, ..)| text == "D")
+            .expect("scripted D")
+            .2
+    };
+
+    let bytes = include_bytes!("../fonts/liberation/LiberationSans-Regular.ttf");
+    let face = ttf_parser::Face::parse(bytes, 0).expect("Liberation Sans face");
+    let units_per_em = f64::from(face.units_per_em());
+    let base_size = 40.0;
+    let sub_offset = f64::from(
+        face.subscript_metrics()
+            .expect("subscript metrics")
+            .y_offset,
+    ) / units_per_em
+        * base_size;
+    let super_offset = f64::from(
+        face.superscript_metrics()
+            .expect("superscript metrics")
+            .y_offset,
+    ) / units_per_em
+        * base_size;
+
+    assert!(
+        ((y(&subscript) - y(&baseline)) - sub_offset).abs() < 0.01,
+        "subscript position must use OS/2 y_offset: baseline={:?}, subscript={:?}",
+        glyph_runs(&baseline.pages[0]),
+        glyph_runs(&subscript.pages[0]),
+    );
+    assert!(
+        ((y(&superscript) - y(&baseline)) + super_offset).abs() < 0.01,
+        "superscript position must use OS/2 y_offset: baseline={:?}, superscript={:?}",
+        glyph_runs(&baseline.pages[0]),
+        glyph_runs(&superscript.pages[0]),
+    );
+}
+
+#[test]
+fn two_line_auto_spacing_uses_the_face_hhea_line_gap() {
+    let laid = layout_body(
+        r#"<w:p><w:pPr><w:spacing w:line="276" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="24"/></w:rPr><w:t>FIRST</w:t><w:br/><w:t>SECOND</w:t></w:r></w:p>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let first_y = runs
+        .iter()
+        .find(|(text, ..)| text == "FIRST")
+        .map(|(_, _, y, _)| *y)
+        .expect("first line");
+    let second_y = runs
+        .iter()
+        .find(|(text, ..)| text == "SECOND")
+        .map(|(_, _, y, _)| *y)
+        .expect("second line");
+    let expected_natural = (1854.0 + 434.0 + 67.0) / 2048.0 * 12.0;
+    assert!(
+        ((second_y - first_y) - 1.15 * expected_natural).abs() < 0.01,
+        "12pt Liberation Sans with line=276 auto must include its 67-unit hhea lineGap: {runs:?}"
+    );
+}
+
+#[test]
 fn paragraph_shading_and_run_highlight_are_painted_behind_text() {
     let laid = layout_body(
         r#"<w:p><w:pPr><w:shd w:val="clear" w:fill="D9D9D9"/></w:pPr><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>highlighted</w:t></w:r></w:p>"#,
@@ -1078,6 +1472,124 @@ fn nested_table_renders_inside_cell() {
         </w:tbl>"#;
     let laid = layout_body(body);
     assert!(page_text(&laid.pages[0]).contains("Nested"));
+}
+
+#[test]
+fn terminal_empty_cell_paragraph_after_nested_table_is_structural() {
+    let document = |leading: &str, terminal: &str| {
+        format!(
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="6000"/></w:tblGrid><w:tr><w:tc>{leading}
+            <w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>NESTED</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+            {terminal}</w:tc></w:tr></w:tbl><w:p><w:r><w:t>AFTER</w:t></w:r></w:p>"#,
+        )
+    };
+    let leading = r#"<w:p/>"#;
+    let terminal = r#"<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:bookmarkStart w:id="7" w:name="tail"/><w:r><w:rPr><w:rtl/></w:rPr></w:r></w:p>"#;
+    let with_terminal = layout_body(&document(leading, terminal));
+    let without_terminal = layout_body(&document(leading, ""));
+    let without_leading = layout_body(&document("", ""));
+    let after_y = |laid: &LaidOutDocument| {
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .find(|(text, ..)| text == "AFTER")
+            .expect("AFTER run")
+            .2
+    };
+    assert!(
+        (after_y(&with_terminal) - after_y(&without_terminal)).abs() < 0.1,
+        "the schema-required terminal empty paragraph after a nested table is structural"
+    );
+    assert!(
+        after_y(&without_terminal) - after_y(&without_leading) > 10.0,
+        "a leading empty cell paragraph remains authored layout content"
+    );
+}
+
+#[test]
+fn nested_vertical_merge_distributes_content_height_across_its_row_span() {
+    let laid = layout_body(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc>
+        <w:tbl><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+          <w:tr>
+            <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>
+              <w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>MERGED ONE</w:t></w:r></w:p>
+              <w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>MERGED TWO</w:t></w:r></w:p>
+            </w:tc>
+            <w:tc><w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>ROW ONE</w:t></w:r></w:p></w:tc>
+          </w:tr>
+          <w:tr>
+            <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>
+            <w:tc><w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>ROW TWO</w:t></w:r></w:p></w:tc>
+          </w:tr>
+        </w:tbl>
+        </w:tc></w:tr></w:tbl>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let y = |needle: &str| {
+        runs.iter()
+            .find(|(text, ..)| text.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?}: {runs:?}"))
+            .2
+    };
+    assert!(
+        ((y("ROW TWO") - y("ROW ONE")) - 12.0).abs() < 0.1,
+        "the two nonmerged one-line cells define two roughly equal 12pt rows: {runs:?}"
+    );
+    assert!(
+        (y("MERGED TWO") - y("ROW TWO")).abs() < 0.1,
+        "the merged two-paragraph content spans both rows instead of inflating only row 1: {runs:?}"
+    );
+}
+
+#[test]
+fn footer_distance_bottom_anchors_a_one_line_footer() {
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{ns}><w:body><w:p><w:r><w:t>BODY</w:t></w:r></w:p>
+        <w:sectPr><w:footerReference w:type="default" r:id="rId1"/>
+        <w:pgSz w:w="12240" w:h="15840"/>
+        <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>
+        </w:sectPr></w:body></w:document>"#,
+        ns = office_core::testkit::DOC_NAMESPACES,
+    );
+    let footer = format!(
+        r#"<?xml version="1.0"?><w:ftr{ns}><w:p><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>FOOTER</w:t></w:r></w:p></w:ftr>"#,
+        ns = office_core::testkit::DOC_NAMESPACES,
+    );
+    let content_types = r#"<?xml version="1.0"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+        </Types>"#;
+    let root_rels = r#"<?xml version="1.0"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>"#;
+    let doc_rels = r#"<?xml version="1.0"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+        </Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", doc_rels.as_bytes()),
+        ("word/footer1.xml", footer.as_bytes()),
+    ]);
+
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let footer_baseline = glyph_runs(&laid.pages[0])
+        .iter()
+        .find(|(text, ..)| text == "FOOTER")
+        .map(|(_, _, y, _)| *y)
+        .expect("footer glyph run");
+    let baseline_from_bottom = laid.pages[0].height_pt - footer_baseline;
+    assert!(
+        (baseline_from_bottom - 38.0).abs() < 0.75,
+        "a 36pt footer distance bottom-anchors the 8pt line; baseline was {baseline_from_bottom:.3}pt from the page bottom"
+    );
 }
 
 #[test]
@@ -1688,6 +2200,69 @@ fn list_counters_reset_on_shallower_level() {
         "top-level labels: {text:?}"
     );
     assert!(text.contains("b)"), "second level-1 item is 'b)': {text:?}");
+}
+
+#[test]
+fn numbering_suffix_positions_item_text_after_the_label() {
+    let ns = office_core::testkit::DOC_NAMESPACES;
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{ns}><w:body>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+        <w:r><w:t>Appendix item</w:t></w:r></w:p>
+        </w:body></w:document>"#
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    for (name, suffix_xml) in [
+        ("omitted", ""),
+        ("tab", r#"<w:suff w:val="tab"/>"#),
+        ("nothing", r#"<w:suff w:val="nothing"/>"#),
+        ("space", r#"<w:suff w:val="space"/>"#),
+    ] {
+        let numbering = format!(
+            r#"<?xml version="1.0"?><w:numbering{ns}>
+            <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+            <w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>{suffix_xml}
+            <w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr>
+            </w:lvl></w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+            </w:numbering>"#
+        );
+        let bytes = zip_package(&[
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("_rels/.rels", root_rels.as_bytes()),
+            ("word/document.xml", document.as_bytes()),
+            ("word/numbering.xml", numbering.as_bytes()),
+        ]);
+        let doc = WordDoc::open(&bytes, &opts()).expect("open numbered fixture");
+        let laid = layout_docx(&doc).expect("layout numbered fixture").0;
+        let runs = glyph_runs(&laid.pages[0]);
+        let (_, label_x, _, label_width) = runs
+            .iter()
+            .find(|(text, ..)| text.contains("1."))
+            .expect("numbering label");
+        let item_x = runs
+            .iter()
+            .find(|(text, ..)| text.contains("Appendix item"))
+            .map(|(_, x, ..)| *x)
+            .expect("numbered item text");
+        let label_end = label_x + label_width;
+        match name {
+            "omitted" | "tab" => assert!(
+                ((item_x - label_x) - 18.0).abs() <= 0.15,
+                "{name} suffix must tab to the 18pt text indent: label_x={label_x}, item_x={item_x}, runs={runs:?}"
+            ),
+            "nothing" => assert!(
+                (item_x - label_end).abs() <= 0.15,
+                "nothing suffix must start text at label end: label_end={label_end}, item_x={item_x}, runs={runs:?}"
+            ),
+            "space" => assert!(
+                item_x > label_end + 0.15,
+                "space suffix must start text strictly after label end: label_end={label_end}, item_x={item_x}, runs={runs:?}"
+            ),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Y-S3: headers on a *mid-document* section must be profiled, not just the final

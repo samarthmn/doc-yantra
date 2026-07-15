@@ -52,9 +52,11 @@ silently omits an out-of-envelope anchor.
 
 Supported conversions may report additive warning codes without changing the
 profile/convert verdict: `bullet_substituted` for a deterministic fallback
-bullet, `superscript_synthesized` for synthesized scientific-notation glyphs,
-and `floating_table_block_fallback` when a side-wrapped table leaves less than
-the 36 pt text window and is laid out as a block instead.
+bullet and `floating_table_block_fallback` when a side-wrapped table leaves less
+than the 36 pt text window and is laid out as a block instead. Bundled faces
+cover the supported superscript code points in the U+207x block as actual
+glyphs; an uncovered superscript fails closed with `missing_glyph` rather than
+being synthesized.
 
 Other representative envelope misses include:
 

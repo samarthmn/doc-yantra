@@ -1076,6 +1076,148 @@ fn fixture_footnote_and_endnote_render_and_agree() {
     assert!(page_text(laid.pages.last().unwrap()).contains("Endnote body"));
 }
 
+fn assert_note_marker_is_inline(page: &Page, note_text: &str) {
+    let glyphs = glyph_positions(&page.items, 0.0, 0.0);
+    let note = glyphs
+        .iter()
+        .find(|(text, ..)| text.contains(note_text))
+        .unwrap_or_else(|| panic!("missing note text {note_text:?}: {glyphs:?}"));
+    let marker = glyphs
+        .iter()
+        .filter(|(text, x, ..)| text.trim() == "1" && *x <= note.1 + 0.01)
+        .min_by(|left, right| (left.2 - note.2).abs().total_cmp(&(right.2 - note.2).abs()))
+        .unwrap_or_else(|| panic!("missing marker before {note_text:?}: {glyphs:?}"));
+
+    assert!(
+        (marker.2 - note.2).abs() <= 6.0,
+        "marker and {note_text:?} must share one line: marker={marker:?}, text={note:?}"
+    );
+    assert!(
+        page_text(page).contains(&format!("1 {note_text}")),
+        "marker and note text must remain adjacent in extraction: {:?}",
+        page_text(page)
+    );
+}
+
+#[test]
+fn authored_footnote_and_endnote_placeholders_resolve_inline() {
+    let body = r#"<w:p><w:r><w:t>Body</w:t><w:footnoteReference w:id="7"/><w:endnoteReference w:id="9"/></w:r></w:p>"#;
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="7"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Foot inline</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let endnotes = format!(
+        r#"<?xml version="1.0"?><w:endnotes{DOC_NAMESPACES}><w:endnote w:id="9"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteRef/></w:r><w:r><w:t xml:space="preserve"> End inline</w:t></w:r></w:p></w:endnote></w:endnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let bytes = package_with_parts(
+        body,
+        rels,
+        vec![
+            ("word/footnotes.xml", footnotes.into_bytes()),
+            ("word/endnotes.xml", endnotes.into_bytes()),
+        ],
+    );
+
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    assert_note_marker_is_inline(&laid.pages[0], "Foot inline");
+    assert_note_marker_is_inline(laid.pages.last().unwrap(), "End inline");
+}
+
+#[test]
+fn absent_footnote_and_endnote_placeholders_get_inline_fallbacks() {
+    let body = r#"<w:p><w:r><w:t>Body</w:t><w:footnoteReference w:id="7"/><w:endnoteReference w:id="9"/></w:r></w:p>"#;
+    let footnotes = format!(
+        r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="7"><w:p><w:r><w:t>Foot fallback</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let endnotes = format!(
+        r#"<?xml version="1.0"?><w:endnotes{DOC_NAMESPACES}><w:endnote w:id="9"><w:p><w:r><w:t>End fallback</w:t></w:r></w:p></w:endnote></w:endnotes>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let bytes = package_with_parts(
+        body,
+        rels,
+        vec![
+            ("word/footnotes.xml", footnotes.into_bytes()),
+            ("word/endnotes.xml", endnotes.into_bytes()),
+        ],
+    );
+
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    assert_note_marker_is_inline(&laid.pages[0], "Foot fallback");
+    assert_note_marker_is_inline(laid.pages.last().unwrap(), "End fallback");
+}
+
+#[test]
+fn footnote_reservation_uses_measured_height_and_bottom_anchors_the_note_block() {
+    let geometry = |line_count: usize| {
+        let body =
+            r#"<w:p><w:r><w:t>Body reference</w:t><w:footnoteReference w:id="7"/></w:r></w:p>"#;
+        let note_lines = (0..line_count)
+            .map(|index| {
+                let br = if index + 1 < line_count {
+                    "<w:br/>"
+                } else {
+                    ""
+                };
+                format!(r#"<w:t>Foot line {index}</w:t>{br}"#)
+            })
+            .collect::<String>();
+        let footnotes = format!(
+            r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="7"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteRef/></w:r><w:r>{note_lines}</w:r></w:p></w:footnote></w:footnotes>"#
+        );
+        let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+        let bytes = package_with_parts(
+            body,
+            rels,
+            vec![("word/footnotes.xml", footnotes.into_bytes())],
+        );
+        let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let laid = layout_docx(&doc).unwrap().0;
+        let page = &laid.pages[0];
+        let separator_y = page
+            .items
+            .iter()
+            .find_map(|positioned| match &positioned.item {
+                Item::Line { dx_pt, dy_pt, .. }
+                    if (*dx_pt - 36.0).abs() < 0.01 && dy_pt.abs() < 0.01 =>
+                {
+                    Some(positioned.y_pt)
+                }
+                _ => None,
+            })
+            .expect("footnote separator");
+        let glyphs = glyph_positions(&page.items, 0.0, 0.0);
+        let body_y = glyphs
+            .iter()
+            .find(|(text, ..)| text.contains("Body reference"))
+            .expect("body reference")
+            .2;
+        let last_y = glyphs
+            .iter()
+            .find(|(text, ..)| text.contains(&format!("Foot line {}", line_count - 1)))
+            .expect("last footnote line")
+            .2;
+        (separator_y, body_y, last_y)
+    };
+
+    let short = geometry(1);
+    let long = geometry(3);
+    assert!(
+        short.0 - long.0 > 20.0,
+        "a three-line note must reserve more body height than a one-line note: short={short:?}, long={long:?}"
+    );
+    assert!(
+        (short.2 - long.2).abs() < 0.1,
+        "both note blocks must bottom-align to the same content bottom: short={short:?}, long={long:?}"
+    );
+    assert!(
+        short.1 < short.0 && long.1 < long.0,
+        "body and notes may not overlap"
+    );
+}
+
 #[test]
 fn note_markers_follow_first_reference_order_per_kind() {
     let body = r#"<w:p><w:r><w:t>A</w:t><w:footnoteReference w:id="0"/><w:t>B</w:t><w:footnoteReference w:id="7"/><w:t>E</w:t><w:endnoteReference w:id="42"/></w:r></w:p>"#;
@@ -1545,7 +1687,7 @@ fn single_right_paragraph_border_is_supported_and_painted() {
             _ => None,
         })
         .expect("right paragraph border");
-    assert!((x - 539.75).abs() <= 0.01, "x={x}");
+    assert!((x - 544.25).abs() <= 0.01, "x={x}");
     assert!((y - 72.0).abs() <= 0.01, "y={y}");
     assert!(dx.abs() <= 0.01, "dx={dx}");
     assert!(dy > 10.0, "dy={dy}");

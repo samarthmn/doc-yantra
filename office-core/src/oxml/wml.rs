@@ -397,6 +397,12 @@ pub enum RunContent {
         /// `w:id` in that part.
         id: i64,
     },
+    /// Inline marker placeholder inside a note body (`w:footnoteRef` or
+    /// `w:endnoteRef`). Flow resolves it to the owning note's sequence number.
+    NoteMarker {
+        /// Which note part owns the marker.
+        kind: NoteKind,
+    },
     /// A symbol glyph from a specific font (`w:sym`).
     Symbol {
         /// The symbol font family.
@@ -708,6 +714,13 @@ impl ParaProps {
     /// Bools use "true wins if either set at its own level"; the direct level's
     /// explicit values dominate via `self` being applied last by the resolver.
     pub fn merge_over(&self, base: &ParaProps) -> ParaProps {
+        let (first_line_pt, hanging_pt) = if self.indent.hanging_pt.is_some() {
+            (None, self.indent.hanging_pt)
+        } else if self.indent.first_line_pt.is_some() {
+            (self.indent.first_line_pt, None)
+        } else {
+            (base.indent.first_line_pt, base.indent.hanging_pt)
+        };
         ParaProps {
             style_id: self.style_id.clone().or_else(|| base.style_id.clone()),
             alignment: self.alignment.or(base.alignment),
@@ -720,8 +733,8 @@ impl ParaProps {
             indent: Indent {
                 left_pt: self.indent.left_pt.or(base.indent.left_pt),
                 right_pt: self.indent.right_pt.or(base.indent.right_pt),
-                first_line_pt: self.indent.first_line_pt.or(base.indent.first_line_pt),
-                hanging_pt: self.indent.hanging_pt.or(base.indent.hanging_pt),
+                first_line_pt,
+                hanging_pt,
             },
             tabs: if self.tabs.is_empty() {
                 base.tabs.clone()
@@ -1824,13 +1837,13 @@ impl WmlParser {
                             });
                         }
                     }
-                    // Marker inside the note body; flow emits a marker from the
-                    // owning note id so it always matches the in-text reference.
-                    "footnoteRef"
-                    | "endnoteRef"
-                    | "separator"
-                    | "continuationSeparator"
-                    | "continuationNotice" => {}
+                    "footnoteRef" => run.content.push(RunContent::NoteMarker {
+                        kind: NoteKind::Footnote,
+                    }),
+                    "endnoteRef" => run.content.push(RunContent::NoteMarker {
+                        kind: NoteKind::Endnote,
+                    }),
+                    "separator" | "continuationSeparator" | "continuationNotice" => {}
                     "object" => {
                         let previews = self.vml_shapes(c)?;
                         let mut found_preview = false;
@@ -2239,7 +2252,7 @@ impl FieldBuild {
     }
 }
 
-fn inline_has_result_content(inline: &InlineContent) -> bool {
+pub(crate) fn inline_has_result_content(inline: &InlineContent) -> bool {
     fn run_has_content(run: &Run) -> bool {
         run.content.iter().any(|content| match content {
             RunContent::Text(text) => !text.trim().is_empty(),

@@ -24,7 +24,6 @@ const DOCUMENTED_WARNING_CODES = new Set([
   "floating_table_block_fallback",
   "font_fallback",
   "font_substituted",
-  "superscript_synthesized",
 ]);
 
 test("office-core wasm package", async (t) => {

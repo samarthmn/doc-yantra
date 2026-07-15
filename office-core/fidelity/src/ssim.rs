@@ -14,6 +14,14 @@ const DIFF_THRESHOLD: f64 = 12.0;
 /// Window SSIM below this is highlighted in the heatmap.
 const HEATMAP_THRESHOLD: f64 = 0.9;
 
+fn composite_over_white([r, g, b, a]: [u8; 4]) -> [u8; 3] {
+    let composite = |channel: u8| {
+        let alpha = u32::from(a);
+        ((u32::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
+    };
+    [composite(r), composite(g), composite(b)]
+}
+
 /// The result of scoring one page pair.
 pub struct PageScore {
     /// Mean window SSIM (0.0–1.0).
@@ -36,7 +44,7 @@ impl Gray {
         let (w, h) = img.dimensions();
         let mut px = Vec::with_capacity((w * h) as usize);
         for (_, _, p) in img.pixels() {
-            let [r, g, b, _] = p.0;
+            let [r, g, b] = composite_over_white(p.0);
             px.push(0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64);
         }
         Gray {
@@ -142,8 +150,7 @@ fn heatmap(ours: &DynamicImage, fail_blocks: &[(usize, usize)], _w: usize, _h: u
     let (iw, ih) = ours.dimensions();
     let mut out = RgbImage::new(iw, ih);
     for (x, y, p) in ours.pixels() {
-        let [r, g, b, _] = p.0;
-        out.put_pixel(x, y, Rgb([r, g, b]));
+        out.put_pixel(x, y, Rgb(composite_over_white(p.0)));
     }
     for &(bx, by) in fail_blocks {
         for j in 0..8 {
@@ -168,7 +175,7 @@ fn heatmap(ours: &DynamicImage, fail_blocks: &[(usize, usize)], _w: usize, _h: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbImage};
+    use image::{DynamicImage, RgbImage, Rgba, RgbaImage};
 
     fn solid(w: u32, h: u32, v: u8) -> DynamicImage {
         let mut img = RgbImage::new(w, h);
@@ -231,5 +238,36 @@ mod tests {
         let b = solid(200, 64, 128);
         let s = score_pages(&a, &b);
         assert_eq!(s.ssim, 0.0);
+    }
+
+    #[test]
+    fn transparent_black_and_opaque_white_are_the_same_page_background() {
+        let white = solid(64, 64, 255);
+        let transparent =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(64, 64, Rgba([0, 0, 0, 0])));
+        let score = score_pages(&white, &transparent);
+        assert!(score.ssim > 0.999, "white page equivalence: {}", score.ssim);
+        assert_eq!(score.diff_pct, 0.0);
+    }
+
+    #[test]
+    fn semitransparent_pixels_are_composited_over_white_before_scoring() {
+        let translucent =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(64, 64, Rgba([10, 100, 200, 128])));
+        let composited =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(64, 64, Rgb([132, 177, 227])));
+        let score = score_pages(&translucent, &composited);
+        assert!(score.ssim > 0.999, "alpha composite parity: {}", score.ssim);
+        assert_eq!(score.diff_pct, 0.0);
+    }
+
+    #[test]
+    fn heatmap_base_composites_transparency_over_white() {
+        let transparent = DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 0])));
+        let png = heatmap(&transparent, &[], 8, 8);
+        let decoded = image::load_from_memory(&png)
+            .expect("decode heatmap")
+            .to_rgb8();
+        assert_eq!(decoded.get_pixel(0, 0), &Rgb([255, 255, 255]));
     }
 }

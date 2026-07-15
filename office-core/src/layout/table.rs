@@ -142,7 +142,8 @@ pub(crate) fn layout_table_with_width(
     let horizontal_boundaries =
         horizontal_boundary_plan(doc, &visible_rows, table, &cols, aligned_left);
 
-    for (row_index, row) in visible_rows.into_iter().enumerate() {
+    let mut prepared_rows = Vec::with_capacity(visible_rows.len());
+    for (row_index, row) in visible_rows.iter().copied().enumerate() {
         let mut col = row.props.grid_before as usize;
         let mut cell_boxes: Vec<CellBox> = Vec::new();
         let mut row_content_h = 0.0_f64;
@@ -156,6 +157,11 @@ pub(crate) fn layout_table_with_width(
             let content_w = (width - m_l - m_r).max(1.0);
 
             let is_continue = cell.props.v_merge == Some(VMerge::Continue);
+            let merge_end_row = if cell.props.v_merge == Some(VMerge::Restart) {
+                vertical_merge_end(&visible_rows, row_index, col, span)
+            } else {
+                row_index
+            };
             let content = if is_continue {
                 CellLayout::default()
             } else {
@@ -172,8 +178,12 @@ pub(crate) fn layout_table_with_width(
             let border_top = horizontal_boundaries[row_index].half_width_for_span(col, col + span);
             let border_bottom =
                 horizontal_boundaries[row_index + 1].half_width_for_span(col, col + span);
-            row_content_h =
-                row_content_h.max(content.height_pt + m_t + m_b + border_top + border_bottom);
+            let content_border_bottom =
+                horizontal_boundaries[merge_end_row + 1].half_width_for_span(col, col + span);
+            if !is_continue && merge_end_row == row_index {
+                row_content_h =
+                    row_content_h.max(content.height_pt + m_t + m_b + border_top + border_bottom);
+            }
 
             cell_boxes.push(CellBox {
                 x,
@@ -183,8 +193,9 @@ pub(crate) fn layout_table_with_width(
                 m_t,
                 m_b,
                 border_top,
-                border_bottom,
+                content_border_bottom,
                 is_continue,
+                merge_end_row,
                 v_align: cell.props.v_align,
                 shading: cell.props.shading.map(Rgba::opaque),
                 borders: resolve_cell_borders(doc, cell, table, col == 0, col + span == cols.len()),
@@ -199,16 +210,60 @@ pub(crate) fn layout_table_with_width(
                 + horizontal_boundaries[row_index + 1].max_width_pt)
                 / 2.0,
         );
-        let height = apply_row_height(row.props.height, row_content_h);
+        prepared_rows.push(PreparedRow {
+            height_rule: row.props.height,
+            is_header: row.props.header,
+            content_height_pt: row_content_h,
+            cells: cell_boxes,
+        });
+    }
+
+    let mut row_heights = prepared_rows
+        .iter()
+        .map(|row| apply_row_height(row.height_rule, row.content_height_pt))
+        .collect::<Vec<_>>();
+    for (row_index, row) in prepared_rows.iter().enumerate() {
+        for cell in &row.cells {
+            if cell.is_continue || cell.merge_end_row == row_index {
+                continue;
+            }
+            let required = cell.content.height_pt
+                + cell.m_t
+                + cell.m_b
+                + cell.border_top
+                + cell.content_border_bottom;
+            let current: f64 = row_heights[row_index..=cell.merge_end_row].iter().sum();
+            let deficit = (required - current).max(0.0);
+            if deficit <= f64::EPSILON {
+                continue;
+            }
+            let growable = (row_index..=cell.merge_end_row)
+                .filter(|index| {
+                    !matches!(prepared_rows[*index].height_rule, Some(RowHeight::Exact(_)))
+                })
+                .collect::<Vec<_>>();
+            if growable.is_empty() {
+                continue;
+            }
+            let share = deficit / growable.len() as f64;
+            for index in growable {
+                row_heights[index] += share;
+            }
+        }
+    }
+
+    for (row_index, prepared) in prepared_rows.iter().enumerate() {
+        let height = row_heights[row_index];
         let mut items = Vec::new();
         let mut bookmarks = Vec::new();
         let mut note_refs = Vec::new();
         let mut internal_links = Vec::new();
-        for cb in &cell_boxes {
-            emit_cell(cb, height, &mut items);
+        for cb in &prepared.cells {
+            let content_span_height: f64 = row_heights[row_index..=cb.merge_end_row].iter().sum();
+            emit_cell(cb, height, content_span_height, &mut items);
             place_cell_metadata(
                 cb,
-                height,
+                content_span_height,
                 &mut bookmarks,
                 &mut note_refs,
                 &mut internal_links,
@@ -222,7 +277,7 @@ pub(crate) fn layout_table_with_width(
         rows.push(TableRowLayout {
             layout: RowLayout {
                 height_pt: height,
-                is_header: row.props.header,
+                is_header: prepared.is_header,
                 items,
             },
             bookmarks,
@@ -262,6 +317,13 @@ pub(crate) fn layout_table_with_width(
     })
 }
 
+struct PreparedRow {
+    height_rule: Option<RowHeight>,
+    is_header: bool,
+    content_height_pt: f64,
+    cells: Vec<CellBox>,
+}
+
 struct CellBox {
     x: f64,
     width: f64,
@@ -270,8 +332,9 @@ struct CellBox {
     m_t: f64,
     m_b: f64,
     border_top: f64,
-    border_bottom: f64,
+    content_border_bottom: f64,
     is_continue: bool,
+    merge_end_row: usize,
     v_align: VAlign,
     shading: Option<Rgba>,
     borders: [Option<Stroke>; 4], // top, right, bottom, left
@@ -289,7 +352,7 @@ struct CellLayout {
 }
 
 /// Emits a cell's shading, content, and borders into the row's item list.
-fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
+fn emit_cell(cb: &CellBox, row_height: f64, content_span_height: f64, items: &mut Vec<LineItem>) {
     if cb.is_continue {
         // Merged-away cell: draw only side borders so the column stays framed.
         push_border(
@@ -309,8 +372,8 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
     // row's fill is painted after this row's bottom boundary and hides half
     // (or more) of a thick conditional border.
     if let Some(fill) = cb.shading {
-        let shade_top = cb.border_top.min(row_height);
-        let shade_height = (row_height - shade_top - cb.border_bottom).max(0.0);
+        let shade_top = cb.border_top.min(content_span_height);
+        let shade_height = (content_span_height - shade_top - cb.content_border_bottom).max(0.0);
         items.push(LineItem {
             x_pt: cb.x,
             y_pt: shade_top,
@@ -327,8 +390,8 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
     // center/bottom alignment from drifting into the bottom margin.
     let content_left = cb.m_l.min(cb.width);
     let content_right = (cb.width - cb.m_r).max(content_left);
-    let content_top = (cb.border_top + cb.m_t).min(row_height);
-    let content_bottom = (row_height - cb.border_bottom - cb.m_b).max(content_top);
+    let content_top = (cb.border_top + cb.m_t).min(content_span_height);
+    let content_bottom = (content_span_height - cb.content_border_bottom - cb.m_b).max(content_top);
     let content_height = content_bottom - content_top;
     let free = (content_height - cb.content.height_pt).max(0.0);
     let dy = match cb.v_align {
@@ -404,7 +467,7 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
 
 fn place_cell_metadata(
     cb: &CellBox,
-    row_height: f64,
+    content_span_height: f64,
     bookmarks: &mut Vec<(String, f64)>,
     note_refs: &mut Vec<(crate::oxml::wml::NoteKind, i64)>,
     internal_links: &mut Vec<InternalLinkRect>,
@@ -414,8 +477,8 @@ fn place_cell_metadata(
     }
     let content_left = cb.m_l.min(cb.width);
     let content_right = (cb.width - cb.m_r).max(content_left);
-    let content_top = (cb.border_top + cb.m_t).min(row_height);
-    let content_bottom = (row_height - cb.border_bottom - cb.m_b).max(content_top);
+    let content_top = (cb.border_top + cb.m_t).min(content_span_height);
+    let content_bottom = (content_span_height - cb.content_border_bottom - cb.m_b).max(content_top);
     let free = (content_bottom - content_top - cb.content.height_pt).max(0.0);
     let content_y = content_top
         + match cb.v_align {
@@ -514,10 +577,21 @@ fn layout_cell(
     let mut bookmarks = Vec::new();
     let mut note_refs = Vec::new();
     let mut internal_links = Vec::new();
-    for block in blocks {
+    for (block_index, block) in blocks.iter().enumerate() {
         match block {
             BlockContent::Paragraph(p) => {
-                let label = counter_label(doc, warnings, p, counters)?;
+                let is_structural_terminal = block_index + 1 == blocks.len()
+                    && block_index > 0
+                    && matches!(blocks[block_index - 1], BlockContent::Table(_))
+                    && !p
+                        .runs
+                        .iter()
+                        .any(crate::oxml::wml::inline_has_result_content);
+                let label = if is_structural_terminal {
+                    None
+                } else {
+                    counter_label(doc, warnings, p, counters)?
+                };
                 let layout = layout_paragraph_with_note_sequence(
                     doc,
                     warnings,
@@ -543,6 +617,18 @@ fn layout_cell(
                     if !note_refs.contains(note_ref) {
                         note_refs.push(*note_ref);
                     }
+                }
+                if is_structural_terminal {
+                    for line in &layout.lines {
+                        bookmarks.extend(line.bookmarks.iter().cloned().map(|name| (name, y)));
+                        internal_links.extend(line.internal_links.iter().cloned().map(
+                            |mut link| {
+                                link.y_pt += y;
+                                link
+                            },
+                        ));
+                    }
+                    continue;
                 }
                 y += layout.space_before_pt;
                 for line in &layout.lines {
@@ -757,6 +843,26 @@ fn cell_margins(cell: &Cell, table: &Table) -> (f64, f64, f64, f64) {
     let t = m.top.or(d.top).unwrap_or(0.0);
     let b = m.bottom.or(d.bottom).unwrap_or(0.0);
     (l, r, t, b)
+}
+
+fn vertical_merge_end(rows: &[&Row], start_row: usize, start_column: usize, span: usize) -> usize {
+    let mut end_row = start_row;
+    for (row_index, row) in rows.iter().enumerate().skip(start_row + 1) {
+        let mut column = row.props.grid_before as usize;
+        let continuation = row.cells.iter().find_map(|cell| {
+            let cell_span = cell.props.grid_span.max(1) as usize;
+            let matches = column == start_column
+                && cell_span == span
+                && cell.props.v_merge == Some(VMerge::Continue);
+            column += cell_span;
+            matches.then_some(())
+        });
+        if continuation.is_none() {
+            break;
+        }
+        end_row = row_index;
+    }
+    end_row
 }
 
 #[derive(Debug, Clone)]

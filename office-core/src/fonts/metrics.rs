@@ -1,6 +1,6 @@
-//! Per-face metrics: line height (using OS/2 Windows metrics — Word's choice),
-//! glyph lookup, advances, and kerning (legacy `kern` table + GPOS pair
-//! adjustment).
+//! Per-face metrics: line height (OS/2 Windows ascent/descent plus the hhea
+//! line gap), glyph lookup, advances, and kerning (legacy `kern` table + GPOS
+//! pair adjustment).
 
 pub use ttf_parser::GlyphId;
 use ttf_parser::gpos::{PairAdjustment, PositioningSubtable};
@@ -19,22 +19,18 @@ pub struct FaceMetrics<'a> {
 
 impl<'a> FaceMetrics<'a> {
     /// Builds metrics from a parsed face. **Prefers OS/2 `usWinAscent`/
-    /// `usWinDescent`** (what Word uses for line height), falling back to hhea.
-    /// This is the single biggest line-height parity lever.
+    /// `usWinDescent`** (what Word uses for the em box), falling back to hhea,
+    /// and retains the hhea line gap in either case.
     pub fn new(face: ttf_parser::Face<'a>) -> FaceMetrics<'a> {
         let units_per_em = face.units_per_em() as f64;
-        let (ascent, descent, line_gap) = match face.tables().os2 {
+        let line_gap = face.line_gap() as f64;
+        let (ascent, descent) = match face.tables().os2 {
             Some(os2) => {
                 let asc = os2.windows_ascender() as f64;
                 let desc = (os2.windows_descender() as f64).abs();
-                // Windows line height has no separate gap; keep 0.
-                (asc, desc, 0.0)
+                (asc, desc)
             }
-            None => (
-                face.ascender() as f64,
-                (face.descender() as f64).abs(),
-                face.line_gap() as f64,
-            ),
+            None => (face.ascender() as f64, (face.descender() as f64).abs()),
         };
         FaceMetrics {
             face,
@@ -77,6 +73,20 @@ impl<'a> FaceMetrics<'a> {
     /// Natural line height in points: `(ascent + descent + gap) / upem * size`.
     pub fn line_height_pt(&self, size_pt: f64) -> f64 {
         self.scale(self.ascent + self.descent + self.line_gap, size_pt)
+    }
+
+    /// OS/2 subscript baseline offset in points at the unscaled base size.
+    pub fn subscript_y_offset_pt(&self, size_pt: f64) -> Option<f64> {
+        self.face
+            .subscript_metrics()
+            .map(|metrics| self.scale(f64::from(metrics.y_offset), size_pt))
+    }
+
+    /// OS/2 superscript baseline offset in points at the unscaled base size.
+    pub fn superscript_y_offset_pt(&self, size_pt: f64) -> Option<f64> {
+        self.face
+            .superscript_metrics()
+            .map(|metrics| self.scale(f64::from(metrics.y_offset), size_pt))
     }
 
     /// Maps a character to a glyph id via cmap (formats 4 + 12 handled by ttf-parser).
@@ -177,5 +187,47 @@ fn pair_value(pair: PairAdjustment, left: GlyphId, right: GlyphId) -> Option<i32
             let (first, _second) = matrix.get((c1, c2))?;
             Some(first.x_advance as i32)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FaceMetrics;
+    use crate::layout::paragraph::apply_line_spacing;
+    use crate::oxml::wml::LineSpacing;
+
+    #[test]
+    fn liberation_sans_natural_and_auto_line_heights_include_hhea_line_gap() {
+        let bytes = include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf");
+        let face = ttf_parser::Face::parse(bytes, 0).expect("bundled Liberation Sans face");
+        let os2 = face.tables().os2.expect("Liberation Sans OS/2 table");
+        assert!(face.line_gap() > 0, "fixture must exercise a real hhea gap");
+
+        let size_pt = 12.0;
+        let expected_natural = (f64::from(os2.windows_ascender())
+            + f64::from(os2.windows_descender()).abs()
+            + f64::from(face.line_gap()))
+            / f64::from(face.units_per_em())
+            * size_pt;
+        let line_gap = face.line_gap();
+        let units_per_em = face.units_per_em();
+        let metrics = FaceMetrics::new(face);
+
+        assert!(
+            (metrics.line_height_pt(size_pt) - expected_natural).abs() < 1e-9,
+            "actual={} expected={} asc={} desc={} gap={} upem={}",
+            metrics.line_height_pt(size_pt),
+            expected_natural,
+            os2.windows_ascender(),
+            os2.windows_descender(),
+            line_gap,
+            units_per_em,
+        );
+        assert!(
+            (apply_line_spacing(Some(LineSpacing::Auto(276.0 / 240.0)), expected_natural)
+                - 1.15 * expected_natural)
+                .abs()
+                < 1e-9
+        );
     }
 }

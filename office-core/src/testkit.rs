@@ -293,6 +293,57 @@ pub fn paragraph_column_top_bottom_float_docx() -> Vec<u8> {
     ))
 }
 
+/// Paragraph-relative top-and-bottom anchor authored after visible wrapped text.
+pub fn paragraph_top_bottom_anchor_after_text_docx() -> Vec<u8> {
+    let anchor = picture_anchor(
+        "column",
+        "<wp:posOffset>0</wp:posOffset>",
+        "paragraph",
+        "<wp:posOffset>0</wp:posOffset>",
+        254_000,
+        914_400,
+        "<wp:wrapTopAndBottom/>",
+        1,
+    );
+    let text =
+        "Visible text in this anchored paragraph must begin below the full-width image band. "
+            .repeat(12);
+    image_docx(&format!(
+        "<w:p><w:r><w:t xml:space=\"preserve\">{text}</w:t>{anchor}</w:r></w:p>"
+    ))
+}
+
+/// Paragraph-relative top-and-bottom anchor with controllable source order and
+/// authored y offset. This keeps the visual inputs identical while tests prove
+/// that wrap geometry, rather than the drawing's XML position, drives layout.
+pub fn paragraph_top_bottom_anchor_order_docx(
+    anchor_after_text: bool,
+    y_emu: i64,
+    text: &str,
+    trailing_paragraph: Option<&str>,
+) -> Vec<u8> {
+    let anchor = picture_anchor(
+        "column",
+        "<wp:posOffset>0</wp:posOffset>",
+        "paragraph",
+        &format!("<wp:posOffset>{y_emu}</wp:posOffset>"),
+        254_000,
+        254_000,
+        "<wp:wrapTopAndBottom/>",
+        1,
+    );
+    let text_run = format!("<w:r><w:t xml:space=\"preserve\">{text}</w:t></w:r>");
+    let paragraph = if anchor_after_text {
+        format!("<w:p>{text_run}<w:r>{anchor}</w:r></w:p>")
+    } else {
+        format!("<w:p><w:r>{anchor}</w:r>{text_run}</w:p>")
+    };
+    let trailing = trailing_paragraph
+        .map(|text| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"))
+        .unwrap_or_default();
+    image_docx(&format!("{paragraph}{trailing}"))
+}
+
 /// Two paragraph-relative floats in one paragraph, outside the bounded envelope.
 pub fn two_paragraph_floats_docx() -> Vec<u8> {
     let anchor = picture_anchor(
