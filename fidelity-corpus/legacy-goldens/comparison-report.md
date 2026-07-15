@@ -1,14 +1,15 @@
 # Legacy golden comparison report
 
-Audit date: 2026-07-13. Oracle: all 34 digest-frozen `e0ff8fb` manifest rows.
+Audit date: 2026-07-13; dispositions refreshed 2026-07-15 after the DOCX
+remediation. Oracle: all 34 digest-frozen `e0ff8fb` manifest rows.
 No golden was regenerated. Runners use local Rust/Node engines and test-side
 pdfium; they never invoke LibreOffice, Gotenberg, Chromium, or PyMuPDF.
 
 | Truth category | Count | Meaning |
 |---|---:|---|
-| Green rows | 10 | Every newly required assertion passes. |
+| Green rows | 12 | Every newly required assertion passes. |
 | Allowlisted rows | 0 | No row is green solely through an allowlist. One URI serialization metric is allowlisted, but that row is independently red on visual parity. |
-| Red rows | 24 | A typed known failure exists and remains visible in runner output. |
+| Red rows | 22 | A typed known failure exists and remains visible in runner output. |
 
 ## What changed
 
@@ -31,7 +32,8 @@ pdfium; they never invoke LibreOffice, Gotenberg, Chromium, or PyMuPDF.
    adds fixed-DPI raster MAD, regional MAD, golden-derived color probes, word-box
    positions, exact image counts and bounds, exact page dimensions, and URI
    target sets. The former text/object-count-only claim marked every office row
-   green; the visual evidence marks all 22 red.
+   green; the visual evidence now keeps 20 office rows red while the exact
+   `headers-footers` and `tabs-leaders` comparisons pass.
 5. **Redaction now matches the oracle exactly.** The former 80% (`file2`) and
    30% (`pdf_ppt-file1`) survivor narratives and their 75%/25% floors are gone.
    Whole-text-object deletion was replaced by glyph/run-level rewriting, so all
@@ -84,7 +86,7 @@ the worst page ratio. `Position` is p95/max Euclidean word-box center delta.
 | office/xlsm/file1.xlsm | 1→1 | 0.0239 | 0.002402 / 0.130832 | 9/43; 0.2093 | 29.1064 / 29.1435 | exact |
 | office/xlsm/file2.xlsm | 1→1 | 0.0239 | 0.001050 / 0.049895 | 15/40; 0.3750 | 2.6556 / 2.6832 | exact |
 | office/fidelity-docx/fonts-substitution | 1→1 | 0.0103 | 0.000654 / 0.040622 | 0/16; 0.0000 | 53.3766 / 53.3766 | exact |
-| office/fidelity-docx/headers-footers | 1→1 | 0.0103 | 0.000570 / 0.030602 | 44/52; 0.8462 | 13.5916 / 14.5870 | exact |
+| office/fidelity-docx/headers-footers | 1→1 | 0.0103 | 0.000214 / 0.015693 | 52/52; 1.0000 | 0.4685 / 0.4753 | exact |
 | office/fidelity-docx/hyperlinks | 1→1 | 0.0103 | 0.000105 / 0.010744 | 10/12; 0.8333 | 2.0082 / 2.0082 | {"https://example.com/"}->{"https://example.com"} |
 | office/fidelity-docx/justify-long-text | 1→1 | 0.0103 | 0.006333 / 0.077720 | 169/232; 0.7284 | 360.8760 / 434.0718 | exact |
 | office/fidelity-docx/lists-multilevel | 1→1 | 0.0103 | 0.000127 / 0.009740 | 16/19; 0.8421 | 1.0552 / 1.0552 | exact |
@@ -96,7 +98,7 @@ the worst page ratio. `Position` is p95/max Euclidean word-box center delta.
 | office/fidelity-docx/table-fixed | 1→1 | 0.0103 | 0.005735 / 0.140882 | 7/100; 0.0700 | 2.2920 / 2.2920 | exact |
 | office/fidelity-docx/table-merges | 1→1 | 0.0103 | 0.002496 / 0.055994 | 1/62; 0.0161 | 7.7238 / 7.7238 | exact |
 | office/fidelity-docx/table-nested | 1→1 | 0.0103 | 0.001634 / 0.047822 | 1/44; 0.0227 | 2.0921 / 2.0921 | exact |
-| office/fidelity-docx/tabs-leaders | 1→1 | 0.0103 | 0.000262 / 0.019734 | 4/8; 0.5000 | 407.7487 / 407.7487 | exact |
+| office/fidelity-docx/tabs-leaders | 1→1 | 0.0103 | 0.000020 / 0.001574 | 8/8; 1.0000 | 0.4410 / 0.4410 | exact |
 
 These measurements caught a real defect, not just a threshold miss. The office
 emitter paints glyphs as artifacts and carries a separate invisible (`Tr 3`)
@@ -168,7 +170,7 @@ typed metric exception; any independent red keeps the row in the red count.
 | 7 | office/xlsm/file1.xlsm |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
 | 8 | office/xlsm/file2.xlsm |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
 | 9 | office/fidelity-docx/fonts-substitution |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; font-run text |
-| 10 | office/fidelity-docx/headers-footers |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; header/footer text |
+| 10 | office/fidelity-docx/headers-footers | ✓ |  |  | same office assertion set; header/footer text |
 | 11 | office/fidelity-docx/hyperlinks |  | `OFFICE_LINK_URI_SERIALIZATION`: golden `https://example.com/`, current `https://example.com`, normalized target exact | `OFFICE_VISUAL_PARITY` | same office assertion set; raw and normalized URI sets |
 | 12 | office/fidelity-docx/justify-long-text |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; justified prose |
 | 13 | office/fidelity-docx/lists-multilevel |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; list order |
@@ -180,7 +182,7 @@ typed metric exception; any independent red keeps the row in the red count.
 | 19 | office/fidelity-docx/table-fixed |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; borders/cells |
 | 20 | office/fidelity-docx/table-merges |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; merged cells |
 | 21 | office/fidelity-docx/table-nested |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; nested cells |
-| 22 | office/fidelity-docx/tabs-leaders |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; tab positions |
+| 22 | office/fidelity-docx/tabs-leaders | ✓ |  |  | same office assertion set; tab positions |
 | 23 | markdown/file1 | ✓ |  |  | digest; golden-derived page count; exact page-local ordered words |
 | 24 | markdown/file2 | ✓ |  |  | same Markdown/CSV assertion set |
 | 25 | markdown/unicode-mixed |  |  | `MDCSV_PAGE_WORD_ORDER` | same Markdown/CSV assertion set; both pages red |
@@ -196,9 +198,9 @@ typed metric exception; any independent red keeps the row in the red count.
 
 ## Engine gaps for routing
 
-- **All office fixtures:** text-position p95 ranges from 4.0430pt to
-  560.1497pt against 2pt; worst max is 579.7668pt against 5pt. Golden color
-  probe ratios range from 0% to 84.62% against 95%.
+- **Remaining red office fixtures:** each fails one or more fixed visual gates;
+  the worst current text-position p95 is 178.9689pt against 2pt. Golden color
+  probe ratios range from 0% to 84.21% against 95%.
 - **Raster-specific office gaps:** both PPTX fixtures exceed global and regional
   MAD; XLSX `file1`, XLSM `file1`, `table-fixed`, `long-doc-pagination`, and
   `page-fields` exceed regional MAD, with the two long DOCX cases also exceeding
@@ -214,8 +216,8 @@ typed metric exception; any independent red keeps the row in the red count.
 
 - `cargo test --manifest-path office-core/Cargo.toml -p fidelity --release`:
   **23 passed, 0 failed, 0 ignored** across five executable test targets; doc
-  tests contained zero tests. The runnable suite printed 24 fixture-level reds:
-  all 22 office rows plus `markdown/unicode-mixed` and
+  tests contained zero tests. The runnable suite prints 22 fixture-level reds:
+  20 office rows plus `markdown/unicode-mixed` and
   `markdown/gfm-constructs`.
 - `cargo run --manifest-path office-core/Cargo.toml -p fidelity --release -- run`:
   **14/14 passed**, zero core failures, 5/5 extended passed; minimum Word-golden

@@ -1392,6 +1392,7 @@ fn render_cell_text(
         "center" => y + ((h - block_height) / 2.0).max(0.0) + metrics.ascent_pt(size),
         _ => y + (h - block_height - pad).max(0.0) + metrics.ascent_pt(size),
     };
+    let text_color = color.unwrap_or(Rgba::opaque(Rgb::new(0, 0, 0)));
     for (line_index, line) in lines.iter().enumerate() {
         let shaped = shape::require_glyphs(shape::shape_with_fallback(
             line,
@@ -1408,31 +1409,64 @@ fn render_cell_text(
             _ => x + pad,
         };
         let mut cursor = tx.max(x + pad);
-        for (index, (glyph, visible)) in shaped.glyphs.iter().zip(mapped.visible).enumerate() {
+        let baseline = first_baseline + line_index as f64 * line_height;
+        let mut run_start = cursor;
+        let mut run_face = None;
+        let mut run_glyphs = Vec::new();
+        for (glyph, visible) in shaped.glyphs.iter().zip(mapped.visible) {
             let Some(&glyph_face) = fallback_ids.get(glyph.face_index) else {
                 continue;
             };
-            let mut glyphs = vec![visible];
-            if index == 0 {
-                glyphs.extend(semantics.take().unwrap_or_default());
+            if run_face.is_some_and(|face| face != glyph_face) {
+                push_cell_text_run(
+                    page,
+                    run_start,
+                    baseline,
+                    run_face.expect("cell text run has a face"),
+                    size,
+                    text_color,
+                    std::mem::take(&mut run_glyphs),
+                );
+                run_start = cursor;
             }
-            page.items.push(Positioned {
-                x_pt: cursor,
-                y_pt: first_baseline + line_index as f64 * line_height,
-                item: Item::Glyphs(GlyphRun {
-                    face: glyph_face,
-                    size_pt: size,
-                    color: color.unwrap_or(Rgba::opaque(Rgb::new(0, 0, 0))),
-                    base_direction: None,
-                    glyphs,
-                    underline: None,
-                    strike: None,
-                }),
-            });
+            run_face = Some(glyph_face);
+            run_glyphs.push(visible);
+            if let Some(semantic) = semantics.take() {
+                run_glyphs.extend(semantic);
+            }
             cursor += glyph.advance_pt;
+        }
+        if let Some(face) = run_face {
+            push_cell_text_run(
+                page, run_start, baseline, face, size, text_color, run_glyphs,
+            );
         }
     }
     Ok(())
+}
+
+fn push_cell_text_run(
+    page: &mut Page,
+    x_pt: f64,
+    baseline: f64,
+    face: FaceId,
+    size_pt: f64,
+    color: Rgba,
+    glyphs: Vec<crate::layout::PlacedGlyph>,
+) {
+    page.items.push(Positioned {
+        x_pt,
+        y_pt: baseline,
+        item: Item::Glyphs(GlyphRun {
+            face,
+            size_pt,
+            color,
+            base_direction: None,
+            glyphs,
+            underline: None,
+            strike: None,
+        }),
+    });
 }
 
 fn column_name(mut col: u32) -> String {

@@ -923,6 +923,24 @@ fn xlsx_shaped_clusters_extract_complete_logical_source_once() {
 }
 
 #[test]
+fn same_face_xlsx_cell_glyphs_stay_in_one_run() {
+    let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>16</t></is></c></row></sheetData></worksheet>"#;
+    let bytes = minimal_xlsx(sheet, None);
+    let doc = XlsxDoc::open(&bytes, &opts()).expect("open XLSX");
+    let (laid, _) = render_xlsx(&doc).expect("render XLSX");
+    let glyph_runs = laid.pages[0]
+        .items
+        .iter()
+        .filter(|item| matches!(item.item, Item::Glyphs(_)))
+        .count();
+
+    assert_eq!(
+        glyph_runs, 1,
+        "contiguous glyphs from one face must share a PDF run so extractors preserve multi-digit cells"
+    );
+}
+
+#[test]
 fn page_setup_paper_orientation_margins_and_gridline_default_apply() {
     let cases = [
         (1, "portrait", 612.0, 792.0),

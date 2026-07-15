@@ -119,17 +119,16 @@ files by SHA-256:
 - Word PDF: `e808b449e27436d74f81d5d5df9f9fe4daa4cc28e426ec1619bbe3fcfb55255c`
 
 The direct converter and final WASM worker produce the same deterministic PDF
-(`SHA-256 0f2dd536a567ec52716dc95d85e822f8c48cda6c7e7171cbc75cc801e3ced60c`):
+(`SHA-256 a3629b6aae822d56127cba7ab07ea6c0fc3ab51910b72bad0e0db301cdde3e1a`):
 six 612×792-point pages, the same front/behind layer order as Word, and image
 bounds within 0.06 pt. Tight wrapping releases text on the first baseline below
 the authored polygon, and table flow includes the top and bottom outer-border
 half-strokes; the table edges are within 0.4 pt and the following baseline is
-within 0.3 pt of Word. Per-page 8×8 luma SSIM is 0.962378, 0.972241, 0.973315,
-0.971328, 0.927677, and 0.940199. The executable core gate is 0.90, so the
-fixture passes with a minimum SSIM of 0.927677. PDF.js extracts zero NUL or
+within 0.3 pt of Word. The executable core gate is 0.90, and the rebuilt
+six-page fixture passes with a minimum SSIM of 0.9374006584. PDF.js extracts zero NUL or
 U+FFFE characters and finds the expected headings and body phrases. The final
 package source fingerprint is
-`4125bddd5b4d632846e2c4255d7bfeeaf33414ce1a22182cc1a2cc6a53550304`.
+`5a3bae6d1117c39ac24fe55c13b961bffbc4e19156f0208437e18ca412175ade`.
 Focused native PDFium and package-level PDF.js regressions preserve logical
 source order, line ownership, and selection geometry for decomposed Latin,
 Arabic and Hebrew mark stacks, and wrapped right-to-left text.

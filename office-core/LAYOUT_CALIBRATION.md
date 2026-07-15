@@ -147,4 +147,16 @@ Per failing case:
   minimum SSIM but remains below the core floor, so it is not cited as passing
   calibration evidence.
 
+### 2026-07-15 — footer-distance bottom anchoring
+
+- **Axis:** Word's `w:pgMar/@w:footer` measures from the physical page bottom
+  to the footer block's bottom, not to the block's top edge.
+- **Change:** footer layout now measures its complete block and subtracts that
+  height from the authored bottom anchor; header layout retains its top-edge
+  convention.
+- **Evidence:** `footer_distance_bottom_anchors_a_one_line_footer` pins the
+  authored 0.5-inch bottom distance. The frozen `headers-footers` comparison is
+  now green: 52/52 color probes, 0.4685 pt text-position p95, and 0.000214
+  global raster MAD.
+
 _Invariant going forward: a calibration commit gets a log entry here._

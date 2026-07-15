@@ -73,13 +73,6 @@
       "tracking_note": "Route font metrics to the DOCX text-layout owner; remove only after this exact comparison passes."
     },
     {
-      "fixture_id": "office/fidelity-docx/headers-footers",
-      "reason_code": "OFFICE_VISUAL_PARITY",
-      "justification": "Header/footer text positions and golden-derived color probes exceed the fixed comparison limits.",
-      "user_visible_effect": "Body or running-footer placement differs from the legacy PDF.",
-      "tracking_note": "Route header/footer layout metrics to the DOCX engine owner; remove only after this exact comparison passes."
-    },
-    {
       "fixture_id": "office/fidelity-docx/hyperlinks",
       "reason_code": "OFFICE_VISUAL_PARITY",
       "justification": "Hyperlink text positions and golden-derived color probes exceed the fixed comparison limits; URI serialization is handled separately by the typed allowlist.",
