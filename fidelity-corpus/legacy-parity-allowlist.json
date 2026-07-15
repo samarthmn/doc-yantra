@@ -157,13 +157,6 @@
       "tracking_note": "Route nested-table metrics to the DOCX table-layout owner; remove only after this exact comparison passes."
     },
     {
-      "fixture_id": "office/fidelity-docx/tabs-leaders",
-      "reason_code": "OFFICE_VISUAL_PARITY",
-      "justification": "Tab-stop text positions and golden-derived color probes exceed the fixed limits.",
-      "user_visible_effect": "Tab-aligned text or leaders visibly differ from the legacy PDF.",
-      "tracking_note": "Route tab-stop metrics to the DOCX paragraph-layout owner; remove only after this exact comparison passes."
-    },
-    {
       "fixture_id": "markdown/unicode-mixed",
       "reason_code": "MDCSV_PAGE_WORD_ORDER",
       "justification": "The normalized ordered words extracted from each current page do not equal those on the corresponding Chromium page.",

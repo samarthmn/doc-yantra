@@ -336,6 +336,11 @@ fn word_producer_matches(declared: &str, actual: &str) -> bool {
     if declared.contains("365") {
         return actual.contains("365");
     }
+    // Word's online export service stamps the bare family string with no
+    // version. Accept it only when both sides are exactly the bare family.
+    if declared == "microsoftwordonlineexportservice" || declared == "microsoftword" {
+        return actual == "microsoftword";
+    }
     let version: String = declared
         .chars()
         .skip_while(|character| !character.is_ascii_digit())
@@ -476,6 +481,58 @@ mod gate_tests {
             embedded_creation_date(b"<</CreationDate(D:20260709125924+05'30')>>"),
             Some("2026-07-09".into())
         );
+    }
+
+    #[test]
+    fn bare_online_word_declaration_matches_only_bare_word_metadata() {
+        assert!(word_producer_matches(
+            "Microsoft Word (online export service)",
+            "Microsoft Word"
+        ));
+        assert!(word_producer_matches("Microsoft Word", "Microsoft Word"));
+        assert!(!word_producer_matches(
+            "Microsoft Word (online export service)",
+            "Microsoft® Word LTSC"
+        ));
+    }
+
+    #[test]
+    fn versioned_word_declaration_does_not_match_bare_word_metadata() {
+        assert!(!word_producer_matches(
+            "Microsoft Word 2021",
+            "Microsoft Word"
+        ));
+    }
+
+    #[test]
+    fn provenance_uses_creator_when_pdf_producer_is_absent() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let ground_truth = root.join("fidelity-corpus/docx/gdocs-anchors-toc/ground-truth.pdf");
+        let bytes = std::fs::read(&ground_truth).expect("read Creator-only Word PDF");
+        let metadata = pdf_core::meta::get_metadata(&bytes).expect("read PDF metadata");
+        assert!(
+            metadata.producer.is_none(),
+            "fixture must remain Producer-free"
+        );
+        assert_eq!(metadata.creator.as_deref(), Some("Microsoft Word"));
+
+        let manifest = Manifest {
+            title: "Creator fallback regression".into(),
+            tier: "core".into(),
+            ssim_threshold: 0.90,
+            max_page_count_delta: 0,
+            word_version: "Microsoft Word (online export service)".into(),
+            ground_truth_exported_at: "2026-07-14".into(),
+            input_sha256: "0".repeat(64),
+            golden_sha256: "0".repeat(64),
+        };
+        validate_provenance(
+            Path::new("creator-fallback/manifest.toml"),
+            &manifest,
+            &ground_truth,
+            &bytes,
+        )
+        .expect("Creator metadata must satisfy Word provenance");
     }
 }
 

@@ -13,9 +13,19 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const PKG = join(here, "../office-core/wasm/pkg");
 const MOCK = join(here, "../mock-files");
+const CORPUS = join(here, "../fidelity-corpus/docx");
 const CARLITO = join(here, "../office-core/fonts/carlito/Carlito-Regular.ttf");
 
 const engine = require(PKG);
+const pdf = require(join(here, "../pdf-core/wasm/pkg"));
+
+const DOCUMENTED_WARNING_CODES = new Set([
+  "bullet_substituted",
+  "floating_table_block_fallback",
+  "font_fallback",
+  "font_substituted",
+  "superscript_synthesized",
+]);
 
 test("office-core wasm package", async (t) => {
   await t.test("version() matches the crate", () => {
@@ -117,5 +127,26 @@ test("office-core wasm package", async (t) => {
   await t.test("register_font: garbage throws, a real TTF succeeds", () => {
     assert.throws(() => engine.register_font(new Uint8Array([1, 2, 3, 4])));
     assert.doesNotThrow(() => engine.register_font(readFileSync(CARLITO)));
+  });
+
+  await t.test("gdocs fixtures preserve the Word page counts", () => {
+    for (const [name, expectedPages] of [
+      ["gdocs-anchors-toc", 10],
+      ["gdocs-tables-longdoc", 44],
+      ["gdocs-columns", 3],
+    ]) {
+      const bytes = readFileSync(join(CORPUS, name, "source.docx"));
+      const profile = JSON.parse(engine.office_profile(bytes, "docx"));
+      assert.equal(profile.supported, true, `${name}: ${JSON.stringify(profile.reasons)}`);
+      assert.deepEqual(profile.reasons, [], `${name}: profile reasons`);
+      assert.ok(
+        profile.warnings.every((warning) => DOCUMENTED_WARNING_CODES.has(warning.code)),
+        `${name}: undocumented warnings ${JSON.stringify(profile.warnings)}`,
+      );
+
+      const output = engine.office_to_pdf(bytes, "docx");
+      assert.equal(Buffer.from(output.subarray(0, 5)).toString(), "%PDF-", name);
+      assert.equal(pdf.page_count(output), expectedPages, `${name}: Word page parity`);
+    }
   });
 });

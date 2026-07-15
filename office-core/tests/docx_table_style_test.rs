@@ -35,7 +35,10 @@ const TABLE_STYLES: &str = r#"
   </w:tblPr>
   <w:tblStylePr w:type="firstRow">
     <w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr>
-    <w:tcPr><w:shd w:val="clear" w:fill="4472C4"/></w:tcPr>
+    <w:tcPr>
+      <w:tcBorders><w:bottom w:val="single" w:sz="18" w:color="4472C4"/></w:tcBorders>
+      <w:shd w:val="clear" w:fill="4472C4"/>
+    </w:tcPr>
   </w:tblStylePr>
   <w:tblStylePr w:type="band1Horz">
     <w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr>
@@ -165,6 +168,32 @@ fn text_color(page: &Page, needle: &str) -> Option<Rgb> {
     out
 }
 
+fn rect_tops(page: &Page, color: Rgb) -> Vec<f64> {
+    page.items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Rect {
+                fill: Some(fill), ..
+            } if fill.rgb() == color => Some(positioned.y_pt),
+            _ => None,
+        })
+        .collect()
+}
+
+fn thick_horizontal_line_ys(page: &Page) -> Vec<f64> {
+    page.items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Line { dy_pt, stroke, .. }
+                if dy_pt.abs() < 0.01 && (stroke.width_pt - 2.25).abs() < 0.01 =>
+            {
+                Some(positioned.y_pt)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn table_style_reference_with_conditional_formatting_converts_and_paints() {
     let bytes = styled_table_docx();
@@ -218,6 +247,19 @@ fn table_style_reference_with_conditional_formatting_converts_and_paints() {
         text_color(page, "PLAIN"),
         Some(Rgb::new(0x00, 0x00, 0x00)),
         "body rows keep the default text colour"
+    );
+
+    let thick_seam = thick_horizontal_line_ys(page)
+        .into_iter()
+        .next()
+        .expect("first-row 2.25pt bottom border");
+    let first_band_top = rect_tops(page, band)
+        .into_iter()
+        .next()
+        .expect("first band fill");
+    assert!(
+        first_band_top >= thick_seam + 1.12,
+        "the next row's shading must start below half the collapsed border so it cannot paint over the border: seam={thick_seam}, band={first_band_top}"
     );
 }
 

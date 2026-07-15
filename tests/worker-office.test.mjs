@@ -20,7 +20,7 @@ const { createOfficeEngineWorker, EngineWorkerError } = require(join(PKG, "worke
 const COMPLEX_INPUT_SHA256 =
   "8c2a8c4725e77bbfb4ddc7925674dc221611a39b876dbd7ea2efc829e70b8530";
 const COMPLEX_OUTPUT_SHA256 =
-  "220480cc75cf26ceaa589503a7e992d90fe6ce56d29db88dc224737bdb90614d";
+  "0f2dd536a567ec52716dc95d85e822f8c48cda6c7e7171cbc75cc801e3ced60c";
 
 function docx() {
   return readFileSync(join(ROOT, "mock-files", "docx", "file1.docx"));

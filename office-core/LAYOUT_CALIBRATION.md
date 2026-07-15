@@ -106,4 +106,45 @@ Per failing case:
   manifested DOCX fidelity cases remain green; `complex` retains its frozen
   0.927610 minimum SSIM and 6/6 page count.
 
+### 2026-07-15 — continuous-column balancing and authored band extent
+
+- **Axis:** a continuous section change must balance only the units in that
+  section band, then resume full-width flow below the deepest column.
+- **Change:** derive the balance target from the authored band extent, preserve
+  the band's leading gap in every column, carry explicit page breaks across the
+  band boundary, and place following content at the deepest occupied column.
+  No fixture-specific offset or tunable fudge is used.
+- **Evidence:** `gdocs-columns` retains exact 3/3 page parity. Per-page SSIM in
+  the final full-corpus run is 0.918623 / 0.959255 / 0.926355 (minimum
+  0.918623), clearing the 0.90 core gate.
+
+### 2026-07-15 — long-table continuation and list geometry
+
+- **Axis:** split tables lost their collapsed top boundary at continuation
+  pages, negative decimal `tblInd` values were truncated, and hanging-indent
+  first lines used the continuation-line right edge.
+- **Change:** every row owns its collapsed top boundary so a continuation page
+  repaints it; decimal twip measurements remain fractional through parsing and
+  layout; hanging indents narrow continuation lines without expanding the first
+  line; a keep-next heading binds to the first table row.
+- **Evidence:** `gdocs-tables-longdoc` retains exact 44/44 page parity. The
+  final measured run has a 0.803000 minimum SSIM; pages 30, 33, 36, 37, 41,
+  42, and 43 remain below the 0.90 core floor, so this case is still a blocking
+  fidelity failure rather than a claimed calibration win.
+
+### 2026-07-15 — shaped tab-leader advances
+
+- **Axis:** TOC leaders must fill the authored tab interval without changing
+  the tab stop or overrunning the following page number.
+- **Change:** leader repetition uses the selected font's shaped glyph advance;
+  zero-width or non-finite advances are rejected, and the final glyph is kept
+  within the measured interval. This introduces no fixed leader-width constant.
+- **Evidence:** focused tab-leader metric tests preserve the authored right tab
+  stop and keep every repeated leader within its interval. The frozen legacy
+  `tabs-leaders` comparison is now green (8/8 color probes, 0.441 pt text
+  position p95), so its obsolete known-failure entry was removed. The larger
+  `gdocs-anchors-toc` fixture retains exact 10/10 page parity with a 0.669644
+  minimum SSIM but remains below the core floor, so it is not cited as passing
+  calibration evidence.
+
 _Invariant going forward: a calibration commit gets a log entry here._

@@ -4,7 +4,8 @@ use office_core::layout::{Item, LaidOutDocument, Page, WordDoc, layout_docx};
 use office_core::testkit::{
     continuous_multicolumn_anchor_docx, continuous_vertically_aligned_page_float_docx,
     cross_page_page_float_band_docx, disjoint_left_page_floats_docx,
-    floating_table_block_flow_docx, floating_table_distances_docx, floating_table_origin_docx,
+    floating_table_block_flow_docx, floating_table_distances_docx,
+    floating_table_first_line_indent_docx, floating_table_origin_docx,
     floating_table_side_wrap_docx, full_and_side_page_floats_docx, margin_top_left_float_docx,
     minimal_docx, multicolumn_anchor_docx, non_convergent_page_float_docx,
     opposite_page_floats_docx, overlapping_page_floats_docx, page_center_float_docx,
@@ -310,6 +311,21 @@ fn floating_table_wraps_side_text_then_releases_full_width() {
         .find(|(text, ..)| text.contains("Below floating table"))
         .expect("below-table text");
     assert!((below.1 - 72.0).abs() <= 0.15, "below={below:?}");
+}
+
+#[test]
+fn floating_table_positioning_ignores_normal_flow_table_indent() {
+    let body = r#"<w:tbl><w:tblPr><w:tblW w:w="2160" w:type="dxa"/><w:tblInd w:w="-108" w:type="dxa"/><w:tblpPr w:vertAnchor="text" w:horzAnchor="text" w:tblpX="0" w:tblpY="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2160"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>FLOATING INDENT</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let laid = layout_body(body);
+    let run = glyph_runs(&laid.pages[0])
+        .into_iter()
+        .find(|(text, ..)| text == "FLOATING INDENT")
+        .expect("floating table text");
+
+    assert!(
+        (run.1 - 77.4).abs() <= 0.15,
+        "floating frame position comes from tblpPr, not tblInd: {run:?}"
+    );
 }
 
 #[test]
@@ -638,6 +654,27 @@ fn floating_table_side_wrap_releases_after_bottom_distance() {
 }
 
 #[test]
+fn side_wrap_preserves_positive_first_line_indent_after_the_float_inset() {
+    let bytes = floating_table_first_line_indent_docx();
+    let doc = WordDoc::open(&bytes, &opts()).expect("open");
+    let laid = layout_docx(&doc).expect("layout").0;
+    let mut wrapped = glyph_runs(&laid.pages[0])
+        .into_iter()
+        .filter(|(text, ..)| text.contains("first-line indent"));
+    let first = wrapped.next().expect("first wrapped line");
+    let continuation = wrapped.next().expect("continuation line");
+
+    assert!(
+        (first.1 - (225.0 + 21.6)).abs() <= 0.15,
+        "first line must apply its 432-twip indent after the float inset: {first:?}"
+    );
+    assert!(
+        (continuation.1 - 225.0).abs() <= 0.15,
+        "continuation line must begin at the float inset: {continuation:?}"
+    );
+}
+
+#[test]
 fn one_narrow_side_page_band_is_not_rejected_by_opposite_band_floor() {
     let bytes = single_narrow_page_float_docx();
     let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile");
@@ -787,6 +824,76 @@ fn long_text_wraps_to_multiple_lines() {
 }
 
 #[test]
+fn hanging_indent_does_not_expand_the_first_line_past_the_right_text_edge() {
+    let laid = layout_body(
+        r#"<w:p><w:pPr><w:ind w:left="360" w:right="720" w:hanging="360"/></w:pPr><w:r><w:t>Markdown — A lightweight markup language popular for documentation and technical writing.</w:t></w:r></w:p>"#,
+    );
+    assert_eq!(
+        text_rows(&laid.pages[0]),
+        2,
+        "the hanging area belongs to the label, not to the first line's right edge"
+    );
+}
+
+#[test]
+fn paragraph_shading_and_run_highlight_are_painted_behind_text() {
+    let laid = layout_body(
+        r#"<w:p><w:pPr><w:shd w:val="clear" w:fill="D9D9D9"/></w:pPr><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>highlighted</w:t></w:r></w:p>"#,
+    );
+    let fills: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match positioned.item {
+            Item::Rect {
+                fill: Some(fill), ..
+            } => Some((positioned.x_pt, positioned.y_pt, fill.rgb())),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        fills
+            .iter()
+            .any(|(_, _, fill)| *fill == office_core::oxml::Rgb::new(217, 217, 217)),
+        "paragraph shading missing: {fills:?}"
+    );
+    assert!(
+        fills
+            .iter()
+            .any(|(_, _, fill)| *fill == office_core::oxml::Rgb::new(255, 255, 0)),
+        "run highlight missing: {fills:?}"
+    );
+}
+
+#[test]
+fn a_table_fragment_repaints_its_collapsed_top_boundary_on_the_next_page() {
+    let rows = (0..6)
+        .map(|index| {
+            format!(
+                r#"<w:tr><w:trPr><w:trHeight w:val="960" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>ROW {index}</w:t></w:r></w:p></w:tc></w:tr>"#
+            )
+        })
+        .collect::<String>();
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="8" w:color="4472C4"/><w:left w:val="single" w:sz="8" w:color="4472C4"/><w:bottom w:val="single" w:sz="8" w:color="4472C4"/><w:right w:val="single" w:sz="8" w:color="4472C4"/><w:insideH w:val="single" w:sz="8" w:color="4472C4"/><w:insideV w:val="single" w:sz="8" w:color="4472C4"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid>{rows}</w:tbl><w:sectPr><w:pgSz w:w="12240" w:h="5760"/><w:pgMar w:top="720" w:right="1800" w:bottom="720" w:left="1800"/></w:sectPr>"#
+    );
+    let laid = layout_body(&body);
+    assert_eq!(laid.pages.len(), 2);
+    assert!(
+        laid.pages[1].items.iter().any(|positioned| {
+            matches!(
+                positioned.item,
+                Item::Line { dx_pt, dy_pt, .. }
+                    if dx_pt > 100.0
+                        && dy_pt.abs() < 0.01
+                        && (positioned.y_pt - 36.0).abs() < 0.1
+            )
+        }),
+        "the continuation fragment must have a horizontal edge at the page text top"
+    );
+}
+
+#[test]
 fn paragraph_mark_size_controls_empty_paragraph_line_height_only() {
     let following_baseline = |body: &str| {
         let laid = layout_body(body);
@@ -827,6 +934,31 @@ fn complex_field_cached_hyperlink_across_paragraphs_converts_and_renders() {
     let doc = WordDoc::open(&bytes, &opts()).expect("open");
     let laid = layout_docx(&doc).expect("layout").0;
     assert!(page_text(&laid.pages[0]).contains("Heading 1\t3"));
+}
+
+#[test]
+fn near_right_edge_tab_accounts_for_its_trailing_page_number_before_wrapping() {
+    let laid = layout_body(
+        r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="9350" w:leader="dot"/></w:tabs></w:pPr><w:r><w:t>Contents entry</w:t><w:tab/><w:t>7</w:t></w:r></w:p>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let entry = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Contents entry"))
+        .expect("entry text run");
+    let page_number = runs
+        .iter()
+        .find(|(text, ..)| text == "7")
+        .expect("page number run");
+
+    assert!(
+        (entry.2 - page_number.2).abs() < 0.01,
+        "right-tab text and its page number must remain on one line: {runs:?}"
+    );
+    assert!(
+        (page_number.1 + page_number.3 - (72.0 + 467.5)).abs() < 0.1,
+        "page number must end at the authored 9350-twip stop: {page_number:?}"
+    );
 }
 
 #[test]

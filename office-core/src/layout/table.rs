@@ -104,15 +104,30 @@ pub(crate) fn layout_table_with_width(
     let cols = resolve_columns(table, avail_width_pt);
     let table_width: f64 = cols.iter().sum();
     let free_width = (avail_width_pt - table_width).max(0.0);
+    // `tblInd` positions an in-flow table. A floating table's frame is instead
+    // positioned exclusively by `tblpPr`; applying both offsets shifts its
+    // painted grid away from the wrap exclusion Word computes for that frame.
     let leading_cell_margin = table
         .props
         .cell_margins
         .left
         .unwrap_or(DEFAULT_CELL_MARGIN_PT);
-    let start_offset = table
-        .props
-        .indent_pt
-        .map_or(0.0, |indent| indent - leading_cell_margin);
+    let start_offset = if table.props.floating.is_some() {
+        0.0
+    } else {
+        // A non-negative `tblInd` locates the leading cell content edge, so the
+        // grid begins one leading margin earlier. Google Docs exports an
+        // explicit negative `tblInd` to locate the grid edge itself; subtracting
+        // the margin again would double that authored outdent. With no `tblInd`,
+        // the grid stays at the paragraph edge.
+        table.props.indent_pt.map_or(0.0, |indent| {
+            if indent < 0.0 {
+                indent
+            } else {
+                indent - leading_cell_margin
+            }
+        })
+    };
     let aligned_left = table_left
         + match table.props.alignment.unwrap_or(Jc::Start) {
             Jc::Center => free_width / 2.0,
@@ -199,9 +214,10 @@ pub(crate) fn layout_table_with_width(
                 &mut internal_links,
             );
         }
-        if row_index == 0 {
-            emit_horizontal_boundary(&horizontal_boundaries[0], 0.0, &mut items);
-        }
+        // Every row carries its already-collapsed top boundary. Adjacent rows
+        // repaint the same opaque stroke in-place, while a row that starts a
+        // new page still has the top edge Word paints for that fragment.
+        emit_horizontal_boundary(&horizontal_boundaries[row_index], 0.0, &mut items);
         emit_horizontal_boundary(&horizontal_boundaries[row_index + 1], height, &mut items);
         rows.push(TableRowLayout {
             layout: RowLayout {
@@ -288,14 +304,19 @@ fn emit_cell(cb: &CellBox, row_height: f64, items: &mut Vec<LineItem>) {
         push_border(items, cb, 3, cb.x, 0.0, cb.x, row_height); // left
         return;
     }
-    // Shading behind the whole cell box.
+    // Row coordinates run from collapsed-border centre to collapsed-border
+    // centre. Keep the fill inside the two half-strokes; otherwise the next
+    // row's fill is painted after this row's bottom boundary and hides half
+    // (or more) of a thick conditional border.
     if let Some(fill) = cb.shading {
+        let shade_top = cb.border_top.min(row_height);
+        let shade_height = (row_height - shade_top - cb.border_bottom).max(0.0);
         items.push(LineItem {
             x_pt: cb.x,
-            y_pt: 0.0,
+            y_pt: shade_top,
             item: Item::Rect {
                 w_pt: cb.width,
-                h_pt: row_height,
+                h_pt: shade_height,
                 fill: Some(fill),
                 stroke: None,
             },

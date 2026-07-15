@@ -17,7 +17,7 @@ Two contracts anchor everything (see `../hyper-agent/office-engine/README.md`):
 
 | Format | Status | Notes |
 |---|---|---|
-| DOCX | validated v1 envelope | paragraphs/runs, style cascade, lists, tables (nested/merges), headers/footers, PAGE/NUMPAGES fields, inline images, bounded body anchors, hyperlinks, sections, breaks, tracked-changes final view |
+| DOCX | validated v1 envelope | paragraphs/runs (including paragraph-mark `rPr`), style cascade, lists, tables (nested/merges), headers/footers, sequential footnotes/endnotes, cross-paragraph field results, PAGE/NUMPAGES fields, tab leaders, internal link destinations, inline images, bounded page/paragraph anchors (including multiple anchors), floating-table side wrap, continuously balanced multi-column section bands, decimal measurements, sections, breaks, tracked-changes final view |
 | PPTX | common-deck v1 | master/layout/slide inheritance, placeholder text, rectangular fills, pictures, tables; non-rectangular geometry fails closed |
 | XLSX | print v1 | number-format engine, MDW column widths, gridlines, cell fills, multi-sheet pagination |
 
@@ -29,21 +29,32 @@ JSON. DocKosha records an out-of-envelope conversion as failed and keeps the
 original asset available; it does not invoke a compatibility converter.
 
 DOCX anchor support is deliberately bounded. The engine renders top-level body
-`wp:anchor` drawings only when `simplePos` is disabled, horizontal placement is
-margin-relative (offset or left/center/right alignment), vertical placement is
-paragraph-relative (offset), and `allowOverlap`, `behindDoc`, and
-`relativeHeight` are valid. Supported wrapping is `wrapNone`,
+`wp:anchor` drawings with horizontal page, margin, or column origins and
+vertical page, margin, or paragraph origins. It supports authored offsets plus
+left/center/right and top/center/bottom alignment where the selected origin has
+a stable page box. `simplePos` must be disabled, and `allowOverlap`, `behindDoc`,
+and `relativeHeight` must be valid. Supported wrapping is `wrapNone`,
 `wrapTopAndBottom`, rectangular `wrapSquare`, and `wrapTight` with a canonical
 full-image rectangular polygon. Authored wrap distances and front/behind paint
-order are preserved. A paragraph may contain at most one anchor, and multiple
-body anchors must pass the layout overlap preflight.
+order are preserved. Multiple body anchors are supported, with at most one
+paragraph-relative anchor per paragraph; their exclusion bands must pass the
+layout overlap and minimum-text-window preflight. Text-relative floating tables
+can occupy a side band when at least 36 pt remains for text.
 
 Other anchor forms fail with the typed `anchored_drawing` code. This includes
-`simplePos=true`, unsupported reference origins or side policies, vertical
-alignment, `wrapThrough`, non-rectangular tight polygons, relative sizing,
-hidden or overlap-disabled anchors, and anchors inside frames, table cells,
+`simplePos=true`, inside/outside alignment, line/character reference origins,
+`wrapThrough`, non-rectangular tight polygons, relative sizing, anchors in
+multi-column sections, overlapping same-side exclusion bands, layouts that
+leave no text window, non-convergent page-float placement, hidden or
+overlap-disabled anchors, and anchors inside frames, table cells,
 headers/footers, text boxes, or notes. The engine never substitutes no-wrap or
 silently omits an out-of-envelope anchor.
+
+Supported conversions may report additive warning codes without changing the
+profile/convert verdict: `bullet_substituted` for a deterministic fallback
+bullet, `superscript_synthesized` for synthesized scientific-notation glyphs,
+and `floating_table_block_fallback` when a side-wrapped table leaves less than
+the 36 pt text window and is laid out as a block instead.
 
 Other representative envelope misses include:
 
@@ -106,17 +117,17 @@ files by SHA-256:
 - Word PDF: `e808b449e27436d74f81d5d5df9f9fe4daa4cc28e426ec1619bbe3fcfb55255c`
 
 The direct converter and final WASM worker produce the same deterministic PDF
-(`SHA-256 220480cc75cf26ceaa589503a7e992d90fe6ce56d29db88dc224737bdb90614d`):
+(`SHA-256 0f2dd536a567ec52716dc95d85e822f8c48cda6c7e7171cbc75cc801e3ced60c`):
 six 612×792-point pages, the same front/behind layer order as Word, and image
 bounds within 0.06 pt. Tight wrapping releases text on the first baseline below
 the authored polygon, and table flow includes the top and bottom outer-border
 half-strokes; the table edges are within 0.4 pt and the following baseline is
 within 0.3 pt of Word. Per-page 8×8 luma SSIM is 0.962378, 0.972241, 0.973315,
-0.971328, 0.927610, and 0.934960. The executable core gate is 0.90, so the
-fixture passes with a minimum SSIM of 0.927610. PDF.js extracts zero NUL or
+0.971328, 0.927677, and 0.940199. The executable core gate is 0.90, so the
+fixture passes with a minimum SSIM of 0.927677. PDF.js extracts zero NUL or
 U+FFFE characters and finds the expected headings and body phrases. The final
 package source fingerprint is
-`7991fd19db7dd2599eda779e467da1c8ba7d947145cd929abc44cae58f924f95`.
+`4125bddd5b4d632846e2c4255d7bfeeaf33414ce1a22182cc1a2cc6a53550304`.
 Focused native PDFium and package-level PDF.js regressions preserve logical
 source order, line ownership, and selection geometry for decomposed Latin,
 Arabic and Hebrew mark stacks, and wrapped right-to-left text.

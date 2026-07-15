@@ -15,7 +15,7 @@ use super::paragraph::{
 };
 use super::table::{TableLayoutOptions, layout_table, layout_table_with_width};
 use super::{
-    EncodedImage, FillRule, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned,
+    EncodedImage, FillRule, Item, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned,
     ResolvedInternalLink,
 };
 use crate::oxml::numbering::{NumFmt, format_number};
@@ -46,6 +46,8 @@ struct Unit {
     break_before: bool,
     column_break_before: bool,
     group: usize,
+    /// Original keep/widow group used when a keep-next chain exceeds one page.
+    fallback_group: usize,
     table_id: Option<usize>,
     is_header_row: bool,
     outline: Option<(String, u8)>,
@@ -141,6 +143,8 @@ struct DocumentPass {
 struct UnitBuildState {
     group_counter: usize,
     keep_next_group: Option<usize>,
+    keep_next_fallback_group: Option<usize>,
+    keep_next_chain_len: usize,
     prev_after: f64,
     table_counter: usize,
     pending_break: bool,
@@ -152,6 +156,8 @@ struct UnitBuildState {
 impl UnitBuildState {
     fn reset_for_page_transition(&mut self) {
         self.keep_next_group = None;
+        self.keep_next_fallback_group = None;
+        self.keep_next_chain_len = 0;
         self.prev_after = 0.0;
         self.pending_break = false;
         self.pending_column_break = false;
@@ -736,6 +742,8 @@ fn build_units(
         group_counter
     };
     let mut keep_next_group = state.keep_next_group;
+    let mut keep_next_fallback_group = state.keep_next_fallback_group;
+    let mut keep_next_chain_len = state.keep_next_chain_len;
     let mut prev_after = state.prev_after;
     let mut table_counter = state.table_counter;
     let mut pending_break = state.pending_break;
@@ -801,6 +809,8 @@ fn build_units(
                         &mut units,
                         &mut next_group,
                         &mut keep_next_group,
+                        &mut keep_next_fallback_group,
+                        &mut keep_next_chain_len,
                         &mut prev_after,
                         &mut pending_break,
                         &mut pending_column_break,
@@ -812,6 +822,8 @@ fn build_units(
                         &mut units,
                         &mut next_group,
                         &mut keep_next_group,
+                        &mut keep_next_fallback_group,
+                        &mut keep_next_chain_len,
                         &mut prev_after,
                         &mut pending_break,
                         &mut pending_column_break,
@@ -833,7 +845,13 @@ fn build_units(
                 let table_gap = prev_after.max(table_clearance);
                 let table_id = table_counter;
                 table_counter += 1;
-                keep_next_group = None;
+                // Word applies a preceding paragraph's keep-next property to
+                // the first table row just as it does to a following
+                // paragraph. Preserve that pending group until the first row
+                // (or the single floating-table unit) is materialized.
+                let table_keep_group = keep_next_group.take();
+                let table_fallback_group = keep_next_fallback_group.take();
+                keep_next_chain_len = 0;
                 let table_options = TableLayoutOptions {
                     rels,
                     avail_width_pt: content_w,
@@ -932,6 +950,9 @@ fn build_units(
                             warnings.push(warning);
                         }
                     }
+                    let fresh_group = next_group();
+                    let group = table_keep_group.unwrap_or(fresh_group);
+                    let fallback_group = table_fallback_group.unwrap_or(fresh_group);
                     units.push(Unit {
                         height: if wraps_text {
                             0.0
@@ -945,7 +966,8 @@ fn build_units(
                         page_floats: Vec::new(),
                         break_before: std::mem::take(&mut pending_break),
                         column_break_before: std::mem::take(&mut pending_column_break),
-                        group: next_group(),
+                        group,
+                        fallback_group,
                         table_id: None,
                         is_header_row: false,
                         outline: None,
@@ -970,6 +992,17 @@ fn build_units(
                 let mut first_row = true;
                 for (row_index, row) in table_layout.rows.into_iter().enumerate() {
                     let row_layout = row.layout;
+                    let fresh_group = next_group();
+                    let group = if first_row {
+                        table_keep_group.unwrap_or(fresh_group)
+                    } else {
+                        fresh_group
+                    };
+                    let fallback_group = if first_row {
+                        table_fallback_group.unwrap_or(fresh_group)
+                    } else {
+                        fresh_group
+                    };
                     let unit = Unit {
                         height: row_layout.height_pt,
                         gap_before: if first_row { table_gap } else { 0.0 },
@@ -979,7 +1012,8 @@ fn build_units(
                         page_floats: Vec::new(),
                         break_before: first_row && std::mem::take(&mut pending_break),
                         column_break_before: first_row && std::mem::take(&mut pending_column_break),
-                        group: next_group(),
+                        group,
+                        fallback_group,
                         table_id: Some(table_id),
                         is_header_row: row_layout.is_header,
                         outline: None,
@@ -1010,6 +1044,8 @@ fn build_units(
     }
     state.group_counter = group_counter;
     state.keep_next_group = keep_next_group;
+    state.keep_next_fallback_group = keep_next_fallback_group;
+    state.keep_next_chain_len = keep_next_chain_len;
     state.prev_after = prev_after;
     state.table_counter = table_counter;
     state.pending_break = pending_break;
@@ -1064,6 +1100,7 @@ fn clone_unit(u: &Unit) -> Unit {
         break_before: u.break_before,
         column_break_before: u.column_break_before,
         group: u.group,
+        fallback_group: u.fallback_group,
         table_id: u.table_id,
         is_header_row: u.is_header_row,
         outline: u.outline.clone(),
@@ -1119,6 +1156,8 @@ fn push_paragraph_units(
     units: &mut Vec<Unit>,
     next_group: &mut impl FnMut() -> usize,
     keep_next_group: &mut Option<usize>,
+    keep_next_fallback_group: &mut Option<usize>,
+    keep_next_chain_len: &mut usize,
     prev_after: &mut f64,
     pending_break: &mut bool,
     pending_column_break: &mut bool,
@@ -1126,10 +1165,21 @@ fn push_paragraph_units(
 ) {
     let l = layout.lines.len();
     let mut ids = paragraph_group_ids(&layout, l, next_group);
+    let mut fallback_ids = ids.clone();
+    let previous_chain_len = *keep_next_chain_len;
     if let Some(previous_group) = keep_next_group.take()
         && let Some(first_group) = ids.first().copied()
     {
         for group in &mut ids {
+            if previous_chain_len >= 2 || *group == first_group {
+                *group = previous_group;
+            }
+        }
+    }
+    if let Some(previous_group) = keep_next_fallback_group.take()
+        && let Some(first_group) = fallback_ids.first().copied()
+    {
+        for group in &mut fallback_ids {
             if *group == first_group {
                 *group = previous_group;
             }
@@ -1164,6 +1214,7 @@ fn push_paragraph_units(
             break_before,
             column_break_before,
             group,
+            fallback_group: fallback_ids[i],
             table_id: None,
             is_header_row: false,
             outline,
@@ -1185,8 +1236,12 @@ fn push_paragraph_units(
     *prev_after = layout.space_after_pt;
     if layout.keep_next {
         *keep_next_group = Some(ids[l.saturating_sub(1)]);
+        *keep_next_fallback_group = Some(fallback_ids[l.saturating_sub(1)]);
+        *keep_next_chain_len = previous_chain_len + 1;
     } else {
         *keep_next_group = None;
+        *keep_next_fallback_group = None;
+        *keep_next_chain_len = 0;
     }
 }
 
@@ -1198,6 +1253,8 @@ fn push_frame_unit(
     units: &mut Vec<Unit>,
     next_group: &mut impl FnMut() -> usize,
     keep_next_group: &mut Option<usize>,
+    keep_next_fallback_group: &mut Option<usize>,
+    keep_next_chain_len: &mut usize,
     prev_after: &mut f64,
     pending_break: &mut bool,
     pending_column_break: &mut bool,
@@ -1320,6 +1377,7 @@ fn push_frame_unit(
         break_before: std::mem::take(pending_break) || layout.page_break_before,
         column_break_before: std::mem::take(pending_column_break),
         group,
+        fallback_group: group,
         table_id: None,
         is_header_row: false,
         outline: layout
@@ -1339,6 +1397,8 @@ fn push_frame_unit(
     });
     *prev_after = layout.space_after_pt;
     *keep_next_group = layout.keep_next.then_some(group);
+    *keep_next_fallback_group = layout.keep_next.then_some(group);
+    *keep_next_chain_len = usize::from(layout.keep_next);
     Ok(())
 }
 
@@ -1419,26 +1479,36 @@ fn paginate(
 
         let mut column = 0usize;
         let mut band_top = y;
+        let mut band_leading = units.get(run_layout.unit_start).map_or(0.0, |unit| {
+            effective_gap_before(unit, band_top, geo.content_top_pt)
+        });
         let mut band_extent = y;
         let mut full_bottom =
             body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
         let should_balance = run_layout.column_widths.len() > 1
             && (run_index + 1 == section_runs.len()
                 || section_runs[run_index + 1].sect.sect_type == SectType::Continuous);
-        let (mut content_bottom, mut band_is_balanced) = column_band_bottom(
+        let mut content_bottom = column_band_bottom(
             units,
             run_layout.unit_start,
             run_layout.unit_end,
             band_top,
+            band_leading,
             full_bottom,
             run_layout.column_widths.len(),
             should_balance,
             table_headers,
+            geo.content_height_pt(),
         );
         let mut active_table: Option<usize> = None;
         let mut table_first_page: Option<usize> = None;
 
-        for unit_run in coalesce_runs(units, run_layout.unit_start, run_layout.unit_end) {
+        for unit_run in coalesce_runs(
+            units,
+            run_layout.unit_start,
+            run_layout.unit_end,
+            geo.content_height_pt(),
+        ) {
             let first_unit_index = unit_run[0];
             let mut probe_y = y;
             for &unit_index in &unit_run {
@@ -1449,47 +1519,66 @@ fn paginate(
             let fits = probe_y <= content_bottom + 0.01;
             let mut advanced = false;
 
-            if break_before && (y > band_top + 0.01 || column > 0) {
+            if break_before && !work_page_is_empty(&page) {
+                let carried_break_line = (first_unit_index == run_layout.unit_start)
+                    .then(|| units.get(first_unit_index.saturating_sub(1)))
+                    .flatten()
+                    .filter(|unit| unit.items.is_empty())
+                    .map_or(0.0, |unit| unit.height);
                 pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
-                y = geo.content_top_pt;
+                y = geo.content_top_pt + carried_break_line;
                 band_top = y;
+                band_leading = if carried_break_line > 0.0 {
+                    0.0
+                } else {
+                    effective_gap_before(&units[first_unit_index], band_top, geo.content_top_pt)
+                };
                 band_extent = y;
                 column = 0;
                 full_bottom =
                     body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
-                (content_bottom, band_is_balanced) = column_band_bottom(
+                content_bottom = column_band_bottom(
                     units,
                     first_unit_index,
                     run_layout.unit_end,
                     band_top,
+                    band_leading,
                     full_bottom,
                     run_layout.column_widths.len(),
                     should_balance,
                     table_headers,
+                    geo.content_height_pt(),
                 );
                 advanced = true;
             } else if units[first_unit_index].column_break_before || !fits {
                 if column + 1 < run_layout.column_widths.len() {
                     column += 1;
-                    y = band_top;
+                    y = band_top + band_leading;
                     advanced = true;
                 } else if y > band_top + 0.01 || column > 0 {
                     pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
                     y = geo.content_top_pt;
                     band_top = y;
+                    band_leading = effective_gap_before(
+                        &units[first_unit_index],
+                        band_top,
+                        geo.content_top_pt,
+                    );
                     band_extent = y;
                     column = 0;
                     full_bottom =
                         body_content_bottom(geo, reserved_footnote_pages.contains(&pages.len()));
-                    (content_bottom, band_is_balanced) = column_band_bottom(
+                    content_bottom = column_band_bottom(
                         units,
                         first_unit_index,
                         run_layout.unit_end,
                         band_top,
+                        band_leading,
                         full_bottom,
                         run_layout.column_widths.len(),
                         should_balance,
                         table_headers,
+                        geo.content_height_pt(),
                     );
                     advanced = true;
                 }
@@ -1535,9 +1624,6 @@ fn paginate(
             }
         }
         y = band_extent;
-        if band_is_balanced {
-            y = y.max(content_bottom.min(full_bottom));
-        }
     }
     let final_run = &run_layouts[run_layouts.len() - 1];
     let empty_final_run_starts_page = section_runs.len() > 1
@@ -1610,22 +1696,32 @@ fn column_band_bottom(
     start: usize,
     end: usize,
     band_top: f64,
+    band_leading: f64,
     full_bottom: f64,
     column_count: usize,
     should_balance: bool,
     table_headers: &HashMap<usize, Vec<Unit>>,
-) -> (f64, bool) {
+    max_atomic_height: f64,
+) -> f64 {
     let total_height: f64 = units[start..end]
         .iter()
         .map(|unit| unit.gap_before + unit.float_leading + unit.height)
         .sum();
     let available_height = (full_bottom - band_top).max(0.0);
-    let balanced_height = balanced_column_height(units, start, end, column_count, table_headers);
-    let balanced = should_balance && total_height > 0.0 && balanced_height <= available_height;
+    let balanced_height = balanced_column_height(
+        units,
+        start,
+        end,
+        column_count,
+        table_headers,
+        max_atomic_height,
+    );
+    let balanced =
+        should_balance && total_height > 0.0 && balanced_height + band_leading <= available_height;
     if balanced {
-        (band_top + balanced_height.ceil() + 0.5, true)
+        (band_top + band_leading + balanced_height.ceil() + 0.5).min(full_bottom)
     } else {
-        (full_bottom, false)
+        full_bottom
     }
 }
 
@@ -1635,8 +1731,9 @@ fn balanced_column_height(
     end: usize,
     column_count: usize,
     table_headers: &HashMap<usize, Vec<Unit>>,
+    max_atomic_height: f64,
 ) -> f64 {
-    let groups = coalesce_runs(units, start, end);
+    let groups = coalesce_runs(units, start, end, max_atomic_height);
     let group_heights = groups
         .iter()
         .map(|run| {
@@ -1811,8 +1908,14 @@ fn validate_page_bands(pages: &[WorkPage], content_width: f64) -> Result<()> {
     Ok(())
 }
 
-/// Groups consecutive units sharing a group id into atomic runs.
-fn coalesce_runs(units: &[Unit], start: usize, end: usize) -> Vec<Vec<usize>> {
+/// Groups consecutive units into keep-next runs. Chains taller than a page
+/// fall back to the original keep-lines/widow groups so content cannot overflow.
+fn coalesce_runs(
+    units: &[Unit],
+    start: usize,
+    end: usize,
+    max_atomic_height: f64,
+) -> Vec<Vec<usize>> {
     let mut runs: Vec<Vec<usize>> = Vec::new();
     for i in start..end {
         if let Some(last) = runs.last_mut()
@@ -1825,7 +1928,34 @@ fn coalesce_runs(units: &[Unit], start: usize, end: usize) -> Vec<Vec<usize>> {
             runs.push(vec![i]);
         }
     }
-    runs
+    runs.into_iter()
+        .flat_map(|run| {
+            let height = run
+                .iter()
+                .map(|index| {
+                    let unit = &units[*index];
+                    unit.gap_before + unit.float_leading + unit.height
+                })
+                .sum::<f64>();
+            if height <= max_atomic_height + 0.01 {
+                return vec![run];
+            }
+            let mut fallback_runs: Vec<Vec<usize>> = Vec::new();
+            for index in run {
+                if let Some(last) = fallback_runs.last_mut()
+                    && units[*last.last().expect("non-empty fallback run")].fallback_group
+                        == units[index].fallback_group
+                    && !units[index].break_before
+                    && !units[index].column_break_before
+                {
+                    last.push(index);
+                } else {
+                    fallback_runs.push(vec![index]);
+                }
+            }
+            fallback_runs
+        })
+        .collect()
 }
 
 fn place_unit(
@@ -1846,9 +1976,20 @@ fn place_unit(
             .unwrap_or((geo.content_left_pt + column_offset, unit_top))
     };
     for li in &unit.items {
+        let x_pt = frame_x + li.x_pt;
+        let y_pt = frame_y + li.y_pt;
+        // Each table row retains its collapsed top boundary so a row beginning
+        // a continuation page can paint that edge. On an unbroken page the
+        // preceding row already painted the identical shared boundary; avoid
+        // emitting the same opaque stroke twice.
+        if unit.table_id.is_some()
+            && is_duplicate_table_boundary(&page.page.items, x_pt, y_pt, &li.item)
+        {
+            continue;
+        }
         page.page.items.push(Positioned {
-            x_pt: frame_x + li.x_pt,
-            y_pt: frame_y + li.y_pt,
+            x_pt,
+            y_pt,
             item: li.item.clone(),
         });
     }
@@ -1885,6 +2026,39 @@ fn place_unit(
             link
         }));
     *y += unit.height;
+}
+
+fn is_duplicate_table_boundary(
+    positioned: &[Positioned],
+    x_pt: f64,
+    y_pt: f64,
+    item: &Item,
+) -> bool {
+    positioned.iter().any(|existing| {
+        if (existing.x_pt - x_pt).abs() > 0.01 || (existing.y_pt - y_pt).abs() > 0.01 {
+            return false;
+        }
+        match (&existing.item, item) {
+            (
+                Item::Line {
+                    dx_pt: existing_dx,
+                    dy_pt: existing_dy,
+                    stroke: existing_stroke,
+                },
+                Item::Line {
+                    dx_pt,
+                    dy_pt,
+                    stroke,
+                },
+            ) if dy_pt.abs() <= 0.01 && existing_dy.abs() <= 0.01 => {
+                (*existing_dx - dx_pt).abs() <= 0.01
+                    && (existing_stroke.width_pt - stroke.width_pt).abs() <= 0.01
+                    && existing_stroke.color == stroke.color
+                    && existing_stroke.dash == stroke.dash
+            }
+            _ => false,
+        }
+    })
 }
 
 fn place_logical_unit_metadata(page: &mut WorkPage, unit: &Unit, index: usize, origin_y: f64) {
@@ -2624,6 +2798,84 @@ fn resolve_internal_links(pages: &[WorkPage]) -> Vec<ResolvedInternalLink> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::paragraph::Line;
+
+    #[test]
+    fn transitive_keep_next_chain_keeps_the_complete_following_paragraph() {
+        let mut units = Vec::new();
+        let mut group = 0;
+        let mut next_group = || {
+            group += 1;
+            group
+        };
+        let mut keep_next_group = None;
+        let mut keep_next_fallback_group = None;
+        let mut keep_next_chain_len = 0;
+        let mut prev_after = 0.0;
+        let mut pending_break = false;
+        let mut pending_column_break = false;
+        let heading = ParaLayout {
+            keep_next: true,
+            keep_lines: true,
+            widow_control: true,
+            lines: vec![Line::default()],
+            ..ParaLayout::default()
+        };
+        push_paragraph_units(
+            heading,
+            &mut units,
+            &mut next_group,
+            &mut keep_next_group,
+            &mut keep_next_fallback_group,
+            &mut keep_next_chain_len,
+            &mut prev_after,
+            &mut pending_break,
+            &mut pending_column_break,
+            0,
+        );
+        let drop_cap = ParaLayout {
+            keep_next: true,
+            keep_lines: true,
+            widow_control: true,
+            lines: vec![Line::default()],
+            ..ParaLayout::default()
+        };
+        push_paragraph_units(
+            drop_cap,
+            &mut units,
+            &mut next_group,
+            &mut keep_next_group,
+            &mut keep_next_fallback_group,
+            &mut keep_next_chain_len,
+            &mut prev_after,
+            &mut pending_break,
+            &mut pending_column_break,
+            1,
+        );
+        let body = ParaLayout {
+            widow_control: true,
+            lines: (0..8).map(|_| Line::default()).collect(),
+            ..ParaLayout::default()
+        };
+        push_paragraph_units(
+            body,
+            &mut units,
+            &mut next_group,
+            &mut keep_next_group,
+            &mut keep_next_fallback_group,
+            &mut keep_next_chain_len,
+            &mut prev_after,
+            &mut pending_break,
+            &mut pending_column_break,
+            2,
+        );
+
+        assert!(
+            units.iter().all(|unit| unit.group == units[0].group),
+            "transitive keep-next must keep the complete terminal paragraph: {:?}",
+            units.iter().map(|unit| unit.group).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn repeated_table_header_clone_does_not_repeat_logical_bookmarks_or_notes() {
@@ -2637,6 +2889,7 @@ mod tests {
             break_before: false,
             column_break_before: false,
             group: 1,
+            fallback_group: 1,
             table_id: Some(1),
             is_header_row: true,
             outline: None,

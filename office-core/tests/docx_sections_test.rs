@@ -193,6 +193,25 @@ fn five_continuous_sections_stack_balanced_column_bands_on_one_page() {
 }
 
 #[test]
+fn a_mid_page_column_band_applies_its_leading_gap_to_every_column() {
+    let body = format!(
+        r#"{}<w:p><w:pPr><w:spacing w:before="200" w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>LEFT TOP</w:t></w:r></w:p>{}{}{}<w:sectPr><w:type w:val="continuous"/>{LETTER_SECTION}{TWO_COLUMNS}</w:sectPr>"#,
+        section_end("LEAD", LETTER_SECTION),
+        exact_paragraph("LEFT SECOND"),
+        exact_paragraph("RIGHT TOP"),
+        exact_paragraph("RIGHT SECOND"),
+    );
+    let laid = open_layout(&minimal_docx(&body));
+    let left_top = text_position(&laid.pages[0], "LEFT TOP");
+    let right_top = text_position(&laid.pages[0], "RIGHT TOP");
+    assert!(left_top.0 < 200.0 && right_top.0 > 200.0);
+    assert!(
+        (left_top.1 - right_top.1).abs() < 0.1,
+        "column tops must share the band's leading gap: left={left_top:?}, right={right_top:?}"
+    );
+}
+
+#[test]
 fn next_page_is_the_transition_into_the_second_run() {
     let body = format!(
         "{}{}<w:sectPr>{LETTER_SECTION}</w:sectPr>",
@@ -426,6 +445,40 @@ fn balanced_columns_keep_keep_next_groups_atomic() {
 }
 
 #[test]
+fn oversized_keep_next_chain_splits_at_widow_groups() {
+    let words = "bounded keep chain content ".repeat(120);
+    let body = format!(
+        r#"<w:p><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>OVERSIZED KEEP HEADING</w:t></w:r></w:p><w:p><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>OVERSIZED KEEP MARK</w:t></w:r></w:p><w:p><w:pPr><w:widowControl/><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>{words}</w:t></w:r></w:p><w:sectPr>{SHORT_SECTION}</w:sectPr>"#
+    );
+    let laid = open_layout(&minimal_docx(&body));
+
+    assert!(
+        laid.pages.len() >= 2,
+        "a keep-next chain taller than a page must split safely"
+    );
+    assert!(page_text(&laid.pages[0]).contains("OVERSIZED KEEP HEADING"));
+}
+
+#[test]
+fn keep_next_heading_stays_with_the_first_table_row() {
+    let body = format!(
+        r#"<w:p><w:pPr><w:spacing w:line="3600" w:lineRule="exact"/></w:pPr><w:r><w:t>LEAD</w:t></w:r></w:p>
+<w:p><w:pPr><w:keepNext/><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>TABLE HEADING</w:t></w:r></w:p>
+<w:tbl><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>FIRST TABLE ROW</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:sectPr>{SHORT_SECTION}</w:sectPr>"#
+    );
+    let laid = open_layout(&minimal_docx(&body));
+    assert_eq!(laid.pages.len(), 2);
+    assert!(!page_text(&laid.pages[0]).contains("TABLE HEADING"));
+    let second = page_text(&laid.pages[1]);
+    assert!(second.contains("TABLE HEADING"), "second page: {second:?}");
+    assert!(
+        second.contains("FIRST TABLE ROW"),
+        "second page: {second:?}"
+    );
+}
+
+#[test]
 fn later_next_page_geometry_drives_page_float_reflow_bounds() {
     let first = section_end("SHORT FIRST", SHORT_SECTION);
     let anchor = page_float(3_175_000, 5_080_000);
@@ -650,6 +703,60 @@ fn tall_two_column_run_continues_at_next_page_top_and_balances_last_band() {
 }
 
 #[test]
+fn explicit_page_break_at_a_continuous_run_boundary_starts_a_new_page() {
+    let body = format!(
+        r#"<w:p><w:pPr><w:sectPr>{SHORT_SECTION}</w:sectPr></w:pPr><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:pPr><w:spacing w:before="200" w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>AFTER RUN BOUNDARY</w:t></w:r></w:p><w:sectPr><w:type w:val="continuous"/>{SHORT_SECTION}{TWO_COLUMNS}</w:sectPr>"#
+    );
+
+    let laid = open_layout(&minimal_docx(&body));
+    assert_eq!(laid.pages.len(), 2);
+    assert!(page_text(&laid.pages[0]).is_empty());
+    assert!(page_text(&laid.pages[1]).contains("AFTER RUN BOUNDARY"));
+    assert!(
+        text_position(&laid.pages[1], "AFTER RUN BOUNDARY").1 > 55.0,
+        "the section-ending break must preserve the following paragraph's page-top leading"
+    );
+}
+
+#[test]
+fn negative_decimal_table_indent_positions_the_grid_edge_from_the_margin() {
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="2160.0" w:type="dxa"/><w:tblInd w:w="-108.0" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="8"/><w:left w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/><w:right w:val="single" w:sz="8"/></w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2160.0"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>INDENTED</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr>{LETTER_SECTION}</w:sectPr>"#
+    );
+    let laid = open_layout(&minimal_docx(&body));
+    let left_edge = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| {
+            matches!(positioned.item, Item::Line { .. }).then_some(positioned.x_pt)
+        })
+        .fold(f64::INFINITY, f64::min);
+
+    assert!(
+        (left_edge - 84.6).abs() < 0.1,
+        "-108 twips must put the table grid at 90 - 5.4 = 84.6pt, got {left_edge}"
+    );
+}
+
+#[test]
+fn table_cell_wrapping_prefers_a_hyphen_before_emergency_glyph_breaks() {
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>application/vnd.openxmlformats-officedocument.spreadsheetml.sheet</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr>{LETTER_SECTION}</w:sectPr>"#
+    );
+    let laid = open_layout(&minimal_docx(&body));
+    let line_count = laid.pages[0]
+        .items
+        .iter()
+        .filter(|positioned| matches!(positioned.item, Item::Glyphs(_)))
+        .count();
+
+    assert_eq!(
+        line_count, 4,
+        "Word breaks after the hyphen before emergency-breaking the remaining token"
+    );
+}
+
+#[test]
 fn continuous_geometry_change_has_profile_convert_parity() {
     let body = format!(
         "{}{}<w:sectPr><w:type w:val=\"continuous\"/><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr>",
@@ -684,4 +791,7 @@ fn real_gdocs_columns_fixture_profiles_and_converts_to_three_pages() {
     let converted =
         convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()).expect("convert fixture");
     assert_eq!(converted.page_count, 3);
+    let laid = open_layout(&bytes);
+    assert!(!page_text(&laid.pages[1]).contains("Part 3: Two-Column Reference"));
+    assert!(page_text(&laid.pages[2]).contains("Part 3: Two-Column Reference"));
 }

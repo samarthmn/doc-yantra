@@ -335,6 +335,7 @@ struct RunStyle {
     face: FaceId,
     size_pt: f64,
     color: Rgba,
+    background: Option<Rgba>,
     underline: Option<Decor>,
     strike: Option<Decor>,
     rise_pt: f64,
@@ -414,6 +415,17 @@ impl Atom {
     }
     fn is_space(&self) -> bool {
         matches!(self, Atom::Glyph { is_space: true, .. })
+    }
+
+    fn allows_line_break_after(&self) -> bool {
+        self.is_space()
+            || matches!(
+                self,
+                Atom::Glyph {
+                    ch: '-' | '\u{2010}',
+                    ..
+                }
+            )
     }
 }
 
@@ -574,7 +586,10 @@ fn layout_paragraph_with_wrap_context(
     let first_line = eff_para.indent.first_line_pt.unwrap_or(0.0);
     let first_offset = (first_line - hanging).max(-left);
 
-    let content_first = (avail_width_pt - left - right - first_offset).max(1.0);
+    // A hanging indent moves the list label into the area before `left`; it
+    // does not grant the first text line extra room at the right edge. Only a
+    // positive first-line indent reduces that line's usable text width.
+    let content_first = (avail_width_pt - left - right - first_offset.max(0.0)).max(1.0);
     let content_rest = (avail_width_pt - left - right).max(1.0);
     let atoms = flatten(doc, warnings, para, rels, field_ctx, note_sequence)?;
     let text: String = atoms
@@ -792,11 +807,18 @@ fn layout_paragraph_with_wrap_context(
             })
             .map(|band| band.inset_pt)
             .fold(scheduled.right_inset_pt, f64::max);
-        let left_shift = (left_inset - base_x).max(0.0);
+        let positive_first = if line_index == 0 {
+            first_offset.max(0.0)
+        } else {
+            0.0
+        };
+        let normal_left = base_x - positive_first;
+        let constrained_x = normal_left.max(left_inset) + positive_first;
+        let left_shift = (constrained_x - base_x).max(0.0);
         let right_cut = (right_inset - right).max(0.0);
         (
             (base_width - left_shift - right_cut).max(1.0),
-            base_x + left_shift,
+            constrained_x,
             scheduled.clearance_pt,
         )
     };
@@ -899,6 +921,25 @@ fn layout_paragraph_with_wrap_context(
             && let Some(last_line) = lines.last_mut()
         {
             last_line.height_pt += reserve_bottom - occupied;
+        }
+    }
+
+    if let Some(fill) = eff_para.shading.map(Rgba::opaque) {
+        let width = (avail_width_pt - left - right_indent).max(0.0);
+        for line in &mut lines {
+            line.items.insert(
+                0,
+                LineItem {
+                    x_pt: left,
+                    y_pt: 0.0,
+                    item: Item::Rect {
+                        w_pt: width,
+                        h_pt: line.height_pt,
+                        fill: Some(fill),
+                        stroke: None,
+                    },
+                },
+            );
         }
     }
 
@@ -1284,6 +1325,7 @@ fn flatten_run(
         face,
         size_pt: size,
         color: resolve_color(&eff),
+        background: eff.highlight.or(eff.shading).map(Rgba::opaque),
         underline: matches!(eff.underline, Some(u) if u != UnderlineKind::None).then(|| Decor {
             thickness_pt: u_thick.abs().max(0.4),
             y_offset_pt: (-u_pos).max(0.5),
@@ -1946,6 +1988,7 @@ fn fallback_style(fonts: &FontDb, face: FaceId, base: &RunStyle) -> Rc<RunStyle>
         face,
         size_pt: base.size_pt,
         color: base.color,
+        background: base.background,
         underline: base.underline,
         strike: base.strike,
         rise_pt: base.rise_pt,
@@ -2002,7 +2045,11 @@ fn break_lines(
                 continue;
             }
             Atom::Tab { .. } => {
-                width_used = next_tab_stop(width_used, default_tab, tab_stops);
+                let following = (i + 1..atoms.len())
+                    .take_while(|index| !matches!(atoms[*index], Atom::Tab { .. } | Atom::Break(_)))
+                    .collect::<Vec<_>>();
+                width_used =
+                    tab_placement(atoms, &following, width_used, default_tab, tab_stops).aligned;
                 current.push(i);
                 last_break = Some(current.len());
                 i += 1;
@@ -2014,6 +2061,7 @@ fn break_lines(
         let adv = atoms[i].advance();
         let avail = width_of(lines.len());
         let is_space = atoms[i].is_space();
+        let allows_break_after = atoms[i].allows_line_break_after();
 
         if width_used + adv > avail && !current.is_empty() && !is_space {
             if let Some(bp) = last_break.filter(|&bp| bp < current.len()) {
@@ -2032,7 +2080,7 @@ fn break_lines(
 
         current.push(i);
         width_used += adv;
-        if is_space {
+        if allows_break_after {
             last_break = Some(current.len());
         }
         i += 1;
@@ -2052,6 +2100,53 @@ fn next_tab_stop(x: f64, default_tab: f64, tab_stops: &[TabStop]) -> f64 {
     }
     let n = (x / default_tab).floor() + 1.0;
     n * default_tab
+}
+
+#[derive(Clone, Copy)]
+struct TabPlacement {
+    target: f64,
+    aligned: f64,
+    stop_index: Option<usize>,
+}
+
+/// Resolve a tab's start position using the complete following segment. Line
+/// breaking and paint placement must share this calculation: right, center,
+/// and decimal tabs align the segment around the stop rather than consuming a
+/// left-tab advance and then adding the segment width again.
+fn tab_placement(
+    atoms: &[Atom],
+    following: &[usize],
+    current_x: f64,
+    default_tab: f64,
+    tab_stops: &[TabStop],
+) -> TabPlacement {
+    let target = next_tab_stop(current_x, default_tab, tab_stops);
+    let stop_index = tab_stops
+        .iter()
+        .position(|stop| stop.alignment != TabAlign::Clear && (stop.pos_pt - target).abs() < 0.01);
+    let segment = following
+        .iter()
+        .copied()
+        .take_while(|index| !matches!(atoms[*index], Atom::Tab { .. } | Atom::Break(_)))
+        .collect::<Vec<_>>();
+    let segment_width: f64 = segment.iter().map(|index| atoms[*index].advance()).sum();
+    let decimal_width: f64 = segment
+        .iter()
+        .take_while(|index| !matches!(atoms[**index], Atom::Glyph { ch: '.', .. }))
+        .map(|index| atoms[*index].advance())
+        .sum();
+    let aligned = match stop_index.map(|index| tab_stops[index].alignment) {
+        Some(TabAlign::Center) => target - segment_width / 2.0,
+        Some(TabAlign::Right) => target - segment_width,
+        Some(TabAlign::Decimal) => target - decimal_width,
+        _ => target,
+    }
+    .max(current_x);
+    TabPlacement {
+        target,
+        aligned,
+        stop_index,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2223,15 +2318,30 @@ fn place_line(
     let mut link_start: Option<(f64, RunLink)> = None;
     let mut internal_links = Vec::new();
     let mut line_semantics: BTreeMap<usize, Vec<(f64, AtomSemanticCluster)>> = BTreeMap::new();
+    let mut background_items = Vec::new();
 
     let flush = |pending: &mut Vec<PlacedGlyph>,
                  pending_style: &mut Option<Rc<RunStyle>>,
                  pending_order: &mut Option<usize>,
                  pending_x: f64,
+                 background_items: &mut Vec<LineItem>,
                  text_items: &mut Vec<(usize, u8, LineItem)>| {
         if let Some(st) = pending_style.take()
             && !pending.is_empty()
         {
+            if let Some(fill) = st.background {
+                let width = pending.iter().map(|glyph| glyph.advance_pt).sum();
+                background_items.push(LineItem {
+                    x_pt: pending_x,
+                    y_pt: (ascent - st.ascent_pt - st.rise_pt).max(0.0),
+                    item: Item::Rect {
+                        w_pt: width,
+                        h_pt: st.line_height_pt.min(height),
+                        fill: Some(fill),
+                        stroke: None,
+                    },
+                });
+            }
             text_items.push((
                 pending_order.take().unwrap_or(usize::MAX),
                 1,
@@ -2267,6 +2377,7 @@ fn place_line(
                         &mut pending_style,
                         &mut pending_order,
                         pending_x,
+                        &mut background_items,
                         &mut text_items,
                     );
                     pending_style = Some(Rc::clone(style));
@@ -2311,32 +2422,15 @@ fn place_line(
                     &mut pending_style,
                     &mut pending_order,
                     pending_x,
+                    &mut background_items,
                     &mut text_items,
                 );
                 let relative_x = x - base_x;
-                let target = next_tab_stop(relative_x, default_tab, tab_stops);
-                let stop = tab_stops.iter().find(|stop| {
-                    stop.alignment != TabAlign::Clear && (stop.pos_pt - target).abs() < 0.01
-                });
                 let following = &indices[visual_position + 1..];
-                let segment: Vec<_> = following
-                    .iter()
-                    .copied()
-                    .take_while(|index| !matches!(atoms[*index], Atom::Tab { .. } | Atom::Break(_)))
-                    .collect();
-                let segment_width: f64 = segment.iter().map(|index| atoms[*index].advance()).sum();
-                let decimal_width: f64 = segment
-                    .iter()
-                    .take_while(|index| !matches!(atoms[**index], Atom::Glyph { ch: '.', .. }))
-                    .map(|index| atoms[*index].advance())
-                    .sum();
-                let aligned = match stop.map(|stop| stop.alignment).unwrap_or(TabAlign::Left) {
-                    TabAlign::Center => target - segment_width / 2.0,
-                    TabAlign::Right => target - segment_width,
-                    TabAlign::Decimal => target - decimal_width,
-                    _ => target,
-                }
-                .max(relative_x);
+                let placement = tab_placement(atoms, following, relative_x, default_tab, tab_stops);
+                let target = placement.target;
+                let aligned = placement.aligned;
+                let stop = placement.stop_index.map(|index| &tab_stops[index]);
                 if let Some(stop) = stop {
                     if stop.alignment == TabAlign::Bar {
                         items.push(LineItem {
@@ -2396,6 +2490,7 @@ fn place_line(
                     &mut pending_style,
                     &mut pending_order,
                     pending_x,
+                    &mut background_items,
                     &mut text_items,
                 );
                 update_link(
@@ -2429,6 +2524,7 @@ fn place_line(
                     &mut pending_style,
                     &mut pending_order,
                     pending_x,
+                    &mut background_items,
                     &mut text_items,
                 );
                 let (origin_x, origin_y) = anchor
@@ -2481,6 +2577,7 @@ fn place_line(
         &mut pending_style,
         &mut pending_order,
         pending_x,
+        &mut background_items,
         &mut text_items,
     );
     update_link(
@@ -2523,6 +2620,8 @@ fn place_line(
         ));
     }
     text_items.sort_by_key(|(order, priority, _)| (*order, *priority));
+    background_items.append(&mut items);
+    items = background_items;
     items.extend(text_items.into_iter().map(|(_, _, item)| item));
 
     let page_break_after = indices

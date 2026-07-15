@@ -1,0 +1,9 @@
+title = "Google Docs export: TOC field, internal links, page-anchored images, floating table, footnotes"
+tier = "core"
+ssim_threshold = 0.90
+max_page_count_delta = 0
+word_version = "Microsoft Word (online export service)"
+ground_truth_exported_at = "2026-07-14"
+input_sha256 = "1e68879b7bd7b161ed320fa5f203cfe3709cb300a4c4476941bc2ea60b47ca91"
+golden_sha256 = "8b42f556073a3a2e251664abc6a65ac247975124072d658a2920406bee2533c1"
+notes = "Public sample document (Sample-Files.com); ground truth exported via Microsoft Word for the web (word.cloud.microsoft) on 2026-07-14 — bare 'Microsoft Word' Creator metadata, no version stamped (see T5.2). Committed-only case (not in corpus.rs cases()); freezes the docx-universal-fidelity envelope expansion. Expected 10 pages."

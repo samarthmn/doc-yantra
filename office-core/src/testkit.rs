@@ -550,6 +550,14 @@ pub fn floating_table_distances_docx(
     ))
 }
 
+/// Left-hugging floating table followed by a first-line-indented paragraph.
+pub fn floating_table_first_line_indent_docx() -> Vec<u8> {
+    let filler = "first-line indent beside a floating table ".repeat(30);
+    minimal_docx(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/><w:tblpPr w:vertAnchor="text" w:horzAnchor="text" w:tblpX="0" w:tblpY="0" w:rightFromText="180"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>Indent table</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:pPr><w:ind w:firstLine="432"/></w:pPr><w:r><w:t>{filler}</w:t></w:r></w:p>"#
+    ))
+}
+
 /// One left page band with less than 36pt remaining; no opposite band exists.
 pub fn single_narrow_page_float_docx() -> Vec<u8> {
     let anchor = picture_anchor(
