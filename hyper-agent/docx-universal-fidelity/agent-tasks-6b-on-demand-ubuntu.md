@@ -28,11 +28,24 @@ Fetch bytes directly from the pinned jsDelivr path (don't rely on the API redire
 
 ## §B The single local fallback family (owner delegated the choice)
 
-**Noto Sans — Regular, Bold, Italic, Bold Italic (static TTFs, SIL OFL 1.1).** Chosen for: the widest Latin/Greek/Cyrillic + common-symbol coverage per byte (bullets U+2022/U+25CF/U+25AA matter for Google-Docs lists — pin a coverage test at implementation), neutral metrics, unambiguous licensing, and its universal role as fallback-of-last-resort.
+**Noto Sans (SIL OFL 1.1) — STAGED AND VERIFIED 2026-07-15 (agent-run checks).** The set is six faces on DocKosha's first-party static storage:
 
-- Ships as **worker/deployment assets** (wasm-worker asset dir or the DocKosha deploy) — never inside the office wasm/npm (the 6A fontless gate enforces this), boot-registered at worker start.
-- Used **only** on resolution failure: provider unreachable + cold cache, `not_found` family with no alias, or validation rejection. Compatible mode then converts with Noto Sans and emits `font_fallback_used` (visible warning, never labeled exact). **Strict mode never touches it** — it fails with `FontUnresolved` as specced.
-- It replaces the earlier "boot-register the OFL trio" plan: Carlito/Caladea/Arimo/etc. are now *fetched* like everything else (first use per worker warms the persistent cache, after which they behave as local). 6A §C2 is amended accordingly.
+```
+https://public.dockosha.com/fallback-fonts/NotoSans/Regular.ttf          Noto Sans Regular      v2.015  614 KB
+https://public.dockosha.com/fallback-fonts/NotoSans/Bold.ttf             Noto Sans Bold         v2.015  616 KB
+https://public.dockosha.com/fallback-fonts/NotoSans/Italic.ttf           Noto Sans Italic       v2.015  627 KB
+https://public.dockosha.com/fallback-fonts/NotoSans/BoldItalic.ttf       Noto Sans Bold Italic  v2.015  629 KB
+https://public.dockosha.com/fallback-fonts/NotoSans/NotoSansSymbols-Regular.ttf   v2.003  180 KB
+https://public.dockosha.com/fallback-fonts/NotoSans/NotoSansSymbols2-Regular.ttf  v2.008  1.2 MB
+(+ OFL.txt alongside)
+```
+
+Why six: modern Noto Sans (v2.015) **excludes the symbol blocks** — verified missing from the text faces: ● U+25CF (Google Docs' default bullet), ▪ ■ ○ ♦ ► →. The two Symbols companions restore them; **union coverage across all six faces verified for the 23-codepoint probe set** (bullets, dashes, quotes, superscripts U+2070/2079/207B, Cyrillic/Greek, and even the exotic ⮚ U+2B9A arrowhead bullet — natively in Symbols 2). The engine's `coverage_fallbacks` already ranks `noto*` families as its second fallback class, so symbol codepoints route to these faces with no engine change. Implementation still pins this coverage as a test.
+
+- **Delivery:** the worker fetches the six files from this first-party origin at **boot** (not per conversion), registers them, and persists them in the font cache — after one successful boot the net is fully offline. First-party origin = no third-party call, availability coupled to DocKosha's own storage.
+- Used **only** on resolution failure: provider unreachable + cold cache, `not_found` family with no alias, or validation rejection. Compatible mode then converts with Noto and emits `font_fallback_used` (visible warning, never labeled exact). **Strict mode never touches it** — it fails with `FontUnresolved` as specced.
+- Belt-and-braces: extend the bullet-substitution ladder with terminal entries `● ■ ○ ▪ → •` so even a symbols-face fetch failure degrades to a visible bullet rather than failing closed.
+- This replaces the earlier "boot-register the OFL trio" plan: Carlito/Caladea/Arimo/etc. are *fetched* like everything else (first use per worker warms the persistent cache, after which they behave as local). 6A §C2 is amended accordingly.
 
 ## §C The pipeline (unchanged mechanics, restated with this provider)
 
