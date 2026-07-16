@@ -226,4 +226,52 @@ Per failing case:
 - **Result before ink weighting:** SSIM is 0.999422 (`table-fixed`), 0.999697
   (`table-merges`), and 0.999851 (`table-nested`), with exact page counts.
 
+### 2026-07-16 — legacy-raster plus vector-geometry release gates
+
+- **Metric split:** the frozen legacy/unweighted SSIM thresholds remain the
+  raster release gate. Ink-weighted SSIM remains a report/heatmap diagnostic.
+  Every scored page additionally gates on paired border-segment and text-run
+  origin geometry.
+- **Default bounds:** median `0.4pt`, p95 `1.5pt`, unmatched `5%`. The median
+  bound is intentionally below the harness's 144dpi one-pixel displacement
+  (`0.5pt`), so the translated-page adversarial fixture fails with
+  `page 1 borders median dx +0.50pt`. The pre-AutoFit table fixture also fails;
+  an identical-wrap page rendered with a substituted font passes.
+- **Producer canonicalization:** adjacent collinear PDF fragments merge across
+  stroke joins, sub-point cap/join stubs are discarded, and structural borders
+  are retained only when both PDF producers expose a comparable segment. This
+  removes representation-only differences such as Word emitting a calendar's
+  horizontal cell rules as paths while representing its vertical rules through
+  another drawing mechanism. It applies no page, table, or text offset.
+- **Corpus calibration:** 14 of 18 cases clear the strict defaults. Four frozen
+  cases contain pre-existing, visually accepted geometry outside those defaults,
+  so their manifests record explicit bounds rather than weakening the global
+  adversarial gate:
+
+  | Case | Observed max median | Observed max p95 | Observed max unmatched | Manifest median / p95 |
+  |---|---:|---:|---:|---:|
+  | `complex` | 5.02pt | 10.06pt | 2.33% | 5.1pt / 10.2pt |
+  | `fonts-substitution` | 1.11pt | 1.11pt | 0% | 1.2pt / 1.5pt |
+  | `gdocs-anchors-toc` | 1.95pt | 18.06pt | 1.89% | 2.0pt / 18.2pt |
+  | `gdocs-tables-longdoc` | 0.58pt | 0.75pt | 0% | 0.6pt / 1.5pt |
+
+  The large `complex` value is the accepted 10pt top-and-bottom image-wrap
+  spacing difference on page 5. The large anchors p95 is localized to the
+  already-frozen multi-level-list indent differences on page 10. Keeping these
+  exceptions in the case manifests makes that debt reviewable and prevents it
+  from relaxing geometry checks on the other 14 cases.
+- **D2 page-5 diagnostics:** `gdocs-tables-longdoc` page 5 contains only ASCII
+  text, so Fontsource `latin` coverage was complete; no cross-subset glyph
+  fallback was involved. The vector probe pairs all 35/35 text origins with
+  `dx = +0.05pt`, `dy` between about `-0.02pt` and `+0.72pt`, and zero
+  unmatched runs. Its 0.918135 legacy score therefore returns with the bundled
+  Liberation application assets; the lower Arimo/Tinos/Cousine raster result
+  was an outline/hinting-family change, not a coverage or wrap failure.
+- **Release verification:** a fresh-cache full DOCX run scored all 18 cases
+  with zero core failures and 5/5 extended cases passing. A second run with the
+  warmed cache and all HTTP(S) proxies forced to an unreachable local endpoint
+  produced the same result. The two `report.json` documents compare equal as
+  parsed JSON, proving that the locked cache is sufficient and the scored
+  output is identical offline.
+
 _Invariant going forward: a calibration commit gets a log entry here._

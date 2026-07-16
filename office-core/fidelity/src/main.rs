@@ -86,6 +86,24 @@ struct Manifest {
     required_fonts: Vec<String>,
     #[serde(default)]
     expected_fonts: Vec<String>,
+    #[serde(default = "default_geometry_median_pt")]
+    geometry_median_pt: f64,
+    #[serde(default = "default_geometry_p95_pt")]
+    geometry_p95_pt: f64,
+    #[serde(default = "default_geometry_max_unmatched_pct")]
+    geometry_max_unmatched_pct: f64,
+}
+
+fn default_geometry_median_pt() -> f64 {
+    probe::GeometryLimits::default().median_pt
+}
+
+fn default_geometry_p95_pt() -> f64 {
+    probe::GeometryLimits::default().p95_pt
+}
+
+fn default_geometry_max_unmatched_pct() -> f64 {
+    probe::GeometryLimits::default().max_unmatched_pct
 }
 
 #[derive(Serialize)]
@@ -101,6 +119,9 @@ struct CaseReport {
     truth_fonts: Vec<String>,
     our_pages: u32,
     truth_pages: u32,
+    geometry_limits: probe::GeometryLimits,
+    geometry: Vec<probe::GeometryPageMetrics>,
+    geometry_pass: bool,
     pass: bool,
     note: String,
 }
@@ -484,6 +505,26 @@ fn validate_manifest_contract(path: &Path, manifest: &Manifest) -> Result<()> {
     if manifest.max_page_count_delta > 1 {
         anyhow::bail!("{} allows an excessive page-count delta", path.display());
     }
+    if !manifest.geometry_median_pt.is_finite()
+        || manifest.geometry_median_pt <= 0.0
+        || manifest.geometry_median_pt > 10.0
+    {
+        anyhow::bail!("{} has an invalid geometry_median_pt", path.display());
+    }
+    if !manifest.geometry_p95_pt.is_finite()
+        || manifest.geometry_p95_pt < manifest.geometry_median_pt
+        || manifest.geometry_p95_pt > 20.0
+    {
+        anyhow::bail!("{} has an invalid geometry_p95_pt", path.display());
+    }
+    if !manifest.geometry_max_unmatched_pct.is_finite()
+        || !(0.0..=100.0).contains(&manifest.geometry_max_unmatched_pct)
+    {
+        anyhow::bail!(
+            "{} has an invalid geometry_max_unmatched_pct",
+            path.display()
+        );
+    }
     if manifest.expected_fonts.is_empty() {
         anyhow::bail!("{} must declare expected_fonts", path.display());
     }
@@ -649,6 +690,10 @@ fn enforce_thresholds(reports: &[CaseReport], require_both_tiers: bool) -> Resul
     Ok(())
 }
 
+fn case_passes_release_gates(legacy_ssim: f64, legacy_threshold: f64, geometry_pass: bool) -> bool {
+    legacy_ssim >= legacy_threshold && geometry_pass
+}
+
 #[cfg(test)]
 mod gate_tests {
     use super::*;
@@ -666,6 +711,9 @@ mod gate_tests {
             truth_fonts: Vec::new(),
             our_pages: 1,
             truth_pages: 1,
+            geometry_limits: probe::GeometryLimits::default(),
+            geometry: Vec::new(),
+            geometry_pass: pass,
             pass,
             note: String::new(),
         }
@@ -698,8 +746,38 @@ mod gate_tests {
         let json = serde_json::to_string(&reports).expect("serialize report");
         assert!(json.contains("\"ssim_unweighted\""), "{json}");
         let rendered = html(&reports, Path::new("tmp/nonexistent-fidelity-report"));
-        assert!(rendered.contains("unweighted"), "{rendered}");
+        assert!(rendered.contains("legacy gate"), "{rendered}");
+        assert!(rendered.contains("weighted diagnostic"), "{rendered}");
+        assert!(rendered.contains("geometry gate"), "{rendered}");
         assert!(rendered.contains("Quoted &quot;Font&quot;"), "{rendered}");
+    }
+
+    #[test]
+    fn release_pass_uses_legacy_ssim_and_geometry_only() {
+        assert!(case_passes_release_gates(0.95, 0.90, true));
+        assert!(!case_passes_release_gates(0.89, 0.90, true));
+        assert!(!case_passes_release_gates(0.95, 0.90, false));
+    }
+
+    #[test]
+    fn manifest_geometry_bounds_are_additive_defaults() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+title = "Geometry defaults"
+tier = "core"
+ssim_threshold = 0.90
+word_version = "Microsoft Word 2021"
+ground_truth_exported_at = "2026-07-16"
+input_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+golden_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+expected_fonts = ["Carlito"]
+"#,
+        )
+        .expect("parse manifest defaults");
+
+        assert_eq!(manifest.geometry_median_pt, 0.4);
+        assert_eq!(manifest.geometry_p95_pt, 1.5);
+        assert_eq!(manifest.geometry_max_unmatched_pct, 5.0);
     }
 
     #[test]
@@ -889,6 +967,9 @@ golden_sha256 = "000000000000000000000000000000000000000000000000000000000000000
             golden_sha256: "0".repeat(64),
             required_fonts: Vec::new(),
             expected_fonts: Vec::new(),
+            geometry_median_pt: default_geometry_median_pt(),
+            geometry_p95_pt: default_geometry_p95_pt(),
+            geometry_max_unmatched_pct: default_geometry_max_unmatched_pct(),
         };
         validate_provenance(
             Path::new("creator-fallback/manifest.toml"),
@@ -921,6 +1002,13 @@ fn score_case(
         truth_fonts: Vec::new(),
         our_pages: 0,
         truth_pages: 0,
+        geometry_limits: probe::GeometryLimits {
+            median_pt: manifest.geometry_median_pt,
+            p95_pt: manifest.geometry_p95_pt,
+            max_unmatched_pct: manifest.geometry_max_unmatched_pct,
+        },
+        geometry: Vec::new(),
+        geometry_pass: false,
         pass: false,
         note: String::new(),
     };
@@ -981,6 +1069,8 @@ fn score_case(
     let mut min_ssim = f64::INFINITY;
     let mut min_ssim_unweighted = f64::INFINITY;
     let mut max_diff = 0.0_f64;
+    let mut geometry_pass = true;
+    let mut geometry_violation = None;
     for i in 0..n {
         let (Ok(ours), Ok(truth)) = (raster(&our_pdf, i), raster(truth_pdf, i)) else {
             report.note = format!("rasterization failed on page {i}");
@@ -1007,6 +1097,21 @@ fn score_case(
         save_png(pages_dir, name, i, "heat", &s.heatmap_png);
         write_page_png(pages_dir, name, i, "ours", &ours);
         write_page_png(pages_dir, name, i, "truth", &truth);
+        let probe_report = match probe::compare_page(&our_pdf, truth_pdf, i + 1) {
+            Ok(report) => report,
+            Err(error) => {
+                report.note = format!("page {} vector geometry probe failed: {error:#}", i + 1);
+                return report;
+            }
+        };
+        let geometry = probe::geometry_metrics(&probe_report, &report.geometry_limits);
+        if !geometry.pass {
+            geometry_pass = false;
+            if geometry_violation.is_none() {
+                geometry_violation = geometry.violation.clone();
+            }
+        }
+        report.geometry.push(geometry);
     }
     report.ssim = if min_ssim.is_finite() { min_ssim } else { 0.0 };
     report.ssim_unweighted = if min_ssim_unweighted.is_finite() {
@@ -1015,7 +1120,20 @@ fn score_case(
         0.0
     };
     report.diff_pct = max_diff;
-    report.pass = report.ssim >= manifest.ssim_threshold;
+    report.geometry_pass = geometry_pass;
+    report.pass = case_passes_release_gates(
+        report.ssim_unweighted,
+        manifest.ssim_threshold,
+        report.geometry_pass,
+    );
+    if let Some(violation) = geometry_violation {
+        report.note = violation;
+    } else if report.ssim_unweighted < manifest.ssim_threshold {
+        report.note = format!(
+            "legacy SSIM {:.4} below frozen threshold {:.4}",
+            report.ssim_unweighted, manifest.ssim_threshold
+        );
+    }
     report
 }
 
@@ -1119,15 +1237,18 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
     } else {
         0.0
     };
-    let min_ssim = reports.iter().map(|r| r.ssim).fold(f64::INFINITY, f64::min);
+    let min_ssim = reports
+        .iter()
+        .map(|r| r.ssim_unweighted)
+        .fold(f64::INFINITY, f64::min);
     let min_ssim = if min_ssim.is_finite() { min_ssim } else { 0.0 };
 
     // Failures first, then worst SSIM first, so problems are up top.
     let mut ordered: Vec<&CaseReport> = reports.iter().collect();
     ordered.sort_by(|a, b| {
         a.pass.cmp(&b.pass).then(
-            a.ssim
-                .partial_cmp(&b.ssim)
+            a.ssim_unweighted
+                .partial_cmp(&b.ssim_unweighted)
                 .unwrap_or(std::cmp::Ordering::Equal),
         )
     });
@@ -1140,6 +1261,12 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
     let mut cards = String::new();
     for r in &ordered {
         let cls = if r.pass { "pass" } else { "fail" };
+        let legacy_cls = if r.ssim_unweighted >= r.threshold {
+            "pass"
+        } else {
+            "fail"
+        };
+        let geometry_cls = if r.geometry_pass { "pass" } else { "fail" };
         let badge = if r.pass { "PASS" } else { "FAIL" };
         let note = if r.note.is_empty() {
             String::new()
@@ -1175,9 +1302,10 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
                <span class=\"badge {cls}\">{badge}</span>\
                <span class=\"name\">{name}</span><span class=\"chip\">{tier}</span>\
                <span class=\"spacer\"></span><div class=\"metrics\">\
-                 <div class=\"metric\"><span class=\"l\">ssim (ink)</span><span class=\"v {cls}\">{ssim:.4}</span></div>\
-                 <div class=\"metric\"><span class=\"l\">unweighted</span><span class=\"v\">{ssim_unweighted:.4}</span></div>\
-                 <div class=\"bar\"><div class=\"fill {cls}\" style=\"width:{fill:.1}%\"></div>\
+                 <div class=\"metric\"><span class=\"l\">legacy gate</span><span class=\"v {legacy_cls}\">{ssim_unweighted:.4}</span></div>\
+                 <div class=\"metric\"><span class=\"l\">weighted diagnostic</span><span class=\"v\">{ssim:.4}</span></div>\
+                 <div class=\"metric\"><span class=\"l\">geometry gate</span><span class=\"v {geometry_cls}\">{geometry_status}</span></div>\
+                 <div class=\"bar\"><div class=\"fill {legacy_cls}\" style=\"width:{fill:.1}%\"></div>\
                    <div class=\"tick\" style=\"left:{tick:.1}%\"></div></div>\
                  <div class=\"metric\"><span class=\"l\">threshold</span><span class=\"v\">{thr:.2}</span></div>\
                  <div class=\"metric\"><span class=\"l\">diff</span><span class=\"v\">{diff:.2}%</span></div>\
@@ -1188,13 +1316,16 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
             tier = esc(&r.tier),
             ssim = r.ssim,
             ssim_unweighted = r.ssim_unweighted,
+            legacy_cls = legacy_cls,
+            geometry_cls = geometry_cls,
+            geometry_status = if r.geometry_pass { "pass" } else { "fail" },
             thr = r.threshold,
             diff = r.diff_pct * 100.0,
             op = r.our_pages,
             tp = r.truth_pages,
             fonts = font_summary,
             truth_fonts = truth_font_summary,
-            fill = scale(r.ssim),
+            fill = scale(r.ssim_unweighted),
             tick = scale(r.threshold),
         ));
     }
@@ -1205,14 +1336,14 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
          <title>office-core fidelity report</title><style>{REPORT_CSS}</style></head><body><div class=\"wrap\">\
          <h1>office-core fidelity report</h1>\
-         <p class=\"sub\">DOCX layout fidelity vs Word ground truths · ours | ground truth | heatmap (red = SSIM &lt; 0.9)</p>\
+         <p class=\"sub\">DOCX layout fidelity vs Word ground truths · frozen legacy SSIM + vector geometry gate · ink-weighted SSIM and heatmaps are diagnostic</p>\
          <div class=\"summary\">\
            <div class=\"tile\"><div class=\"n\">{total}</div><div class=\"l\">cases</div></div>\
            <div class=\"tile good\"><div class=\"n\">{passing}</div><div class=\"l\">passing</div></div>\
            <div class=\"{fail_tile}\"><div class=\"n\">{failing}</div><div class=\"l\">failing</div></div>\
            <div class=\"tile\"><div class=\"n\">{core_fail}</div><div class=\"l\">core failures</div></div>\
            <div class=\"tile\"><div class=\"n\">{pass_rate:.0}%</div><div class=\"l\">pass rate</div></div>\
-           <div class=\"tile\"><div class=\"n\">{min_ssim:.3}</div><div class=\"l\">min ssim</div></div>\
+           <div class=\"tile\"><div class=\"n\">{min_ssim:.3}</div><div class=\"l\">min legacy ssim</div></div>\
          </div>{cards}</div></body></html>"
     )
 }

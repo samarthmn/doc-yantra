@@ -39,12 +39,32 @@ function bytesResponse(bytes, status = 200, headers = {}) {
 }
 
 describe('FontsourceProvider', () => {
+  test('requested family precedes font-table alternatives', () => {
+    const provider = new FontsourceProvider();
+    assert.equal(provider.mappedId(request({ altFamilies: ['Calibri'] })), 'ubuntu');
+  });
+
+  test('maps Georgia to Gelasio and classifies otherwise unknown families', () => {
+    const provider = new FontsourceProvider();
+    assert.equal(provider.mappedId(request({ family: 'Georgia' })), 'gelasio');
+    assert.equal(provider.mappedId(request({
+      family: 'Unknown Serif', familyClass: 'roman',
+    })), 'tinos');
+    assert.equal(provider.mappedId(request({
+      family: 'Unknown Sans', panose: '020B0604020202020204',
+    })), 'arimo');
+    assert.equal(provider.mappedId(request({
+      family: 'Unknown Mono', pitch: 'fixed',
+    })), 'cousine');
+  });
+
   test('maps every compatibility family to a fetchable allowlisted id', () => {
     for (const [family, id] of [
       ['Calibri', 'carlito'], ['Cambria', 'caladea'], ['Arial', 'arimo'],
       ['Helvetica', 'arimo'], ['Segoe UI', 'arimo'], ['Liberation Sans', 'arimo'],
       ['Times New Roman', 'tinos'], ['Liberation Serif', 'tinos'],
       ['Courier New', 'cousine'], ['Liberation Mono', 'cousine'],
+      ['Georgia', 'gelasio'],
     ]) {
       assert.equal(DEFAULT_FONTSOURCE_ALIASES[family.toLowerCase()], id);
     }

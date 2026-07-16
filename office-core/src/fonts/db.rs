@@ -3,6 +3,7 @@
 //! embedded fonts.
 
 use crate::{OfficeError, Result};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,6 +55,7 @@ impl Face {
 pub struct FontDb {
     faces: Vec<Face>,
     resolution_mode: crate::ResolutionMode,
+    classing_hints: BTreeMap<String, super::requests::FontClassing>,
 }
 
 impl FontDb {
@@ -252,6 +254,17 @@ impl FontDb {
     /// The active exact-only or compatible family resolution policy.
     pub fn resolution_mode(&self) -> crate::ResolutionMode {
         self.resolution_mode
+    }
+
+    /// Records a text-free `fontTable.xml` classing hint for one authored name.
+    pub(crate) fn set_classing_hint(&mut self, family: &str, hint: super::requests::FontClassing) {
+        self.classing_hints
+            .insert(family.trim().to_ascii_lowercase(), hint);
+    }
+
+    /// Returns the metadata-derived classing hint for an authored family.
+    pub(crate) fn classing_hint(&self, family: &str) -> Option<&super::requests::FontClassing> {
+        self.classing_hints.get(&family.trim().to_ascii_lowercase())
     }
 
     /// Marks registered faces whose complete artifacts were digest-pinned by

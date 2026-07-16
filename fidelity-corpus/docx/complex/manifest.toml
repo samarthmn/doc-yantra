@@ -1,6 +1,8 @@
 title = "Complex DOCX image wrapping and table layout"
 tier = "core"
 ssim_threshold = 0.90
+geometry_median_pt = 5.1
+geometry_p95_pt = 10.2
 expected_fonts = ["Carlito"]
 max_page_count_delta = 0
 word_version = "Microsoft Word LTSC"

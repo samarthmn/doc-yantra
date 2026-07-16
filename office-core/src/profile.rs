@@ -850,6 +850,9 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
     crate::register_runtime_fonts(&mut db)?;
     db.mark_hash_pinned(&opts.font_hash_pins);
     crate::layout::assemble::register_embedded_fonts(&pkg, &mut db);
+    if let Some(font_table) = &font_table {
+        font_table.install_classing_hints(&mut db);
+    }
 
     let mut profile = DocProfile::new("docx");
     let mut collector = Collector::new(&styles, &numbering, &theme, &diagrams, &db);

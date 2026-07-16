@@ -1,8 +1,10 @@
 title = "Google Docs export: TOC field, internal links, page-anchored images, floating table, footnotes"
 tier = "core"
 ssim_threshold = 0.90
+geometry_median_pt = 2.0
+geometry_p95_pt = 18.2
 required_fonts = ["Ubuntu", "Ubuntu Mono"]
-expected_fonts = ["Carlito", "Cousine", "Ubuntu", "Ubuntu Mono"]
+expected_fonts = ["Carlito", "Liberation Mono", "Ubuntu", "Ubuntu Mono"]
 max_page_count_delta = 0
 word_version = "Microsoft Word (online export service)"
 ground_truth_exported_at = "2026-07-14"

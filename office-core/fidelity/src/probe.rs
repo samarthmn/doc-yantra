@@ -131,6 +131,52 @@ pub struct ProbeReport {
     pub duplicates: Vec<DuplicateRecord>,
 }
 
+/// Per-case vector-geometry bounds. Values are in PDF points except the
+/// unmatched fraction, which is a percentage.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct GeometryLimits {
+    pub median_pt: f64,
+    pub p95_pt: f64,
+    pub max_unmatched_pct: f64,
+}
+
+impl Default for GeometryLimits {
+    fn default() -> Self {
+        Self {
+            // Tuned below the 0.5pt displacement produced by a one-pixel shift
+            // at the harness's 144dpi raster scale.
+            median_pt: 0.4,
+            p95_pt: 1.5,
+            max_unmatched_pct: 5.0,
+        }
+    }
+}
+
+/// Aggregate paired-origin statistics for one vector element class.
+#[derive(Debug, Clone, Serialize)]
+pub struct GeometryClassMetrics {
+    pub element_class: String,
+    pub ours: usize,
+    pub truth: usize,
+    pub matched: usize,
+    pub median_dx: f64,
+    pub median_dy: f64,
+    pub p95_dx: f64,
+    pub p95_dy: f64,
+    pub unmatched_pct: f64,
+}
+
+/// Blocking vector-geometry result for one page.
+#[derive(Debug, Clone, Serialize)]
+pub struct GeometryPageMetrics {
+    pub page: u32,
+    pub borders: GeometryClassMetrics,
+    pub text: GeometryClassMetrics,
+    pub pass: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violation: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct Point {
     x: f64,
@@ -358,8 +404,16 @@ impl ExtractedPage {
 }
 
 pub fn compare_page(ours: &[u8], truth: &[u8], page: u32) -> Result<ProbeReport> {
-    let ours = extract_page(ours, page).context("extract our PDF geometry")?;
-    let truth = extract_page(truth, page).context("extract truth PDF geometry")?;
+    let mut ours = extract_page(ours, page).context("extract our PDF geometry")?;
+    let mut truth = extract_page(truth, page).context("extract truth PDF geometry")?;
+    canonicalize_page(&mut ours);
+    canonicalize_page(&mut truth);
+    let (ours_borders, truth_borders) = canonicalize_comparable_borders(
+        std::mem::take(&mut ours.borders),
+        std::mem::take(&mut truth.borders),
+    );
+    ours.borders = ours_borders;
+    truth.borders = truth_borders;
     // PDF producers commonly round A4's fractional point dimensions to two
     // nearby decimal representations. This tolerance is far below the probe's
     // geometry matching thresholds but avoids rejecting equivalent page boxes.
@@ -447,6 +501,116 @@ pub fn compare_page(ours: &[u8], truth: &[u8], page: u32) -> Result<ProbeReport>
             elements,
         },
         duplicates: duplicate_segments(&ours.borders),
+    })
+}
+
+/// Reduces a detailed probe report to the blocking per-page geometry metrics.
+pub fn geometry_metrics(report: &ProbeReport, limits: &GeometryLimits) -> GeometryPageMetrics {
+    let borders = class_metrics(report, false);
+    let text = class_metrics(report, true);
+    let violation = class_violation(report.page, &borders, limits)
+        .or_else(|| class_violation(report.page, &text, limits));
+    GeometryPageMetrics {
+        page: report.page,
+        borders,
+        text,
+        pass: violation.is_none(),
+        violation,
+    }
+}
+
+fn class_metrics(report: &ProbeReport, text: bool) -> GeometryClassMetrics {
+    let matches = report
+        .matches
+        .iter()
+        .filter(|record| (record.class == "text") == text)
+        .collect::<Vec<_>>();
+    let (ours, truth, unmatched) = if text {
+        (
+            report.ours_text,
+            report.truth_text,
+            report.unmatched.ours_text.len() + report.unmatched.truth_text.len(),
+        )
+    } else {
+        (
+            report.ours_borders,
+            report.truth_borders,
+            report.unmatched.ours_borders.len() + report.unmatched.truth_borders.len(),
+        )
+    };
+    let dx = matches.iter().map(|record| record.dx).collect::<Vec<_>>();
+    let dy = matches.iter().map(|record| record.dy).collect::<Vec<_>>();
+    let total = ours + truth;
+    GeometryClassMetrics {
+        element_class: if text { "text" } else { "borders" }.into(),
+        ours,
+        truth,
+        matched: matches.len(),
+        median_dx: round2(median(&dx)),
+        median_dy: round2(median(&dy)),
+        p95_dx: round2(percentile95_abs(&dx)),
+        p95_dy: round2(percentile95_abs(&dy)),
+        unmatched_pct: if total == 0 {
+            0.0
+        } else {
+            round2(unmatched as f64 / total as f64 * 100.0)
+        },
+    }
+}
+
+fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut values = values.to_vec();
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
+}
+
+fn percentile95_abs(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut values = values.iter().map(|value| value.abs()).collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
+    let rank = ((values.len() as f64 * 0.95).ceil() as usize).clamp(1, values.len());
+    values[rank - 1]
+}
+
+fn class_violation(
+    page: u32,
+    metrics: &GeometryClassMetrics,
+    limits: &GeometryLimits,
+) -> Option<String> {
+    for (label, value) in [
+        ("median dx", metrics.median_dx),
+        ("median dy", metrics.median_dy),
+    ] {
+        if value.abs() > limits.median_pt {
+            return Some(format!(
+                "page {page} {} {label} {value:+.2}pt",
+                metrics.element_class
+            ));
+        }
+    }
+    for (label, value) in [("p95 dx", metrics.p95_dx), ("p95 dy", metrics.p95_dy)] {
+        if value > limits.p95_pt {
+            return Some(format!(
+                "page {page} {} {label} {value:.2}pt",
+                metrics.element_class
+            ));
+        }
+    }
+    (metrics.unmatched_pct > limits.max_unmatched_pct).then(|| {
+        format!(
+            "page {page} {} unmatched {:.2}%",
+            metrics.element_class, metrics.unmatched_pct
+        )
     })
 }
 
@@ -547,6 +711,210 @@ fn extract_page(bytes: &[u8], page_number: u32) -> Result<ExtractedPage> {
         &mut extracted,
     )?;
     Ok(extracted)
+}
+
+fn canonicalize_page(page: &mut ExtractedPage) {
+    page.text = canonicalize_text_runs(std::mem::take(&mut page.text));
+}
+
+/// Keeps only border geometry both PDF producers expose comparably. Word can
+/// encode one side of an L-shaped table-cell decoration as a stroked path and
+/// the other side as a glyph/clip, while pdf-writer emits both as paths. A
+/// segment is comparable when it has a same-orientation shadow in the other
+/// PDF and at least one side exposes it as part of an orthogonal structure.
+fn canonicalize_comparable_borders(
+    ours: Vec<BorderElement>,
+    truth: Vec<BorderElement>,
+) -> (Vec<BorderElement>, Vec<BorderElement>) {
+    let ours = canonicalize_borders(ours);
+    let truth = canonicalize_borders(truth);
+    let ours_structural = structural_border_flags(&ours);
+    let truth_structural = structural_border_flags(&truth);
+
+    let keep_ours = ours
+        .iter()
+        .enumerate()
+        .map(|(index, border)| {
+            comparable_border_is_visible(border, ours_structural[index], &truth, &truth_structural)
+        })
+        .collect::<Vec<_>>();
+    let keep_truth = truth
+        .iter()
+        .enumerate()
+        .map(|(index, border)| {
+            comparable_border_is_visible(border, truth_structural[index], &ours, &ours_structural)
+        })
+        .collect::<Vec<_>>();
+    let ours = ours
+        .into_iter()
+        .zip(keep_ours)
+        .filter(|(_, keep)| *keep)
+        .map(|(border, _)| border)
+        .collect();
+    let truth = truth
+        .into_iter()
+        .zip(keep_truth)
+        .filter(|(_, keep)| *keep)
+        .map(|(border, _)| border)
+        .collect();
+    (ours, truth)
+}
+
+fn comparable_border_is_visible(
+    border: &BorderElement,
+    structurally_visible: bool,
+    peers: &[BorderElement],
+    peer_structural: &[bool],
+) -> bool {
+    let shadows = peers
+        .iter()
+        .enumerate()
+        .filter(|(_, peer)| border_has_comparable_shadow(border, peer))
+        .collect::<Vec<_>>();
+    !shadows.is_empty()
+        && (structurally_visible
+            || shadows
+                .iter()
+                .any(|(peer_index, _)| peer_structural[*peer_index]))
+}
+
+fn border_has_comparable_shadow(first: &BorderElement, second: &BorderElement) -> bool {
+    // Wide enough to retain deliberately displaced table edges as unmatched
+    // failures, while requiring overlap on the segment's projected extent so
+    // unrelated structures elsewhere on the page cannot make it comparable.
+    const SHADOW_AXIS_TOLERANCE_PT: f64 = 12.0;
+    const EXTENT_TOLERANCE_PT: f64 = 1.5;
+    first.orientation == second.orientation
+        && (border_axis(first) - border_axis(second)).abs() <= SHADOW_AXIS_TOLERANCE_PT
+        && border_start(first) <= border_end(second) + EXTENT_TOLERANCE_PT
+        && border_start(second) <= border_end(first) + EXTENT_TOLERANCE_PT
+}
+
+fn canonicalize_borders(mut borders: Vec<BorderElement>) -> Vec<BorderElement> {
+    // Word and pdf-writer may quantize the same table edge to coordinates that
+    // differ by a few hundredths of a point. Keep this below the 0.10pt
+    // near-duplicate threshold so a genuinely doubled rule remains visible.
+    const AXIS_TOLERANCE_PT: f64 = 0.09;
+    const JOIN_TOLERANCE_PT: f64 = 3.0;
+    borders.sort_by(|left, right| {
+        left.orientation
+            .cmp(&right.orientation)
+            .then(border_axis(left).total_cmp(&border_axis(right)))
+            .then(border_start(left).total_cmp(&border_start(right)))
+            .then(border_end(left).total_cmp(&border_end(right)))
+    });
+    let mut canonical: Vec<BorderElement> = Vec::new();
+    for border in borders {
+        if let Some(previous) = canonical.last_mut()
+            && previous.orientation == border.orientation
+            && (border_axis(previous) - border_axis(&border)).abs() <= AXIS_TOLERANCE_PT
+            && border_start(&border) <= border_end(previous) + JOIN_TOLERANCE_PT
+        {
+            let start = border_start(previous).min(border_start(&border));
+            let end = border_end(previous).max(border_end(&border));
+            previous.width = previous.width.max(border.width);
+            match previous.orientation {
+                Orientation::Horizontal => {
+                    previous.x0 = start;
+                    previous.x1 = end;
+                }
+                Orientation::Vertical => {
+                    previous.y0 = start;
+                    previous.y1 = end;
+                }
+            }
+            continue;
+        }
+        canonical.push(border);
+    }
+    canonical
+}
+
+#[cfg(test)]
+fn structural_borders(borders: Vec<BorderElement>) -> Vec<BorderElement> {
+    let structural = structural_border_flags(&borders);
+    borders
+        .into_iter()
+        .zip(structural)
+        .filter(|(_, structural)| *structural)
+        .map(|(border, _)| border)
+        .collect()
+}
+
+fn structural_border_flags(borders: &[BorderElement]) -> Vec<bool> {
+    const INTERSECTION_TOLERANCE_PT: f64 = 1.5;
+    // Sub-point stubs are stroke-join/cap artifacts emitted by some PDF
+    // producers, not independently meaningful table geometry.
+    const MIN_STRUCTURAL_LENGTH_PT: f64 = 1.0;
+    borders
+        .iter()
+        .enumerate()
+        .map(|(index, border)| {
+            border.length() >= MIN_STRUCTURAL_LENGTH_PT
+                && borders.iter().enumerate().any(|(other_index, other)| {
+                    index != other_index
+                        && border.orientation != other.orientation
+                        && borders_intersect(border, other, INTERSECTION_TOLERANCE_PT)
+                })
+        })
+        .collect()
+}
+
+fn borders_intersect(first: &BorderElement, second: &BorderElement, tolerance: f64) -> bool {
+    let (horizontal, vertical) = match first.orientation {
+        Orientation::Horizontal => (first, second),
+        Orientation::Vertical => (second, first),
+    };
+    let x = border_axis(vertical);
+    let y = border_axis(horizontal);
+    x + tolerance >= border_start(horizontal)
+        && x <= border_end(horizontal) + tolerance
+        && y + tolerance >= border_start(vertical)
+        && y <= border_end(vertical) + tolerance
+}
+
+fn border_axis(border: &BorderElement) -> f64 {
+    match border.orientation {
+        Orientation::Horizontal => (border.y0 + border.y1) / 2.0,
+        Orientation::Vertical => (border.x0 + border.x1) / 2.0,
+    }
+}
+
+fn border_start(border: &BorderElement) -> f64 {
+    match border.orientation {
+        Orientation::Horizontal => border.x0.min(border.x1),
+        Orientation::Vertical => border.y0.min(border.y1),
+    }
+}
+
+fn border_end(border: &BorderElement) -> f64 {
+    match border.orientation {
+        Orientation::Horizontal => border.x0.max(border.x1),
+        Orientation::Vertical => border.y0.max(border.y1),
+    }
+}
+
+fn canonicalize_text_runs(text: Vec<TextOrigin>) -> Vec<TextOrigin> {
+    const BASELINE_TOLERANCE_PT: f64 = 0.25;
+    const BACKTRACK_TOLERANCE_PT: f64 = 0.25;
+    let mut runs: Vec<TextOrigin> = Vec::new();
+    for origin in text {
+        if origin
+            .first_character
+            .as_deref()
+            .is_some_and(|value| value.chars().all(char::is_whitespace))
+        {
+            continue;
+        }
+        if let Some(previous) = runs.last()
+            && (previous.y - origin.y).abs() <= BASELINE_TOLERANCE_PT
+            && origin.x + BACKTRACK_TOLERANCE_PT >= previous.x
+        {
+            continue;
+        }
+        runs.push(origin);
+    }
+    runs
 }
 
 fn interpret(
@@ -1149,22 +1517,90 @@ fn pair_text(
         }
         used_ours.insert(ours_index);
         used_truth.insert(truth_index);
-        let ours_element = &ours[ours_index];
-        let truth_element = &truth[truth_index];
-        matches.push(MatchRecord {
-            class: "text".to_string(),
+        matches.push(text_match_record(
+            ours,
+            truth,
             ours_index,
             truth_index,
-            dx: round2(truth_element.x - ours_element.x),
-            dy: round2(truth_element.y - ours_element.y),
-            y_band: y_band((ours_element.y + truth_element.y) / 2.0, page_height),
-            first_character: ours_element
-                .first_character
-                .clone()
-                .or_else(|| truth_element.first_character.clone()),
-        });
+            page_height,
+        ));
+    }
+
+    // Equal canonical run counts are strong evidence that both producers
+    // exposed the same lines, even when a real layout displacement exceeds the
+    // ordinary 3pt local-pair radius. Preserve the already reliable local
+    // matches, then pair only the remaining runs by global spatial proximity.
+    // This reports the actual large delta instead of disguising it as missing
+    // content, while avoiding content-stream index assumptions.
+    if ours.len() == truth.len() && used_ours.len() < ours.len() {
+        let mut remaining = Vec::new();
+        for (ours_index, ours_element) in ours.iter().enumerate() {
+            if used_ours.contains(&ours_index) {
+                continue;
+            }
+            for (truth_index, truth_element) in truth.iter().enumerate() {
+                if used_truth.contains(&truth_index) {
+                    continue;
+                }
+                let distance = Point {
+                    x: ours_element.x,
+                    y: ours_element.y,
+                }
+                .distance(Point {
+                    x: truth_element.x,
+                    y: truth_element.y,
+                });
+                let character_penalty = if ours_element.first_character.is_some()
+                    && truth_element.first_character.is_some()
+                    && ours_element.first_character != truth_element.first_character
+                {
+                    12.0
+                } else {
+                    0.0
+                };
+                remaining.push((distance + character_penalty, ours_index, truth_index));
+            }
+        }
+        remaining.sort_by(|left, right| left.0.total_cmp(&right.0));
+        for (_, ours_index, truth_index) in remaining {
+            if used_ours.contains(&ours_index) || used_truth.contains(&truth_index) {
+                continue;
+            }
+            used_ours.insert(ours_index);
+            used_truth.insert(truth_index);
+            matches.push(text_match_record(
+                ours,
+                truth,
+                ours_index,
+                truth_index,
+                page_height,
+            ));
+        }
     }
     (matches, used_ours, used_truth)
+}
+
+fn text_match_record(
+    ours: &[TextOrigin],
+    truth: &[TextOrigin],
+    ours_index: usize,
+    truth_index: usize,
+    page_height: f64,
+) -> MatchRecord {
+    let ours_element = &ours[ours_index];
+    let truth_element = &truth[truth_index];
+    MatchRecord {
+        class: "text".to_string(),
+        ours_index,
+        truth_index,
+        dx: round2(truth_element.x - ours_element.x),
+        dy: round2(truth_element.y - ours_element.y),
+        y_band: y_band((ours_element.y + truth_element.y) / 2.0, page_height),
+        first_character: ours_element
+            .first_character
+            .clone()
+            .or_else(|| truth_element.first_character.clone()),
+    }
 }
 
 fn duplicate_segments(borders: &[BorderElement]) -> Vec<DuplicateRecord> {
@@ -1335,11 +1771,22 @@ mod tests {
     use lopdf::{Document, Object, Stream, dictionary};
 
     fn probe_pdf(dx: f32, dy: f32, duplicate: bool) -> Vec<u8> {
+        probe_pdf_parts(dx, dy, dx, dy, duplicate, "Helvetica")
+    }
+
+    fn probe_pdf_parts(
+        border_dx: f32,
+        border_dy: f32,
+        text_dx: f32,
+        text_dy: f32,
+        duplicate: bool,
+        base_font: &str,
+    ) -> Vec<u8> {
         let mut doc = Document::with_version("1.7");
         let font_id = doc.add_object(dictionary! {
             "Type" => "Font",
             "Subtype" => "Type1",
-            "BaseFont" => "Helvetica",
+            "BaseFont" => Object::Name(base_font.as_bytes().to_vec()),
             "Encoding" => "WinAnsiEncoding",
         });
         let resources_id = doc.add_object(dictionary! {
@@ -1349,11 +1796,21 @@ mod tests {
             Operation::new("q", vec![]),
             Operation::new(
                 "cm",
-                vec![1.into(), 0.into(), 0.into(), 1.into(), dx.into(), dy.into()],
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    border_dx.into(),
+                    border_dy.into(),
+                ],
             ),
             Operation::new("w", vec![0.5.into()]),
             Operation::new("m", vec![10.into(), 80.into()]),
             Operation::new("l", vec![90.into(), 80.into()]),
+            Operation::new("S", vec![]),
+            Operation::new("m", vec![10.into(), 40.into()]),
+            Operation::new("l", vec![10.into(), 80.into()]),
             Operation::new("S", vec![]),
             Operation::new("re", vec![20.into(), 40.into(), 60.into(), 1.into()]),
             Operation::new("f", vec![]),
@@ -1366,6 +1823,19 @@ mod tests {
             ]);
         }
         operations.extend([
+            Operation::new("Q", vec![]),
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    text_dx.into(),
+                    text_dy.into(),
+                ],
+            ),
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 10.into()]),
             Operation::new(
@@ -1540,6 +2010,104 @@ end"#
     }
 
     #[test]
+    fn one_pixel_translation_fails_the_default_geometry_gate() {
+        let ours = probe_pdf(0.0, 0.0, false);
+        let translated = probe_pdf(0.5, 0.0, false);
+        let report = compare_page(&ours, &translated, 1).expect("compare translated page");
+        let metrics = geometry_metrics(&report, &GeometryLimits::default());
+
+        assert!(!metrics.pass);
+        assert_eq!(
+            metrics.violation.as_deref(),
+            Some("page 1 borders median dx +0.50pt")
+        );
+    }
+
+    #[test]
+    fn pre_autofit_table_border_displacement_fails_geometry() {
+        let ours = probe_pdf_parts(0.0, 0.0, 0.0, 0.0, false, "Helvetica");
+        let pre_autofit = probe_pdf_parts(2.0, 0.0, 0.0, 0.0, false, "Helvetica");
+        let report = compare_page(&ours, &pre_autofit, 1).expect("compare table geometry");
+        let metrics = geometry_metrics(&report, &GeometryLimits::default());
+
+        assert!(!metrics.pass);
+        assert!(
+            metrics
+                .violation
+                .as_deref()
+                .is_some_and(|note| { note.contains("page 1 borders") && note.contains("dx") })
+        );
+    }
+
+    #[test]
+    fn substituted_font_with_identical_origins_passes_geometry() {
+        let ours = probe_pdf_parts(0.0, 0.0, 0.0, 0.0, false, "Helvetica");
+        let substituted = probe_pdf_parts(0.0, 0.0, 0.0, 0.0, false, "Times-Roman");
+        let report = compare_page(&ours, &substituted, 1).expect("compare substituted page");
+        let metrics = geometry_metrics(&report, &GeometryLimits::default());
+
+        assert!(metrics.pass, "{:?}", metrics.violation);
+    }
+
+    #[test]
+    fn equal_text_run_sequences_report_large_deltas_instead_of_unmatched_runs() {
+        let ours = probe_pdf_parts(0.0, 0.0, 0.0, 0.0, false, "Helvetica");
+        let shifted = probe_pdf_parts(0.0, 0.0, 10.0, 0.0, false, "Helvetica");
+        let report = compare_page(&ours, &shifted, 1).expect("compare shifted text");
+        let text_matches = report
+            .matches
+            .iter()
+            .filter(|record| record.class == "text")
+            .collect::<Vec<_>>();
+
+        assert_eq!(text_matches.len(), 1);
+        assert_eq!(text_matches[0].dx, 10.0);
+        assert!(report.unmatched.ours_text.is_empty());
+        assert!(report.unmatched.truth_text.is_empty());
+    }
+
+    #[test]
+    fn equal_text_counts_do_not_force_content_stream_index_pairing() {
+        let ours = vec![
+            TextOrigin {
+                x: 10.0,
+                y: 20.0,
+                font_size: 10.0,
+                first_character: Some("A".into()),
+            },
+            TextOrigin {
+                x: 90.0,
+                y: 80.0,
+                font_size: 10.0,
+                first_character: Some("B".into()),
+            },
+        ];
+        let truth = vec![
+            TextOrigin {
+                x: 90.0,
+                y: 80.0,
+                font_size: 10.0,
+                first_character: Some("B".into()),
+            },
+            TextOrigin {
+                x: 10.0,
+                y: 20.0,
+                font_size: 10.0,
+                first_character: Some("A".into()),
+            },
+        ];
+
+        let (matches, _, _) = pair_text(&ours, &truth, 100.0);
+
+        assert_eq!(matches.len(), 2);
+        assert!(
+            matches
+                .iter()
+                .all(|record| record.dx == 0.0 && record.dy == 0.0)
+        );
+    }
+
+    #[test]
     fn detects_near_coincident_duplicate_segments() {
         let ours = probe_pdf(0.0, 0.0, true);
         let truth = probe_pdf(0.0, 0.0, false);
@@ -1549,6 +2117,102 @@ end"#
         assert_eq!(report.unmatched.elements.len(), 1);
         assert_eq!(report.unmatched.elements[0].class, "h_border");
         assert_eq!(report.unmatched.elements[0].x0, 10.0);
+    }
+
+    #[test]
+    fn canonicalizes_sub_tenth_point_pdf_axis_rounding() {
+        let borders = canonicalize_borders(vec![
+            BorderElement {
+                orientation: Orientation::Horizontal,
+                x0: 10.0,
+                y0: 20.0,
+                x1: 30.0,
+                y1: 20.0,
+                width: 0.5,
+            },
+            BorderElement {
+                orientation: Orientation::Horizontal,
+                x0: 30.0,
+                y0: 20.08,
+                x1: 40.0,
+                y1: 20.08,
+                width: 0.5,
+            },
+        ]);
+
+        assert_eq!(borders.len(), 1);
+        assert_eq!(borders[0].x0, 10.0);
+        assert_eq!(borders[0].x1, 40.0);
+    }
+
+    #[test]
+    fn structural_borders_ignore_subpoint_stroke_join_fragments() {
+        let borders = structural_borders(vec![
+            BorderElement {
+                orientation: Orientation::Horizontal,
+                x0: 10.0,
+                y0: 20.0,
+                x1: 30.0,
+                y1: 20.0,
+                width: 0.5,
+            },
+            BorderElement {
+                orientation: Orientation::Vertical,
+                x0: 20.0,
+                y0: 10.0,
+                x1: 20.0,
+                y1: 30.0,
+                width: 0.5,
+            },
+            BorderElement {
+                orientation: Orientation::Horizontal,
+                x0: 19.64,
+                y0: 30.0,
+                x1: 20.36,
+                y1: 30.0,
+                width: 0.5,
+            },
+        ]);
+
+        assert_eq!(borders.len(), 2);
+        assert!(borders.iter().all(|border| border.length() >= 1.0));
+    }
+
+    #[test]
+    fn comparable_borders_tolerate_producer_specific_l_shaped_strokes() {
+        let ours = vec![
+            BorderElement {
+                orientation: Orientation::Horizontal,
+                x0: 10.0,
+                y0: 20.0,
+                x1: 30.0,
+                y1: 20.0,
+                width: 0.5,
+            },
+            BorderElement {
+                orientation: Orientation::Vertical,
+                x0: 30.0,
+                y0: 20.0,
+                x1: 30.0,
+                y1: 40.0,
+                width: 0.5,
+            },
+        ];
+        let truth = vec![BorderElement {
+            orientation: Orientation::Horizontal,
+            x0: 10.5,
+            y0: 20.2,
+            x1: 30.5,
+            y1: 20.2,
+            width: 0.5,
+        }];
+
+        let (ours, truth) = canonicalize_comparable_borders(ours, truth);
+
+        assert_eq!(ours.len(), 1);
+        assert_eq!(truth.len(), 1);
+        assert_eq!(ours[0].orientation, Orientation::Horizontal);
+        assert_eq!(truth[0].orientation, Orientation::Horizontal);
     }
 
     #[test]

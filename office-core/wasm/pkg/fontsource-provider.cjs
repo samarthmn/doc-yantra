@@ -28,6 +28,7 @@ const DEFAULT_ALIASES = Object.freeze({
   cousine: 'cousine',
   'courier new': 'cousine',
   courier: 'cousine',
+  georgia: 'gelasio',
   helvetica: 'arimo',
   'liberation mono': 'cousine',
   'liberation sans': 'arimo',
@@ -45,6 +46,7 @@ const DEFAULT_CATALOG = Object.freeze({
   caladea: catalog('Caladea', ['latin', 'latin-ext'], [400, 700], 'v8', 'latest'),
   carlito: catalog('Carlito', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'latin', 'latin-ext', 'vietnamese'], [400, 700], 'v4', 'latest'),
   cousine: catalog('Cousine', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'hebrew', 'latin', 'latin-ext', 'vietnamese'], [400, 700], 'v30', 'latest'),
+  gelasio: catalog('Gelasio', ['latin', 'latin-ext', 'vietnamese'], [400, 500, 600, 700], 'v14', '5.2.8'),
   tinos: catalog('Tinos', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'hebrew', 'latin', 'latin-ext', 'vietnamese'], [400, 700], 'v26', 'latest'),
   ubuntu: catalog('Ubuntu', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'latin', 'latin-ext'], [300, 400, 500, 700], 'v21', '5.2.8', 'UFL-1.0', '0.83'),
   'ubuntu-mono': catalog('Ubuntu Mono', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'latin', 'latin-ext'], [400, 700], 'v19', '5.2.8', 'UFL-1.0', 'Version 0.80'),
@@ -74,6 +76,24 @@ function catalog(
 
 function normalizeFamily(value) {
   return String(value).trim().toLocaleLowerCase('en-US').replace(/\s+/g, ' ');
+}
+
+function metadataClassId(request) {
+  const pitch = String(request.pitch ?? '').trim().toLocaleLowerCase('en-US');
+  if (['fixed', 'fixedpitch', 'mono', 'monospace', 'monospaced'].includes(pitch)) return 'cousine';
+  const panose = String(request.panose ?? '').trim();
+  if (/^[0-9a-fA-F]{20}$/.test(panose)) {
+    const bytes = Array.from({ length: 10 }, (_, index) =>
+      Number.parseInt(panose.slice(index * 2, index * 2 + 2), 16));
+    if (bytes[3] === 9) return 'cousine';
+    if (bytes[0] === 2 && bytes[1] >= 2 && bytes[1] <= 10) return 'tinos';
+    if (bytes[0] === 2 && bytes[1] >= 11 && bytes[1] <= 15) return 'arimo';
+  }
+  const familyClass = String(request.familyClass ?? '').trim().toLocaleLowerCase('en-US');
+  if (familyClass === 'roman') return 'tinos';
+  if (familyClass === 'swiss') return 'arimo';
+  if (familyClass === 'modern') return 'cousine';
+  return undefined;
 }
 
 function validateId(value, label = 'Fontsource id') {
@@ -283,7 +303,7 @@ class FontsourceProvider {
       const id = this.aliases.get(normalizeFamily(family));
       if (id) return id;
     }
-    return undefined;
+    return metadataClassId(request);
   }
 
   async metadataFor(id, signal) {

@@ -67,6 +67,39 @@ sha256 = "86f4484f138804eeeb82790a043f92d34742bbe09965551316e97a8d07c818fc"
 internal_version = "Version 1.21"
 
 [[fonts]]
+id = "gelasio"
+family = "Gelasio"
+cdn_version = "5.2.8"
+catalog_version = "v14"
+subset = "latin"
+weight = 400
+style = "normal"
+sha256 = "5c02c888f6359c77ef024ab884662625f4c39eeb9e4ed22eaa0ec91843af7539"
+internal_version = "Version 1.008"
+
+[[fonts]]
+id = "gelasio"
+family = "Gelasio"
+cdn_version = "5.2.8"
+catalog_version = "v14"
+subset = "latin-ext"
+weight = 400
+style = "normal"
+sha256 = "37f07db2294bfebb80a2205e6b84b8f8061c78d1c78bcb9b4d44dfeccbd04d71"
+internal_version = "Version 1.008"
+
+[[fonts]]
+id = "gelasio"
+family = "Gelasio"
+cdn_version = "5.2.8"
+catalog_version = "v14"
+subset = "vietnamese"
+weight = 400
+style = "normal"
+sha256 = "da3f5944b09f50a2cc275436f71bf84cb0eb0da42d8074c4049fe6013d6933df"
+internal_version = "Version 1.008"
+
+[[fonts]]
 id = "tinos"
 family = "Tinos"
 cdn_version = "5.2.7"

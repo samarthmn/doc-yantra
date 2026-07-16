@@ -18,8 +18,8 @@ pub mod subset;
 
 pub use db::{Face, FaceId, FontDb};
 pub use matching::{
-    Resolved, map_symbol_char, resolve, resolve_exact, resolve_exact_with_stretch,
-    resolve_with_stretch, wml_run_family,
+    Resolved, map_symbol_char, resolve, resolve_exact, resolve_exact_or_substitute_with_stretch,
+    resolve_exact_with_stretch, resolve_with_stretch, wml_run_family,
 };
 pub use metrics::{FaceMetrics, GlyphId};
 pub use registration::{
@@ -29,5 +29,8 @@ pub use registration::{
 pub use reporting::{
     FontExactness, FontResolution, FontResolutionEvent, FontResolutionSource, SelectedFontIdentity,
 };
-pub use requests::{FontRequest, FontSlot};
+pub use requests::{
+    FontClassing, FontRequest, FontSlot, FontSubstitutionClass, classify_font_metadata,
+    classify_font_request,
+};
 pub use subset::{SubsetFont, subset_for_pdf};

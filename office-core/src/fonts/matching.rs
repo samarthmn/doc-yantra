@@ -79,7 +79,30 @@ pub fn resolve_with_stretch(
         }
     }
 
-    // 4: family-class fallback by name heuristic.
+    // 4: metadata-guided classing from the document's font table. The
+    // provider-class family wins when registered; bundled Liberation remains
+    // the deterministic offline fallback.
+    if let Some(classing) = db.classing_hint(family) {
+        for target in metadata_targets(classing.class) {
+            if let Some(pick) = pick_in_family(db, target, weight, italic, stretch) {
+                out.face = Some(pick.face);
+                out.warnings.push(Warning::new(
+                    "font_substituted",
+                    format!("{family} -> {target} (fontTable {})", classing.basis),
+                ));
+                push_style_warning(&mut out, db, target, weight, italic, stretch, &pick);
+                if pick.synthetic_italic {
+                    out.warnings.push(Warning::new(
+                        "synthetic_style_unavailable",
+                        family.to_string(),
+                    ));
+                }
+                return out;
+            }
+        }
+    }
+
+    // 5: family-class fallback by name heuristic.
     let fallback = fallback_class(family);
     if let Some(pick) = pick_in_family(db, fallback, weight, italic, stretch) {
         out.face = Some(pick.face);
@@ -107,6 +130,15 @@ pub fn resolve_with_stretch(
     // Nothing in the database covers even the fallback class.
     out.missing = Some(family.to_string());
     out
+}
+
+fn metadata_targets(class: super::requests::FontSubstitutionClass) -> &'static [&'static str] {
+    use super::requests::FontSubstitutionClass::{Mono, Sans, Serif};
+    match class {
+        Serif => &["Tinos", "Gelasio", "Liberation Serif"],
+        Sans => &["Arimo", "Carlito", "Liberation Sans"],
+        Mono => &["Cousine", "Liberation Mono"],
+    }
 }
 
 /// Returns an exact family, weight, and italic face without substitution or
@@ -139,6 +171,30 @@ pub fn resolve_exact_with_stretch(
         })
         .min_by_key(|(index, face)| (u8::from(!face.embedded), *index))
         .map(|(index, _)| FaceId(index))
+}
+
+/// Returns an exact face or a registered metric-compatible substitute without
+/// falling through to the generic family-class or Noto fallbacks.
+///
+/// Host-side font providers use this narrower query before fetching an alias:
+/// a registered application-owned substitute (for example Liberation Sans for
+/// Arial) must win over a network-provided last resort (Arimo).
+pub fn resolve_exact_or_substitute_with_stretch(
+    db: &FontDb,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    stretch: u16,
+) -> Option<FaceId> {
+    if let Some(pick) = pick_in_family(db, family, weight, italic, stretch) {
+        return Some(pick.face);
+    }
+    if db.resolution_mode() == crate::ResolutionMode::Strict {
+        return None;
+    }
+    substitution_targets(family).iter().find_map(|target| {
+        pick_in_family(db, target, weight, italic, stretch).map(|pick| pick.face)
+    })
 }
 
 /// Returns deterministic coverage-fallback candidates after `primary`.
@@ -326,14 +382,18 @@ fn family_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
-/// Fetchable-first metric-compatible targets with bundled native fallbacks.
+/// App-owned metric-compatible targets followed by provider-only fallbacks.
 fn substitution_targets(family: &str) -> &'static [&'static str] {
     match family_key(family).as_str() {
         "calibri" | "calibri light" => &["Carlito"],
         "cambria" => &["Caladea"],
-        "arial" | "helvetica" | "segoe ui" | "liberation sans" => &["Arimo", "Liberation Sans"],
-        "times new roman" | "times" | "liberation serif" => &["Tinos", "Liberation Serif"],
-        "courier new" | "courier" | "liberation mono" => &["Cousine", "Liberation Mono"],
+        "arial" | "helvetica" | "segoe ui" => &["Liberation Sans", "Arimo"],
+        "times new roman" | "times" => &["Liberation Serif", "Tinos"],
+        "courier new" | "courier" => &["Liberation Mono", "Cousine"],
+        "liberation sans" => &["Arimo"],
+        "liberation serif" => &["Tinos"],
+        "liberation mono" => &["Cousine"],
+        "georgia" => &["Gelasio"],
         "noto sans symbols" | "noto sans symbols 2" => &["Carlito"],
         _ => &[],
     }
@@ -450,15 +510,16 @@ mod tests {
         assert_eq!(substitution_targets("Calibri"), &["Carlito"]);
         assert_eq!(substitution_targets("CALIBRI LIGHT"), &["Carlito"]);
         assert_eq!(substitution_targets("Cambria"), &["Caladea"]);
-        assert_eq!(substitution_targets("Arial"), &["Arimo", "Liberation Sans"]);
+        assert_eq!(substitution_targets("Arial"), &["Liberation Sans", "Arimo"]);
         assert_eq!(
             substitution_targets("Times New Roman"),
-            &["Tinos", "Liberation Serif"]
+            &["Liberation Serif", "Tinos"]
         );
         assert_eq!(
             substitution_targets("Courier New"),
-            &["Cousine", "Liberation Mono"]
+            &["Liberation Mono", "Cousine"]
         );
+        assert_eq!(substitution_targets("Georgia"), &["Gelasio"]);
         assert_eq!(substitution_targets("Noto Sans Symbols"), &["Carlito"]);
         assert!(substitution_targets("Comic Sans MS").is_empty());
     }
@@ -518,6 +579,68 @@ mod tests {
         let r = resolve(&db, "Arial", 700, false);
         let face = r.face.expect("Arial resolves");
         assert_eq!(db.face(face).unwrap().weight, 700);
+    }
+
+    #[test]
+    fn arial_prefers_liberation_over_the_provider_alias_when_both_are_registered() {
+        let mut db = FontDb::new();
+        db.register_embedded(
+            "Arimo",
+            include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec(),
+            false,
+            false,
+        );
+        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
+            .expect("register Liberation Sans");
+
+        let resolved = resolve(&db, "Arial", 400, false);
+        let face = resolved.face.expect("Arial resolves");
+        assert_eq!(db.face(face).unwrap().family_name, "Liberation Sans");
+    }
+
+    #[test]
+    fn arial_uses_arimo_as_a_reported_last_resort_without_liberation() {
+        let mut db = FontDb::new();
+        db.register_embedded(
+            "Arimo",
+            include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec(),
+            false,
+            false,
+        );
+
+        let resolved = resolve(&db, "Arial", 400, false);
+        let face = resolved.face.expect("Arial resolves through Arimo");
+        assert_eq!(db.face(face).unwrap().family_name, "Arimo");
+        assert!(resolved.warnings.iter().any(|warning| {
+            warning.code == "font_substituted" && warning.detail == "Arial -> Arimo"
+        }));
+    }
+
+    #[test]
+    fn metadata_classing_selects_the_provider_family_and_names_its_basis() {
+        let mut db = FontDb::new();
+        db.register_embedded(
+            "Tinos",
+            include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec(),
+            false,
+            false,
+        );
+        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
+            .expect("register unrelated sans fallback");
+        db.set_classing_hint(
+            "Mystery Text",
+            crate::fonts::FontClassing {
+                class: crate::fonts::FontSubstitutionClass::Serif,
+                basis: "family=roman".into(),
+            },
+        );
+
+        let resolved = resolve(&db, "Mystery Text", 400, false);
+        let face = resolved.face.expect("metadata-classed family resolves");
+        assert_eq!(db.face(face).unwrap().family_name, "Tinos");
+        assert!(resolved.warnings.iter().any(|warning| {
+            warning.code == "font_substituted" && warning.detail.contains("fontTable family=roman")
+        }));
     }
 
     #[test]

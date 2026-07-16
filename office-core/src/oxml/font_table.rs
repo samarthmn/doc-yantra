@@ -6,6 +6,7 @@
 
 use super::{W, attr, child, children, is, parse_xml};
 use crate::Result;
+use crate::fonts::{FontClassing, FontDb, classify_font_metadata};
 
 /// Parsed Word font table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,9 +89,32 @@ impl FontTable {
                     .is_some_and(|name| name.eq_ignore_ascii_case(family))
         })
     }
+
+    /// Installs metadata-only classing hints used after exact/known-substitute
+    /// matching and before name-based fallback.
+    pub(crate) fn install_classing_hints(&self, db: &mut FontDb) {
+        for entry in &self.fonts {
+            let Some(hint) = entry.classing() else {
+                continue;
+            };
+            db.set_classing_hint(&entry.family, hint.clone());
+            if let Some(alt_name) = &entry.alt_name {
+                db.set_classing_hint(alt_name, hint);
+            }
+        }
+    }
 }
 
 impl FontTableEntry {
+    /// Derives a coarse substitution class from the OOXML metadata.
+    pub fn classing(&self) -> Option<FontClassing> {
+        classify_font_metadata(
+            self.panose.as_deref(),
+            self.family_class.as_deref(),
+            self.pitch.as_deref(),
+        )
+    }
+
     /// Whether the exact bold/italic style is supplied inside the DOCX.
     pub fn has_embedded_style(&self, weight: u16, italic: bool) -> bool {
         match (weight >= 600, italic) {
@@ -128,5 +152,17 @@ mod tests {
         assert_eq!(entry.unicode_ranges, [1]);
         assert!(entry.has_embedded_style(700, false));
         assert!(!entry.has_embedded_style(400, false));
+    }
+
+    #[test]
+    fn exposes_metadata_classing_for_matching() {
+        let xml = format!(
+            r#"<w:fonts xmlns:w="{W}"><w:font w:name="Mystery"><w:family w:val="roman"/></w:font></w:fonts>"#
+        );
+        let table = FontTable::parse(&xml).unwrap();
+        assert_eq!(
+            table.fonts[0].classing().map(|classing| classing.basis),
+            Some("family=roman".into())
+        );
     }
 }

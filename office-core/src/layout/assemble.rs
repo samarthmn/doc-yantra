@@ -9,6 +9,7 @@ use crate::drawing::image::{add_to_budget, decode_required};
 use crate::fonts::FontDb;
 use crate::fonts::odttf;
 use crate::opc::Package;
+use crate::oxml::font_table::FontTable;
 use crate::oxml::numbering::Numbering;
 use crate::oxml::settings::Settings;
 use crate::oxml::styles::StyleResolver;
@@ -60,6 +61,7 @@ impl WordDoc {
         let numbering = optional(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
         let settings = optional(&pkg, "word/settings.xml", Settings::parse)?.unwrap_or_default();
         let theme = optional(&pkg, "word/theme/theme1.xml", Theme::parse)?.unwrap_or_default();
+        let font_table = optional(&pkg, "word/fontTable.xml", FontTable::parse)?;
 
         let mut fonts = FontDb::with_sources(&opts.font_dirs, opts.include_system_fonts);
         fonts.set_resolution_mode(opts.resolution_mode);
@@ -69,6 +71,9 @@ impl WordDoc {
         crate::register_runtime_fonts(&mut fonts)?;
         fonts.mark_hash_pinned(&opts.font_hash_pins);
         register_embedded_fonts(&pkg, &mut fonts);
+        if let Some(font_table) = &font_table {
+            font_table.install_classing_hints(&mut fonts);
+        }
 
         // Collect the rels for the main part and every header/footer part.
         let mut part_rels = HashMap::new();

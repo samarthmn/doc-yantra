@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use fidelity::evidence::{is_sha256, sha256_hex};
+use office_core::fonts::{FontSubstitutionClass, classify_font_request};
 use office_core::{ConvertOptions, FontExpectation, FontRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +26,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("courier", "cousine"),
     ("courier new", "cousine"),
     ("helvetica", "arimo"),
+    ("georgia", "gelasio"),
     ("liberation mono", "cousine"),
     ("liberation sans", "arimo"),
     ("liberation serif", "tinos"),
@@ -46,6 +48,7 @@ struct CatalogFont {
 }
 
 const LATIN: &[&str] = &["latin", "latin-ext"];
+const GELASIO_SUBSETS: &[&str] = &["latin", "latin-ext", "vietnamese"];
 const LATIN_CYRILLIC_GREEK: &[&str] = &[
     "cyrillic",
     "cyrillic-ext",
@@ -106,6 +109,14 @@ const CATALOG: &[CatalogFont] = &[
         catalog_version: "v30",
         weights: &[400, 700],
         subsets: FULL_CROSCORE,
+    },
+    CatalogFont {
+        id: "gelasio",
+        family: "Gelasio",
+        cdn_version: "5.2.8",
+        catalog_version: "v14",
+        weights: &[400, 500, 600, 700],
+        subsets: GELASIO_SUBSETS,
     },
     CatalogFont {
         id: "tinos",
@@ -181,7 +192,6 @@ pub(crate) fn resolve_for_case(
     let requests =
         office_core::font_requests(source, office_core::OfficeFormat::Docx, base_options)
             .with_context(|| format!("discover fonts for fidelity case {case_name}"))?;
-    let demanded_families = mapped_families(&requests);
     let (provider_requests, satisfied_families) =
         provider_requests(source, base_options, &requests)?;
     let fetcher = HttpFetcher::new()?;
@@ -194,7 +204,7 @@ pub(crate) fn resolve_for_case(
         |url| fetcher.fetch(url),
     )?;
     resolved.families.extend(satisfied_families);
-    resolved.demanded_families = demanded_families;
+    resolved.demanded_families = resolved.families.clone();
     Ok(resolved)
 }
 
@@ -213,6 +223,11 @@ pub(crate) fn refresh_lock(sources: &[(String, Vec<u8>)]) -> Result<usize> {
             for font in desired_artifacts(request)? {
                 desired.entry(font.url()).or_insert(font);
             }
+        }
+    }
+    for request in permanent_lock_requests() {
+        for font in desired_artifacts(&request)? {
+            desired.entry(font.url()).or_insert(font);
         }
     }
 
@@ -243,6 +258,27 @@ pub(crate) fn refresh_lock(sources: &[(String, Vec<u8>)]) -> Result<usize> {
     let serialized = toml::to_string_pretty(&lock).context("serialize fidelity font lock")?;
     fs::write(lock_path(), serialized).context("write fidelity fonts.lock")?;
     Ok(lock.fonts.len())
+}
+
+fn permanent_lock_requests() -> Vec<FontRequest> {
+    ["Arial", "Times New Roman", "Courier New", "Georgia"]
+        .into_iter()
+        .map(|family| FontRequest {
+            family: family.into(),
+            alt_families: Vec::new(),
+            weight: 400,
+            italic: false,
+            stretch: 5,
+            slots: vec![office_core::FontSlot::Ascii, office_core::FontSlot::HAnsi],
+            panose: None,
+            family_class: None,
+            pitch: None,
+            charset: None,
+            unicode_ranges: Vec::new(),
+            scripts: vec!["latin".into()],
+            vf_coords: Vec::new(),
+        })
+        .collect()
 }
 
 struct HttpFetcher {
@@ -415,16 +451,20 @@ fn alias_map() -> BTreeMap<String, String> {
 }
 
 fn mapped_id(request: &FontRequest) -> Option<&'static str> {
-    request
-        .alt_families
-        .iter()
-        .map(String::as_str)
-        .chain(std::iter::once(request.family.as_str()))
+    std::iter::once(request.family.as_str())
+        .chain(request.alt_families.iter().map(String::as_str))
         .find_map(|family| {
             let family = normalize_family(family);
             ALIASES
                 .iter()
                 .find_map(|(known, id)| (*known == family).then_some(*id))
+        })
+        .or_else(|| {
+            classify_font_request(request).map(|classing| match classing.class {
+                FontSubstitutionClass::Serif => "tinos",
+                FontSubstitutionClass::Sans => "arimo",
+                FontSubstitutionClass::Mono => "cousine",
+            })
         })
 }
 
@@ -450,23 +490,17 @@ fn provider_requests(
         let Some(id) = mapped_id(request) else {
             continue;
         };
-        let catalog = catalog_font(id)?;
-        let native = office_core::fonts::resolve_with_stretch(
+        let native = office_core::fonts::resolve_exact_or_substitute_with_stretch(
             &document.fonts,
-            catalog.family,
+            &request.family,
             request.weight,
             request.italic,
             request.stretch,
         );
-        let native_family_match = native
-            .face
-            .and_then(|face| document.fonts.face(face))
-            .is_some_and(|face| {
-                normalize_family(&face.family_name) == normalize_family(catalog.family)
-            });
-        if native_family_match {
-            satisfied.insert(catalog.family.to_string());
+        if let Some(face) = native.and_then(|face| document.fonts.face(face)) {
+            satisfied.insert(face.family_name.clone());
         } else {
+            catalog_font(id)?;
             provider.push(request.clone());
         }
     }
@@ -628,11 +662,15 @@ fn validate_unlocked_font(bytes: &[u8], font: &LockedFont) -> Result<office_core
 
 #[cfg(test)]
 fn assert_js_alias_parity(source: &str) -> Result<()> {
-    let block = source
-        .split_once("const DEFAULT_ALIASES = Object.freeze({")
-        .and_then(|(_, rest)| rest.split_once("});"))
-        .map(|(block, _)| block)
-        .context("locate DEFAULT_ALIASES in fontsource-provider.cjs")?;
+    let block = [
+        "const DEFAULT_ALIASES = Object.freeze({",
+        "export const DEFAULT_FONTSOURCE_ALIASES = Object.freeze({",
+    ]
+    .into_iter()
+    .find_map(|marker| source.split_once(marker))
+    .and_then(|(_, rest)| rest.split_once("});"))
+    .map(|(block, _)| block)
+    .context("locate the provider alias table")?;
     let mut parsed = BTreeMap::new();
     for line in block.lines() {
         let line = line.trim().trim_end_matches(',');
@@ -729,6 +767,52 @@ mod tests {
     }
 
     #[test]
+    fn requested_family_precedes_font_table_alternates() {
+        let mut request = request();
+        request.family = "Ubuntu".into();
+        request.alt_families = vec!["Calibri".into()];
+
+        assert_eq!(mapped_id(&request), Some("ubuntu"));
+    }
+
+    #[test]
+    fn georgia_uses_its_metric_compatible_gelasio_alias() {
+        let mut request = request();
+        request.family = "Georgia".into();
+        assert_eq!(mapped_id(&request), Some("gelasio"));
+    }
+
+    #[test]
+    fn unmapped_families_use_font_table_class_metadata() {
+        let mut serif = request();
+        serif.family = "Unknown Serif".into();
+        serif.family_class = Some("roman".into());
+        assert_eq!(mapped_id(&serif), Some("tinos"));
+
+        let mut sans = request();
+        sans.family = "Unknown Sans".into();
+        sans.panose = Some("020B0604020202020204".into());
+        assert_eq!(mapped_id(&sans), Some("arimo"));
+
+        let mut mono = request();
+        mono.family = "Unknown Mono".into();
+        mono.pitch = Some("fixed".into());
+        assert_eq!(mapped_id(&mono), Some("cousine"));
+    }
+
+    #[test]
+    fn permanent_lock_plan_covers_app_asset_fallbacks_and_georgia() {
+        let ids = permanent_lock_requests()
+            .iter()
+            .filter_map(mapped_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            BTreeSet::from(["arimo", "cousine", "gelasio", "tinos"])
+        );
+    }
+
+    #[test]
     fn fetched_bytes_must_match_the_committed_lock() {
         let cache = test_cache("hash-mismatch");
         let error = resolve_requests_with_fetch(
@@ -789,9 +873,52 @@ mod tests {
     }
 
     #[test]
+    fn locked_cold_fetch_and_offline_warm_resolution_are_identical() {
+        use std::cell::Cell;
+
+        let cache = test_cache("cold-warm-parity");
+        let sha256 = sha256_hex(CARLITO);
+        let lock = lock(locked_font(sha256));
+        let fetches = Cell::new(0usize);
+        let cold = resolve_requests_with_fetch(
+            "fixture",
+            &[request()],
+            &lock,
+            &cache,
+            &base_options(),
+            |_| {
+                fetches.set(fetches.get() + 1);
+                Ok(CARLITO.to_vec())
+            },
+        )
+        .expect("hash-verified cold resolution");
+        let warm = resolve_requests_with_fetch(
+            "fixture",
+            &[request()],
+            &lock,
+            &cache,
+            &base_options(),
+            |_| panic!("offline warm resolution must not fetch"),
+        )
+        .expect("offline warm resolution");
+        fs::remove_dir_all(&cache).expect("remove repo-local resolver test cache");
+
+        assert_eq!(fetches.get(), 1);
+        assert_eq!(cold.options.font_bytes, warm.options.font_bytes);
+        assert_eq!(cold.options.font_hash_pins, warm.options.font_hash_pins);
+        assert_eq!(cold.families, warm.families);
+    }
+
+    #[test]
     fn rust_aliases_match_the_shipped_node_provider() {
         let source = include_str!("../../wasm/fontsource-provider.cjs");
         assert_js_alias_parity(source).expect("alias maps must stay in lockstep");
+    }
+
+    #[test]
+    fn rust_aliases_match_the_shipped_web_provider() {
+        let source = include_str!("../../wasm/fontsource-provider-web.js");
+        assert_js_alias_parity(source).expect("web alias map must stay in lockstep");
     }
 
     #[test]
@@ -804,6 +931,7 @@ mod tests {
         assert_eq!(versions["caladea"], "5.2.8");
         assert_eq!(versions["carlito"], "5.2.8");
         assert_eq!(versions["cousine"], "5.2.7");
+        assert_eq!(versions["gelasio"], "5.2.8");
         assert_eq!(versions["tinos"], "5.2.7");
         assert_eq!(versions["ubuntu"], "5.2.8");
         assert_eq!(versions["ubuntu-mono"], "5.2.8");
@@ -813,6 +941,7 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         assert_eq!(catalog_versions["ubuntu"], "v21");
         assert_eq!(catalog_versions["ubuntu-mono"], "v19");
+        assert_eq!(catalog_versions["gelasio"], "v14");
     }
 
     #[test]
@@ -835,5 +964,70 @@ mod tests {
             "Carlito is already bundled: {provider:?}"
         );
         assert_eq!(satisfied, BTreeSet::from(["Carlito".to_string()]));
+    }
+
+    #[test]
+    fn provider_fetch_prefers_bundled_liberation_for_arial() {
+        let source = office_core::testkit::minimal_docx(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>Bundled substitute</w:t></w:r></w:p>"#,
+        );
+        let requests = office_core::font_requests(
+            &source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+        )
+        .expect("preflight Arial request");
+        let (provider, satisfied) =
+            provider_requests(&source, &ConvertOptions::default(), &requests)
+                .expect("filter provider requests");
+
+        assert!(
+            provider.is_empty(),
+            "Liberation Sans is bundled: {provider:?}"
+        );
+        assert_eq!(satisfied, BTreeSet::from(["Liberation Sans".to_string()]));
+    }
+
+    #[test]
+    fn resolved_family_contract_records_liberation_instead_of_the_unused_alias() {
+        let source = office_core::testkit::minimal_docx(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr><w:t>Family contract</w:t></w:r></w:p>"#,
+        );
+
+        let resolved = resolve_for_case("fixture", &source, &ConvertOptions::default())
+            .expect("resolve bundled Arial substitute");
+        assert_eq!(
+            resolved.demanded_families,
+            BTreeSet::from(["Liberation Sans".to_string()])
+        );
+    }
+
+    #[test]
+    fn bundled_arial_conversion_embeds_liberation_without_provider_fetches() {
+        let source = office_core::testkit::minimal_docx(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>Application-owned face</w:t></w:r></w:p>"#,
+        );
+        let requests = office_core::font_requests(
+            &source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+        )
+        .expect("preflight Arial request");
+        let (provider, satisfied) =
+            provider_requests(&source, &ConvertOptions::default(), &requests)
+                .expect("resolve bundled Arial face");
+        assert!(provider.is_empty(), "provider must not fetch: {provider:?}");
+        assert_eq!(satisfied, BTreeSet::from(["Liberation Sans".to_string()]));
+
+        let output = office_core::convert(
+            &source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+        )
+        .expect("convert Arial through bundled Liberation");
+        let embedded = crate::fonts::embedded_font_families(&output.pdf)
+            .expect("read embedded output families");
+        assert!(embedded.contains("Liberation Sans"), "{embedded:?}");
+        assert!(!embedded.contains("Arimo"), "{embedded:?}");
     }
 }

@@ -94,6 +94,10 @@ The corpus command requires every core case to pass and at least 90% of the
 extended cases to pass. It writes the HTML report to
 `tmp/fidelity-report/index.html` at the repository root. Use
 `--report-dir ../tmp/<name>` to keep a separate report for a specific run.
+Each page is gated by the frozen legacy/unweighted SSIM threshold and the
+vector geometry bounds for border segments and text-run origins. Ink-weighted
+SSIM and heatmaps remain diagnostic: both SSIM variants and the geometry result
+are included in the JSON and HTML reports.
 
 Corpus runs resolve the fonts declared by each DOCX automatically from the
 committed `office-core/fidelity/fonts.lock`. On a cold cache they require
