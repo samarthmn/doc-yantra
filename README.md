@@ -74,6 +74,25 @@ It contains no fonts: hosts discover canonical requests with
 `office_register_font()`, then profile and convert. Native Office builds retain
 the default `bundled-fonts` feature for hermetic tests and fidelity runs.
 
+## Running the full fidelity suite
+
+The full fidelity check runs the harness tests, verifies that every corpus case
+has a Word-exported ground truth, then scores the complete blocking DOCX corpus.
+Run it from the repository root:
+
+```bash
+./pdf-core/scripts/fetch-pdfium.sh  # one-time: install the native pdfium library
+cd office-core
+cargo test -p fidelity
+cargo run -p fidelity -- missing-ground-truth
+cargo run -p fidelity -- run --format docx
+```
+
+The corpus command requires every core case to pass and at least 90% of the
+extended cases to pass. It writes the HTML report to
+`tmp/fidelity-report/index.html` at the repository root. Use
+`--report-dir ../tmp/<name>` to keep a separate report for a specific run.
+
 ## Releasing
 
 Releases stay on the **0.0.x** line — only the patch increments. From a clean
