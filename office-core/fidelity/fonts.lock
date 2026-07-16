@@ -1,0 +1,210 @@
+version = 1
+
+[[fonts]]
+id = "arimo"
+family = "Arimo"
+cdn_version = "5.2.8"
+catalog_version = "v36"
+subset = "latin"
+weight = 400
+style = "normal"
+sha256 = "d492bf3111ec2c5f5270069728b4471ace9c29921223192130469a34a8f5961e"
+internal_version = "Version 1.33"
+
+[[fonts]]
+id = "arimo"
+family = "Arimo"
+cdn_version = "5.2.8"
+catalog_version = "v36"
+subset = "latin-ext"
+weight = 400
+style = "normal"
+sha256 = "8b8f5f778155fee8582d45d41e02c42cfff3c4d1be9f2ea83e10d6c29fae7a70"
+internal_version = "Version 1.33"
+
+[[fonts]]
+id = "arimo"
+family = "Arimo"
+cdn_version = "5.2.8"
+catalog_version = "v36"
+subset = "vietnamese"
+weight = 400
+style = "normal"
+sha256 = "cea20641527f67d23e889118147073b4ec0ea71932dcc62c373267db7305468d"
+internal_version = "Version 1.33"
+
+[[fonts]]
+id = "cousine"
+family = "Cousine"
+cdn_version = "5.2.7"
+catalog_version = "v30"
+subset = "latin"
+weight = 400
+style = "normal"
+sha256 = "1281d5150a4c64330e742a69aa6fa0ac7aee31e708c2dce64762fcc0bb37fc05"
+internal_version = "Version 1.21"
+
+[[fonts]]
+id = "cousine"
+family = "Cousine"
+cdn_version = "5.2.7"
+catalog_version = "v30"
+subset = "latin-ext"
+weight = 400
+style = "normal"
+sha256 = "4215b07bb23636210143a23d8d76371cf130348e6020f50231e70e3e66d7a3ab"
+internal_version = "Version 1.21"
+
+[[fonts]]
+id = "cousine"
+family = "Cousine"
+cdn_version = "5.2.7"
+catalog_version = "v30"
+subset = "vietnamese"
+weight = 400
+style = "normal"
+sha256 = "86f4484f138804eeeb82790a043f92d34742bbe09965551316e97a8d07c818fc"
+internal_version = "Version 1.21"
+
+[[fonts]]
+id = "tinos"
+family = "Tinos"
+cdn_version = "5.2.7"
+catalog_version = "v26"
+subset = "latin"
+weight = 400
+style = "normal"
+sha256 = "e22e17363483a7a7cfb2180e37d844d88b6ea6bfbf005e9825c8568d132bc325"
+internal_version = "Version 1.23"
+
+[[fonts]]
+id = "tinos"
+family = "Tinos"
+cdn_version = "5.2.7"
+catalog_version = "v26"
+subset = "latin-ext"
+weight = 400
+style = "normal"
+sha256 = "2e95ae85cb59a2518705601216fb272e1e86f4836fd65bbaa8bd5a30887e44e1"
+internal_version = "Version 1.23"
+
+[[fonts]]
+id = "tinos"
+family = "Tinos"
+cdn_version = "5.2.7"
+catalog_version = "v26"
+subset = "vietnamese"
+weight = 400
+style = "normal"
+sha256 = "2d5a3e06ac977043342bc74b38c550ef08788dc82ba1ffe5fa6008497021ac6e"
+internal_version = "Version 1.23"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin"
+weight = 400
+style = "italic"
+sha256 = "a5e695d950adf099a15ec36655c3574de1ec663f79a281f7573119654bd0efed"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin-ext"
+weight = 400
+style = "italic"
+sha256 = "66a0e0cdf971cead1be4fba02a6e6e552e225b41c8a087a176b05259841e2317"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin"
+weight = 400
+style = "normal"
+sha256 = "a40c79c17f48e1f91b8f14a6302bffc8d6cc485263cdf8f192b0eade57d915fc"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin-ext"
+weight = 400
+style = "normal"
+sha256 = "0eb0d964994d195e3c55d7c4e6d1402b1616c02088516767b7a240d2573d3fdc"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin"
+weight = 700
+style = "italic"
+sha256 = "86a889f4591fd5fbe53bb3c027cbb3c449a07006024656f8a87602d75039dad8"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin-ext"
+weight = 700
+style = "italic"
+sha256 = "85a391a6453daf082b2771b435a1db3db7534ee68b322b3d5e2d95a3147ab0ae"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin"
+weight = 700
+style = "normal"
+sha256 = "6393cf5a1e4fe57c2b2e5a11ae90b649e4a955dd6f6453dc112d9885b0f9f1e7"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu"
+family = "Ubuntu"
+cdn_version = "5.2.8"
+catalog_version = "v21"
+subset = "latin-ext"
+weight = 700
+style = "normal"
+sha256 = "5f09d2cdd6df68dcd14c410808b1989a4a285af6fc2770ab519f9460e8cc9fcf"
+internal_version = "0.83"
+
+[[fonts]]
+id = "ubuntu-mono"
+family = "Ubuntu Mono"
+cdn_version = "5.2.8"
+catalog_version = "v19"
+subset = "latin"
+weight = 400
+style = "normal"
+sha256 = "3b1c3d4e8e324b68280df74954a116a34bc24a21c3f1dc08223a7a1a15eeff2e"
+internal_version = "Version 0.80"
+
+[[fonts]]
+id = "ubuntu-mono"
+family = "Ubuntu Mono"
+cdn_version = "5.2.8"
+catalog_version = "v19"
+subset = "latin-ext"
+weight = 400
+style = "normal"
+sha256 = "337d24f0b77340077cac6d1198a8e93442adc049f52e35802f93579f4c71683f"
+internal_version = "Version 0.80"

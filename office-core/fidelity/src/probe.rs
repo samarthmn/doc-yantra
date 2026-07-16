@@ -360,7 +360,13 @@ impl ExtractedPage {
 pub fn compare_page(ours: &[u8], truth: &[u8], page: u32) -> Result<ProbeReport> {
     let ours = extract_page(ours, page).context("extract our PDF geometry")?;
     let truth = extract_page(truth, page).context("extract truth PDF geometry")?;
-    if (ours.width - truth.width).abs() > 0.01 || (ours.height - truth.height).abs() > 0.01 {
+    // PDF producers commonly round A4's fractional point dimensions to two
+    // nearby decimal representations. This tolerance is far below the probe's
+    // geometry matching thresholds but avoids rejecting equivalent page boxes.
+    const PAGE_BOX_TOLERANCE_PT: f64 = 0.05;
+    if (ours.width - truth.width).abs() > PAGE_BOX_TOLERANCE_PT
+        || (ours.height - truth.height).abs() > PAGE_BOX_TOLERANCE_PT
+    {
         bail!(
             "page geometry differs: ours {}x{}, truth {}x{}",
             ours.width,
@@ -1543,6 +1549,34 @@ end"#
         assert_eq!(report.unmatched.elements.len(), 1);
         assert_eq!(report.unmatched.elements[0].class, "h_border");
         assert_eq!(report.unmatched.elements[0].x0, 10.0);
+    }
+
+    #[test]
+    fn accepts_equivalent_page_boxes_with_pdf_rounding_noise() {
+        let ours = probe_pdf(0.0, 0.0, false);
+        let mut truth = Document::load_mem(&probe_pdf(0.0, 0.0, false)).expect("load probe PDF");
+        let page_id = truth.get_pages()[&1];
+        truth
+            .get_object_mut(page_id)
+            .expect("page object")
+            .as_dict_mut()
+            .expect("page dictionary")
+            .set(
+                "MediaBox",
+                vec![
+                    0.into(),
+                    0.into(),
+                    Object::Real(100.02),
+                    Object::Real(99.98),
+                ],
+            );
+        let mut truth_bytes = Vec::new();
+        truth
+            .save_to(&mut truth_bytes)
+            .expect("save rounded probe PDF");
+
+        compare_page(&ours, &truth_bytes, 1)
+            .expect("0.02pt producer rounding must not block geometry probing");
     }
 
     #[test]

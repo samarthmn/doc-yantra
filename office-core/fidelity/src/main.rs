@@ -5,7 +5,9 @@
 //! case needs a source, manifest, ground truth, and recorded Word provenance.
 
 mod corpus;
+mod fonts;
 mod probe;
+mod resolver;
 mod ssim;
 
 use anyhow::{Context, Result};
@@ -14,6 +16,7 @@ use fidelity::evidence::{is_sha256, verify_sha256};
 use office_core::{ConvertOptions, OfficeFormat, convert};
 use pdf_core::raster::{RenderOptions, render_page};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 fn corpus_root() -> PathBuf {
@@ -40,15 +43,12 @@ enum Cmd {
         format: String,
         #[arg(long)]
         case: Option<String>,
-        #[arg(long)]
-        update_report: bool,
         /// Directory for generated JSON, HTML, and page-render evidence.
         #[arg(long)]
         report_dir: Option<PathBuf>,
-        /// Additional runtime font directory. Repeat to model host-resolved fonts.
-        #[arg(long = "font-dir")]
-        font_dirs: Vec<PathBuf>,
     },
+    /// Deliberately refresh the hash-pinned font artifacts used by corpus runs.
+    LockFonts,
     /// Compare vector border and text geometry between our PDF and Word's.
     Probe {
         /// Reference-corpus case under `fidelity-corpus/docx/`.
@@ -82,6 +82,10 @@ struct Manifest {
     ground_truth_exported_at: String,
     input_sha256: String,
     golden_sha256: String,
+    #[serde(default)]
+    required_fonts: Vec<String>,
+    #[serde(default)]
+    expected_fonts: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -91,7 +95,10 @@ struct CaseReport {
     tier: String,
     threshold: f64,
     ssim: f64,
+    ssim_unweighted: f64,
     diff_pct: f64,
+    fonts: Vec<String>,
+    truth_fonts: Vec<String>,
     our_pages: u32,
     truth_pages: u32,
     pass: bool,
@@ -105,6 +112,7 @@ fn main() -> Result<()> {
             println!("seeded {n} docx cases under {}", corpus_root().display());
         }
         Cmd::MissingGroundTruth => list_missing()?,
+        Cmd::LockFonts => lock_fonts()?,
         Cmd::Probe {
             case,
             diag,
@@ -121,18 +129,10 @@ fn main() -> Result<()> {
         Cmd::Run {
             format,
             case,
-            update_report,
             report_dir: selected_report_dir,
-            font_dirs,
         } => {
             let selected_report_dir = selected_report_dir.unwrap_or_else(report_dir);
-            run(
-                &format,
-                case.as_deref(),
-                update_report,
-                &selected_report_dir,
-                &font_dirs,
-            )?
+            run(&format, case.as_deref(), &selected_report_dir)?
         }
     }
     Ok(())
@@ -158,11 +158,13 @@ fn run_probe(
         .with_context(|| format!("read probe source {}", source_path.display()))?;
     let truth = std::fs::read(&truth_path)
         .with_context(|| format!("read probe ground truth {}", truth_path.display()))?;
-    let options = ConvertOptions {
+    let base_options = ConvertOptions {
         font_dirs: font_dirs.to_vec(),
         ..ConvertOptions::default()
     };
-    let ours = convert(&source, OfficeFormat::Docx, &options)
+    let name = case.or(diag).expect("probe source kind was validated");
+    let resolved = resolver::resolve_for_case(name, &source, &base_options)?;
+    let ours = convert(&source, OfficeFormat::Docx, &resolved.options)
         .with_context(|| format!("convert probe source {}", source_path.display()))?;
     let report = probe::compare_page(&ours.pdf, &truth, page)?;
     probe::print_report(&report);
@@ -220,13 +222,7 @@ fn case_dirs(format: &str) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-fn run(
-    format: &str,
-    only: Option<&str>,
-    _update_report: bool,
-    selected_report_dir: &Path,
-    font_dirs: &[PathBuf],
-) -> Result<()> {
+fn run(format: &str, only: Option<&str>, selected_report_dir: &Path) -> Result<()> {
     if format != "docx" {
         anyhow::bail!(
             "no {format} reference corpus is committed; refusing to claim fidelity coverage"
@@ -263,13 +259,17 @@ fn run(
         let source_bytes = read_verified_frozen_file(&source, &manifest.input_sha256)?;
         let ground_truth_bytes = read_verified_frozen_file(&gt, &manifest.golden_sha256)?;
         validate_provenance(&manifest_path, &manifest, &gt, &ground_truth_bytes)?;
+        let resolved =
+            resolver::resolve_for_case(&name, &source_bytes, &ConvertOptions::default())?;
+        validate_required_fonts(&name, &source_bytes, &manifest, &resolved)?;
         reports.push(score_case(
             &name,
             &source_bytes,
             &ground_truth_bytes,
             &manifest,
             &pages_dir,
-            font_dirs,
+            &resolved.options,
+            &resolved.demanded_families,
         ));
     }
 
@@ -298,6 +298,176 @@ fn run(
     Ok(())
 }
 
+fn lock_fonts() -> Result<()> {
+    let mut sources = Vec::new();
+    for dir in case_dirs("docx")? {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let source_path = dir.join("source.docx");
+        let source = std::fs::read(&source_path)
+            .with_context(|| format!("read font-lock source {}", source_path.display()))?;
+        sources.push((name, source));
+    }
+    let count = resolver::refresh_lock(&sources)?;
+    println!(
+        "locked {count} font artifacts in {}",
+        resolver::lock_path().display()
+    );
+    Ok(())
+}
+
+fn validate_required_fonts(
+    case_name: &str,
+    source: &[u8],
+    manifest: &Manifest,
+    resolved: &resolver::ResolvedFonts,
+) -> Result<()> {
+    let unresolved = office_core::font_requests(source, OfficeFormat::Docx, &resolved.options)
+        .with_context(|| format!("verify resolved fonts for fidelity case {case_name}"))?;
+    for required in &manifest.required_fonts {
+        let required = required
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if !resolved
+            .families
+            .iter()
+            .any(|family| family.eq_ignore_ascii_case(&required))
+        {
+            anyhow::bail!(
+                "case {case_name} requires exact font {required}, but fonts.lock did not provision it"
+            );
+        }
+        if unresolved.iter().any(|request| {
+            request
+                .family
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .eq_ignore_ascii_case(&required)
+        }) {
+            anyhow::bail!(
+                "case {case_name} requires exact font {required}, but it remains unresolved after locked font provisioning"
+            );
+        }
+    }
+    let profile = office_core::profile_with_options(source, OfficeFormat::Docx, &resolved.options)
+        .with_context(|| format!("profile resolved fonts for fidelity case {case_name}"))?;
+    validate_required_font_profile(case_name, &manifest.required_fonts, &profile)?;
+    Ok(())
+}
+
+fn normalized_font_family(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn validate_required_font_profile(
+    case_name: &str,
+    required_fonts: &[String],
+    profile: &office_core::DocProfile,
+) -> Result<()> {
+    for required in required_fonts {
+        let normalized_required = normalized_font_family(required);
+        if let Some(warning) = profile.warnings.iter().find(|warning| {
+            matches!(
+                warning.code,
+                "font_fallback" | "font_fallback_used" | "font_substituted"
+            ) && warning
+                .detail
+                .split_once(" ->")
+                .map_or(warning.detail.as_str(), |(requested, _)| requested)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .eq_ignore_ascii_case(&normalized_required)
+        }) {
+            anyhow::bail!(
+                "case {case_name} requires exact font {required}, but profile emitted {}: {}",
+                warning.code,
+                warning.detail
+            );
+        }
+
+        let resolutions = profile
+            .fonts
+            .iter()
+            .filter(|resolution| {
+                normalized_font_family(&resolution.requested_family) == normalized_required
+            })
+            .collect::<Vec<_>>();
+        let exact = !resolutions.is_empty()
+            && resolutions.iter().all(|resolution| {
+                resolution.coverage_ok
+                    && matches!(
+                        resolution.exactness,
+                        office_core::FontExactness::EmbeddedExact
+                            | office_core::FontExactness::HashPinnedExact
+                    )
+                    && !matches!(
+                        resolution.source,
+                        office_core::FontResolutionSource::Fallback
+                            | office_core::FontResolutionSource::None
+                    )
+                    && resolution.selected.as_ref().is_some_and(|selected| {
+                        normalized_font_family(&selected.family) == normalized_required
+                    })
+            });
+        if !exact {
+            let selected = resolutions
+                .iter()
+                .filter_map(|resolution| resolution.selected.as_ref())
+                .map(|selected| selected.family.as_str())
+                .collect::<Vec<_>>();
+            anyhow::bail!(
+                "case {case_name} requires exact font {required}, but it was not resolved exactly (selected: {selected:?})"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_embedded_font_expectations(
+    case_name: &str,
+    expected: &BTreeSet<String>,
+    demanded: &BTreeSet<String>,
+    embedded: &BTreeSet<String>,
+) -> Result<()> {
+    let expected_normalized = expected
+        .iter()
+        .map(|family| normalized_font_family(family))
+        .collect::<BTreeSet<_>>();
+    let embedded_normalized = embedded
+        .iter()
+        .map(|family| normalized_font_family(family))
+        .collect::<BTreeSet<_>>();
+    let demanded_normalized = demanded
+        .iter()
+        .map(|family| normalized_font_family(family))
+        .collect::<BTreeSet<_>>();
+    let has_unexpected = !embedded_normalized.is_subset(&expected_normalized);
+    let missing_demanded = expected_normalized
+        .intersection(&demanded_normalized)
+        .any(|family| !embedded_normalized.contains(family));
+    if has_unexpected || missing_demanded {
+        let display = |families: &BTreeSet<String>| {
+            format!(
+                "[{}]",
+                families.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        };
+        anyhow::bail!(
+            "case {case_name} font mismatch: expected {}, embedded {}",
+            display(expected),
+            display(embedded)
+        );
+    }
+    Ok(())
+}
+
 fn validate_manifest_contract(path: &Path, manifest: &Manifest) -> Result<()> {
     if manifest.title.trim().is_empty() {
         anyhow::bail!("{} has an empty title", path.display());
@@ -313,6 +483,9 @@ fn validate_manifest_contract(path: &Path, manifest: &Manifest) -> Result<()> {
     }
     if manifest.max_page_count_delta > 1 {
         anyhow::bail!("{} allows an excessive page-count delta", path.display());
+    }
+    if manifest.expected_fonts.is_empty() {
+        anyhow::bail!("{} must declare expected_fonts", path.display());
     }
     if !is_sha256(&manifest.input_sha256) || !is_sha256(&manifest.golden_sha256) {
         anyhow::bail!(
@@ -487,7 +660,10 @@ mod gate_tests {
             tier: tier.into(),
             threshold: 0.9,
             ssim: if pass { 1.0 } else { 0.0 },
+            ssim_unweighted: if pass { 1.0 } else { 0.0 },
             diff_pct: 0.0,
+            fonts: Vec::new(),
+            truth_fonts: Vec::new(),
             our_pages: 1,
             truth_pages: 1,
             pass,
@@ -515,6 +691,71 @@ mod gate_tests {
     }
 
     #[test]
+    fn reports_expose_weighted_and_legacy_ssim_metrics() {
+        let mut report = report("core", true);
+        report.truth_fonts = vec!["Quoted \"Font\"".to_string()];
+        let reports = vec![report];
+        let json = serde_json::to_string(&reports).expect("serialize report");
+        assert!(json.contains("\"ssim_unweighted\""), "{json}");
+        let rendered = html(&reports, Path::new("tmp/nonexistent-fidelity-report"));
+        assert!(rendered.contains("unweighted"), "{rendered}");
+        assert!(rendered.contains("Quoted &quot;Font&quot;"), "{rendered}");
+    }
+
+    #[test]
+    fn doctored_font_expectation_fails_with_actionable_sets() {
+        let expected = std::collections::BTreeSet::from(["Carlito".to_string()]);
+        let demanded = std::collections::BTreeSet::from(["Carlito".to_string()]);
+        let embedded = std::collections::BTreeSet::from(["Liberation Sans".to_string()]);
+        let error = validate_embedded_font_expectations(
+            "gdocs-tables-longdoc",
+            &expected,
+            &demanded,
+            &embedded,
+        )
+        .expect_err("substituted output family must fail the case directly");
+        let message = format!("{error:#}");
+        assert!(message.contains("font mismatch"), "{message}");
+        assert!(message.contains("expected [Carlito]"), "{message}");
+        assert!(message.contains("embedded [Liberation Sans]"), "{message}");
+    }
+
+    #[test]
+    fn manifest_contract_rejects_missing_expected_output_fonts() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+title = "Missing font contract"
+tier = "core"
+ssim_threshold = 0.90
+max_page_count_delta = 0
+word_version = "Microsoft Word 2021"
+ground_truth_exported_at = "2026-07-16"
+input_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+golden_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+"#,
+        )
+        .expect("parse manifest fixture");
+        let error = validate_manifest_contract(Path::new("manifest.toml"), &manifest)
+            .expect_err("expected_fonts must be mandatory for fidelity cases");
+        assert!(error.to_string().contains("expected_fonts"), "{error:#}");
+    }
+
+    #[test]
+    fn every_corpus_manifest_declares_expected_output_fonts() {
+        for directory in case_dirs("docx").expect("enumerate DOCX corpus") {
+            let manifest_path = directory.join("manifest.toml");
+            let manifest: Manifest =
+                toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read manifest"))
+                    .expect("parse manifest");
+            assert!(
+                !manifest.expected_fonts.is_empty(),
+                "{} must declare expected_fonts",
+                manifest_path.display()
+            );
+        }
+    }
+
+    #[test]
     fn fidelity_reports_default_to_repo_tmp_and_allow_an_explicit_directory() {
         assert!(
             report_dir().ends_with("tmp/fidelity-report"),
@@ -530,6 +771,46 @@ mod gate_tests {
             .is_ok(),
             "run must accept an explicit report directory"
         );
+    }
+
+    #[test]
+    fn corpus_run_rejects_manual_font_directories() {
+        let error =
+            match Cli::try_parse_from(["fidelity", "run", "--font-dir", "../tmp/manual-fonts"]) {
+                Ok(_) => panic!("release fidelity must resolve locked fonts automatically"),
+                Err(error) => error,
+            };
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected argument '--font-dir'")
+        );
+    }
+
+    #[test]
+    fn required_font_profile_rejects_an_unresolved_declared_family() {
+        let profile = office_core::DocProfile::new("docx");
+        let error =
+            validate_required_font_profile("gdocs-anchors-toc", &["Ubuntu".to_string()], &profile)
+                .expect_err("a required family must have an exact profile resolution");
+        let message = format!("{error:#}");
+        assert!(message.contains("Ubuntu"), "{message}");
+        assert!(message.contains("not resolved exactly"), "{message}");
+    }
+
+    #[test]
+    fn required_font_profile_rejects_fallback_warnings_directly() {
+        let mut profile = office_core::DocProfile::new("docx");
+        profile.warnings.push(office_core::profile::Warning::new(
+            "font_fallback",
+            "Ubuntu -> Liberation Sans",
+        ));
+        let error =
+            validate_required_font_profile("gdocs-anchors-toc", &["Ubuntu".to_string()], &profile)
+                .expect_err("a required family must never fall back");
+        let message = format!("{error:#}");
+        assert!(message.contains("font_fallback"), "{message}");
+        assert!(message.contains("Ubuntu -> Liberation Sans"), "{message}");
     }
 
     #[test]
@@ -606,6 +887,8 @@ mod gate_tests {
             ground_truth_exported_at: "2026-07-14".into(),
             input_sha256: "0".repeat(64),
             golden_sha256: "0".repeat(64),
+            required_fonts: Vec::new(),
+            expected_fonts: Vec::new(),
         };
         validate_provenance(
             Path::new("creator-fallback/manifest.toml"),
@@ -623,7 +906,8 @@ fn score_case(
     truth_pdf: &[u8],
     manifest: &Manifest,
     pages_dir: &Path,
-    font_dirs: &[PathBuf],
+    options: &ConvertOptions,
+    demanded_fonts: &BTreeSet<String>,
 ) -> CaseReport {
     let mut report = CaseReport {
         name: name.to_string(),
@@ -631,18 +915,17 @@ fn score_case(
         tier: manifest.tier.clone(),
         threshold: manifest.ssim_threshold,
         ssim: 0.0,
+        ssim_unweighted: 0.0,
         diff_pct: 1.0,
+        fonts: Vec::new(),
+        truth_fonts: Vec::new(),
         our_pages: 0,
         truth_pages: 0,
         pass: false,
         note: String::new(),
     };
 
-    let options = ConvertOptions {
-        font_dirs: font_dirs.to_vec(),
-        ..ConvertOptions::default()
-    };
-    let our_pdf = match convert(source, OfficeFormat::Docx, &options) {
+    let our_pdf = match convert(source, OfficeFormat::Docx, options) {
         Ok(out) => {
             report.our_pages = out.page_count;
             out.pdf
@@ -653,7 +936,40 @@ fn score_case(
             return report;
         }
     };
-    let truth_pages = probe_page_count(truth_pdf);
+    let embedded_fonts = match fonts::embedded_font_families(&our_pdf) {
+        Ok(fonts) => fonts,
+        Err(error) => {
+            report.note = format!("inspect embedded fonts: {error:#}");
+            return report;
+        }
+    };
+    let truth_fonts = match fonts::embedded_font_families(truth_pdf) {
+        Ok(fonts) => fonts,
+        Err(error) => {
+            report.note = format!("inspect ground-truth fonts: {error:#}");
+            return report;
+        }
+    };
+    report.fonts = embedded_fonts.iter().cloned().collect();
+    report.truth_fonts = truth_fonts.iter().cloned().collect();
+    let expected_fonts = manifest
+        .expected_fonts
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if let Err(error) =
+        validate_embedded_font_expectations(name, &expected_fonts, demanded_fonts, &embedded_fonts)
+    {
+        report.note = error.to_string();
+        return report;
+    }
+    let truth_pages = match pdf_core::meta::page_count(truth_pdf) {
+        Ok(page_count) => page_count,
+        Err(error) => {
+            report.note = format!("read ground-truth page count: {error}");
+            return report;
+        }
+    };
     report.truth_pages = truth_pages;
 
     if report.our_pages.abs_diff(truth_pages) > manifest.max_page_count_delta {
@@ -663,6 +979,7 @@ fn score_case(
 
     let n = report.our_pages.min(truth_pages);
     let mut min_ssim = f64::INFINITY;
+    let mut min_ssim_unweighted = f64::INFINITY;
     let mut max_diff = 0.0_f64;
     for i in 0..n {
         let (Ok(ours), Ok(truth)) = (raster(&our_pdf, i), raster(truth_pdf, i)) else {
@@ -685,12 +1002,18 @@ fn score_case(
         }
         let s = ssim::score_pages(&ours, &truth);
         min_ssim = min_ssim.min(s.ssim);
+        min_ssim_unweighted = min_ssim_unweighted.min(s.ssim_unweighted);
         max_diff = max_diff.max(s.diff_pct);
         save_png(pages_dir, name, i, "heat", &s.heatmap_png);
         write_page_png(pages_dir, name, i, "ours", &ours);
         write_page_png(pages_dir, name, i, "truth", &truth);
     }
     report.ssim = if min_ssim.is_finite() { min_ssim } else { 0.0 };
+    report.ssim_unweighted = if min_ssim_unweighted.is_finite() {
+        min_ssim_unweighted
+    } else {
+        0.0
+    };
     report.diff_pct = max_diff;
     report.pass = report.ssim >= manifest.ssim_threshold;
     report
@@ -707,25 +1030,6 @@ fn raster(pdf: &[u8], page: u32) -> Result<image::DynamicImage> {
     )
     .context("render_page")?;
     Ok(image::load_from_memory(&png)?)
-}
-
-/// Counts pages by rendering until an out-of-range error.
-fn probe_page_count(pdf: &[u8]) -> u32 {
-    let mut n = 0;
-    while n < 10_000
-        && render_page(
-            pdf,
-            n,
-            &RenderOptions {
-                scale: 0.2,
-                ..Default::default()
-            },
-        )
-        .is_ok()
-    {
-        n += 1;
-    }
-    n
 }
 
 fn save_png(dir: &Path, name: &str, page: u32, kind: &str, png: &[u8]) {
@@ -753,6 +1057,8 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Self-contained stylesheet for the report (light/dark aware).
@@ -840,6 +1146,16 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
         } else {
             format!("<div class=\"note\">{}</div>", esc(&r.note))
         };
+        let font_summary = if r.fonts.is_empty() {
+            "—".to_string()
+        } else {
+            esc(&r.fonts.join(", "))
+        };
+        let truth_font_summary = if r.truth_fonts.is_empty() {
+            "—".to_string()
+        } else {
+            esc(&r.truth_fonts.join(", "))
+        };
         let frames = if pages.join(format!("{}-0-ours.png", r.name)).exists() {
             format!(
                 "<div class=\"frames\">\
@@ -859,20 +1175,25 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
                <span class=\"badge {cls}\">{badge}</span>\
                <span class=\"name\">{name}</span><span class=\"chip\">{tier}</span>\
                <span class=\"spacer\"></span><div class=\"metrics\">\
-                 <div class=\"metric\"><span class=\"l\">ssim</span><span class=\"v {cls}\">{ssim:.4}</span></div>\
+                 <div class=\"metric\"><span class=\"l\">ssim (ink)</span><span class=\"v {cls}\">{ssim:.4}</span></div>\
+                 <div class=\"metric\"><span class=\"l\">unweighted</span><span class=\"v\">{ssim_unweighted:.4}</span></div>\
                  <div class=\"bar\"><div class=\"fill {cls}\" style=\"width:{fill:.1}%\"></div>\
                    <div class=\"tick\" style=\"left:{tick:.1}%\"></div></div>\
                  <div class=\"metric\"><span class=\"l\">threshold</span><span class=\"v\">{thr:.2}</span></div>\
                  <div class=\"metric\"><span class=\"l\">diff</span><span class=\"v\">{diff:.2}%</span></div>\
                  <div class=\"metric\"><span class=\"l\">pages</span><span class=\"v\">{op}/{tp}</span></div>\
+                 <div class=\"metric\" title=\"Word PDF: {truth_fonts}\"><span class=\"l\">fonts</span><span class=\"v\">{fonts}</span></div>\
                </div></div>{note}{frames}</article>",
             name = esc(&r.name),
             tier = esc(&r.tier),
             ssim = r.ssim,
+            ssim_unweighted = r.ssim_unweighted,
             thr = r.threshold,
             diff = r.diff_pct * 100.0,
             op = r.our_pages,
             tp = r.truth_pages,
+            fonts = font_summary,
+            truth_fonts = truth_font_summary,
             fill = scale(r.ssim),
             tick = scale(r.threshold),
         ));

@@ -334,6 +334,7 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
         "arial" | "helvetica" | "segoe ui" | "liberation sans" => &["Arimo", "Liberation Sans"],
         "times new roman" | "times" | "liberation serif" => &["Tinos", "Liberation Serif"],
         "courier new" | "courier" | "liberation mono" => &["Cousine", "Liberation Mono"],
+        "noto sans symbols" | "noto sans symbols 2" => &["Carlito"],
         _ => &[],
     }
 }
@@ -458,6 +459,7 @@ mod tests {
             substitution_targets("Courier New"),
             &["Cousine", "Liberation Mono"]
         );
+        assert_eq!(substitution_targets("Noto Sans Symbols"), &["Carlito"]);
         assert!(substitution_targets("Comic Sans MS").is_empty());
     }
 

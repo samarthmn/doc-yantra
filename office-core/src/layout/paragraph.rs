@@ -26,6 +26,13 @@ use std::rc::Rc;
 
 pub(crate) type NoteSequence = HashMap<(NoteKind, i64), u32>;
 
+/// Shaped intrinsic widths used by Word AutoFit table measurement.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct IntrinsicWidths {
+    pub(crate) min_content_pt: f64,
+    pub(crate) max_content_pt: f64,
+}
+
 /// Field substitution context (page numbering) for headers/footers.
 #[derive(Debug, Clone)]
 pub struct FieldContext {
@@ -1256,6 +1263,81 @@ fn flatten(
         doc, warnings, para, &para.runs, &context, field_ctx, &mut atoms,
     )?;
     Ok(atoms)
+}
+
+/// Measures the paragraph with the same resolved run properties and shaper as
+/// normal layout, without assigning it a line box. `min_content_pt` is the
+/// widest breakable word/atom and `max_content_pt` is the widest explicit line
+/// when left unwrapped.
+pub(crate) fn measure_intrinsic_widths(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    para: &Paragraph,
+    rels: &HashMap<String, String>,
+    note_sequence: Option<&NoteSequence>,
+) -> Result<IntrinsicWidths> {
+    let atoms = flatten(doc, warnings, para, rels, None, note_sequence)?;
+    let eff_para = doc.styles.para_props(&para.props);
+    let mut tab_stops = eff_para.tabs.clone();
+    tab_stops.sort_by(|left, right| left.pos_pt.total_cmp(&right.pos_pt));
+
+    let mut line_width = 0.0_f64;
+    let mut trailing_space = 0.0_f64;
+    let mut unit_width = 0.0_f64;
+    let mut widest_line = 0.0_f64;
+    let mut widest_unit = 0.0_f64;
+    let finish_unit = |unit: &mut f64, widest: &mut f64| {
+        *widest = (*widest).max(*unit);
+        *unit = 0.0;
+    };
+    let finish_line = |line: &mut f64, trailing: &mut f64, widest: &mut f64| {
+        *widest = (*widest).max((*line - *trailing).max(0.0));
+        *line = 0.0;
+        *trailing = 0.0;
+    };
+
+    for atom in &atoms {
+        match atom {
+            Atom::Break(_) => {
+                finish_unit(&mut unit_width, &mut widest_unit);
+                finish_line(&mut line_width, &mut trailing_space, &mut widest_line);
+            }
+            Atom::Tab { .. } => {
+                finish_unit(&mut unit_width, &mut widest_unit);
+                line_width =
+                    next_tab_stop(line_width, doc.settings.default_tab_stop_pt, &tab_stops);
+                trailing_space = 0.0;
+            }
+            Atom::Bookmark(_) => {}
+            _ => {
+                let advance = atom.advance();
+                line_width += advance;
+                if atom.is_space() {
+                    finish_unit(&mut unit_width, &mut widest_unit);
+                    trailing_space += advance;
+                } else {
+                    unit_width += advance;
+                    trailing_space = 0.0;
+                    if atom.allows_line_break_after() {
+                        finish_unit(&mut unit_width, &mut widest_unit);
+                    }
+                }
+            }
+        }
+    }
+    finish_unit(&mut unit_width, &mut widest_unit);
+    finish_line(&mut line_width, &mut trailing_space, &mut widest_line);
+
+    let left = eff_para.indent.left_pt.unwrap_or(0.0).max(0.0);
+    let right = eff_para.indent.right_pt.unwrap_or(0.0).max(0.0);
+    let first = eff_para.indent.first_line_pt.unwrap_or(0.0).max(0.0);
+    let horizontal_insets = left + right + first;
+    let min_content_pt = widest_unit + horizontal_insets;
+    let max_content_pt = (widest_line + horizontal_insets).max(min_content_pt);
+    Ok(IntrinsicWidths {
+        min_content_pt,
+        max_content_pt,
+    })
 }
 
 struct FlattenContext<'a> {

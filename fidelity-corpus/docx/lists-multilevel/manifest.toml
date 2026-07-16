@@ -1,6 +1,7 @@
 title = "Multi-level numbered list"
 tier = "extended"
 ssim_threshold = 0.93
+expected_fonts = ["Carlito"]
 max_page_count_delta = 0
 word_version = "Microsoft Word 2021"
 ground_truth_exported_at = "2026-07-09"

@@ -11,5 +11,8 @@ pdf-core/pdfium/
 # Per-task scratch artifacts (never committed).
 /tmp/
 
+# Hash-verified live font cache for the dev-only Office fidelity harness.
+/office-core/fidelity/fonts-cache/
+
 # The wasm-pack build output (pdf-core/wasm/pkg) IS committed intentionally,
 # so consumers and CI can install without a Rust toolchain. Do not ignore it.

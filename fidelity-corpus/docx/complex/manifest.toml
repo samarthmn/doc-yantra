@@ -1,6 +1,7 @@
 title = "Complex DOCX image wrapping and table layout"
 tier = "core"
 ssim_threshold = 0.90
+expected_fonts = ["Carlito"]
 max_page_count_delta = 0
 word_version = "Microsoft Word LTSC"
 ground_truth_exported_at = "2026-07-13"

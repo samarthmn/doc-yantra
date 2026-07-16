@@ -72,13 +72,15 @@ The Office wasm package is also built with `--no-default-features --features was
 It contains no fonts: hosts discover canonical requests with
 `office_font_requests()`, supply validated SFNT bytes with
 `office_register_font()`, then profile and convert. Native Office builds retain
-the default `bundled-fonts` feature for hermetic tests and fidelity runs.
+the default `bundled-fonts` feature for hermetic engine tests; fidelity corpus
+runs register the hash-pinned provider fonts described below.
 
 ## Running the full fidelity suite
 
 The full fidelity check runs the harness tests, verifies that every corpus case
 has a Word-exported ground truth, then scores the complete blocking DOCX corpus.
-Run it from the repository root:
+Run it from the repository root (the first command is needed only once per
+machine):
 
 ```bash
 ./pdf-core/scripts/fetch-pdfium.sh  # one-time: install the native pdfium library
@@ -92,6 +94,26 @@ The corpus command requires every core case to pass and at least 90% of the
 extended cases to pass. It writes the HTML report to
 `tmp/fidelity-report/index.html` at the repository root. Use
 `--report-dir ../tmp/<name>` to keep a separate report for a specific run.
+
+Corpus runs resolve the fonts declared by each DOCX automatically from the
+committed `office-core/fidelity/fonts.lock`. On a cold cache they require
+network access and populate the ignored, content-addressed
+`office-core/fidelity/fonts-cache/`; warm runs verify and reuse those bytes
+without downloading them again. Do not pass host font directories to `run`.
+`--font-dir` remains available only on the diagnostic `probe` command.
+
+To score one case while developing:
+
+```bash
+cd office-core
+cargo run -p fidelity -- run \
+  --case gdocs-anchors-toc \
+  --report-dir ../tmp/fidelity-gdocs-anchors-toc
+```
+
+`cargo run -p fidelity -- lock-fonts` is a maintenance command for an
+intentional font-version refresh; it is not part of a normal test run. Review
+and commit the resulting `fonts.lock` change together with that upgrade.
 
 ## Releasing
 

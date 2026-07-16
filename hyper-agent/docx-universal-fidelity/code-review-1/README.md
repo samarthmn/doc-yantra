@@ -26,6 +26,10 @@ Reviewed commits: `0480b1b` (step-0 remediation baseline), `729f9a5` (6A fontles
 
 Details and exact code references: [`01-findings.md`](./01-findings.md). Full fix specifications (ready for the implementing agent): [`02-fix-specs.md`](./02-fix-specs.md).
 
+The post-implementation per-case weighted/unweighted comparison is recorded in
+[`03-ink-weighted-rollout.md`](./03-ink-weighted-rollout.md); thresholds and
+goldens remain frozen as required by §3.4.
+
 ## Re-verification required for sign-off
 
 From a **fresh checkout** with no local font directories and no manual pre-steps (owner direction: fidelity must exercise the real on-demand font pipeline — no `--font-dir`):

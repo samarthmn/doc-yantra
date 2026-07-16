@@ -1288,7 +1288,7 @@ fn a_table_fragment_repaints_its_collapsed_top_boundary_on_the_next_page() {
         })
         .collect::<String>();
     let body = format!(
-        r#"<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="8" w:color="4472C4"/><w:left w:val="single" w:sz="8" w:color="4472C4"/><w:bottom w:val="single" w:sz="8" w:color="4472C4"/><w:right w:val="single" w:sz="8" w:color="4472C4"/><w:insideH w:val="single" w:sz="8" w:color="4472C4"/><w:insideV w:val="single" w:sz="8" w:color="4472C4"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid>{rows}</w:tbl><w:sectPr><w:pgSz w:w="12240" w:h="5760"/><w:pgMar w:top="720" w:right="1800" w:bottom="720" w:left="1800"/></w:sectPr>"#
+        r#"<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/><w:tblBorders><w:top w:val="single" w:sz="8" w:color="4472C4"/><w:left w:val="single" w:sz="8" w:color="4472C4"/><w:bottom w:val="single" w:sz="8" w:color="4472C4"/><w:right w:val="single" w:sz="8" w:color="4472C4"/><w:insideH w:val="single" w:sz="8" w:color="4472C4"/><w:insideV w:val="single" w:sz="8" w:color="4472C4"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid>{rows}</w:tbl><w:sectPr><w:pgSz w:w="12240" w:h="5760"/><w:pgMar w:top="720" w:right="1800" w:bottom="720" w:left="1800"/></w:sectPr>"#
     );
     let laid = layout_body(&body);
     assert_eq!(laid.pages.len(), 2);
@@ -1421,6 +1421,115 @@ fn bordered_table_draws_borders_and_text() {
     let text = page_text(page);
     for cell in ["A1", "B1", "A2", "B2"] {
         assert!(text.contains(cell), "cell {cell} missing from {text:?}");
+    }
+}
+
+#[test]
+fn auto_layout_table_refits_columns_to_shaped_content() {
+    let mut rows = String::new();
+    for row in 0..3 {
+        rows.push_str("<w:tr>");
+        for column in 0..3 {
+            rows.push_str(&format!(
+                "<w:tc><w:p><w:r><w:t>R{row}C{column}</w:t></w:r></w:p></w:tc>"
+            ));
+        }
+        rows.push_str("</w:tr>");
+    }
+    let body = format!(
+        r#"<w:tbl>
+          <w:tblPr><w:tblBorders>
+            <w:top w:val="single" w:sz="6"/><w:left w:val="single" w:sz="6"/>
+            <w:bottom w:val="single" w:sz="6"/><w:right w:val="single" w:sz="6"/>
+            <w:insideH w:val="single" w:sz="6"/><w:insideV w:val="single" w:sz="6"/>
+          </w:tblBorders></w:tblPr>
+          <w:tblGrid><w:gridCol w:w="2600"/><w:gridCol w:w="2600"/><w:gridCol w:w="2600"/></w:tblGrid>
+          {rows}
+        </w:tbl>"#
+    );
+    let laid = layout_body(&body);
+    let page = &laid.pages[0];
+    let mut vertical_edges = page
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Line { dx_pt, dy_pt, .. } if dx_pt.abs() < 0.01 && *dy_pt > 1.0 => {
+                Some(positioned.x_pt)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    vertical_edges.sort_by(f64::total_cmp);
+    vertical_edges.dedup_by(|left, right| (*left - *right).abs() < 0.01);
+    assert_eq!(
+        vertical_edges.len(),
+        4,
+        "vertical edges: {vertical_edges:?}"
+    );
+
+    let shaped_advance = page
+        .items
+        .iter()
+        .find_map(|positioned| match &positioned.item {
+            Item::Glyphs(run)
+                if run.glyphs.iter().map(|glyph| glyph.ch).collect::<String>() == "R0C0" =>
+            {
+                Some(run.glyphs.iter().map(|glyph| glyph.advance_pt).sum::<f64>())
+            }
+            _ => None,
+        })
+        .expect("R0C0 shaped glyph run");
+    // A bare AutoFit table has Word's 0.5pt implicit side insets. The grid
+    // runs border-center to border-center, so the stroke is not added again.
+    let expected = shaped_advance + 2.0 * 0.5;
+    assert!(
+        (expected - 23.988).abs() < 0.01,
+        "pinned AutoFit width: {expected}"
+    );
+    for width in vertical_edges.windows(2).map(|edges| edges[1] - edges[0]) {
+        assert!(
+            (width - expected).abs() <= 0.5,
+            "AutoFit column should be shaped advance + implicit insets: width={width:.3}, expected={expected:.3}, advance={shaped_advance:.3}, edges={vertical_edges:?}"
+        );
+    }
+}
+
+#[test]
+fn auto_layout_gate_preserves_tables_with_explicit_cell_widths() {
+    let body = r#"<w:tbl>
+      <w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>
+        <w:left w:val="single" w:sz="6"/><w:right w:val="single" w:sz="6"/>
+        <w:insideV w:val="single" w:sz="6"/>
+      </w:tblBorders></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2600"/><w:gridCol w:w="2600"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"#;
+    let laid = layout_body(body);
+    let mut vertical_edges = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Line { dx_pt, dy_pt, .. } if dx_pt.abs() < 0.01 && *dy_pt > 1.0 => {
+                Some(positioned.x_pt)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    vertical_edges.sort_by(f64::total_cmp);
+    vertical_edges.dedup_by(|left, right| (*left - *right).abs() < 0.01);
+    assert_eq!(
+        vertical_edges.len(),
+        3,
+        "vertical edges: {vertical_edges:?}"
+    );
+    for width in vertical_edges.windows(2).map(|edges| edges[1] - edges[0]) {
+        assert!(
+            (width - 130.0).abs() < 0.01,
+            "explicit tcW must exclude a table from AutoFit: {vertical_edges:?}"
+        );
     }
 }
 

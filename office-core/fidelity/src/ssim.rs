@@ -1,8 +1,10 @@
 //! Grayscale SSIM scoring (no external SSIM crate).
 //!
 //! Both pages are rasterized at the same scale; SSIM is computed over 8×8
-//! windows (stride 8). The page score is the mean window SSIM; a case's score is
-//! the min over its pages, and any page-count / geometry mismatch fails outright.
+//! windows (stride 8). The gating page score weights windows by visible ink;
+//! the legacy unweighted mean remains in reports for rollout comparison. A
+//! case's score is the min over its pages, and any page-count / geometry
+//! mismatch fails outright.
 
 use image::{DynamicImage, GenericImageView, Rgb, RgbImage};
 
@@ -13,6 +15,10 @@ const C2: f64 = (0.03 * 255.0) * (0.03 * 255.0);
 const DIFF_THRESHOLD: f64 = 12.0;
 /// Window SSIM below this is highlighted in the heatmap.
 const HEATMAP_THRESHOLD: f64 = 0.9;
+/// Pixels below this luma count as non-background ink.
+const INK_THRESHOLD: f64 = 250.0;
+/// Blank windows retain a small stabilizing weight.
+const BLANK_WINDOW_WEIGHT: f64 = 0.01;
 
 fn composite_over_white([r, g, b, a]: [u8; 4]) -> [u8; 3] {
     let composite = |channel: u8| {
@@ -24,8 +30,10 @@ fn composite_over_white([r, g, b, a]: [u8; 4]) -> [u8; 3] {
 
 /// The result of scoring one page pair.
 pub struct PageScore {
-    /// Mean window SSIM (0.0–1.0).
+    /// Ink-weighted window SSIM (0.0–1.0); this is the gating metric.
     pub ssim: f64,
+    /// Legacy unweighted mean window SSIM (0.0–1.0), informational only.
+    pub ssim_unweighted: f64,
     /// Fraction of pixels whose luma differs by more than [`DIFF_THRESHOLD`].
     pub diff_pct: f64,
     /// A PNG heatmap (ours, with red where windows scored below threshold).
@@ -81,8 +89,9 @@ pub fn score_pages(ours: &DynamicImage, truth: &DynamicImage) -> PageScore {
     if dw > 2 || dh > 2 {
         return PageScore {
             ssim: 0.0,
+            ssim_unweighted: 0.0,
             diff_pct: 1.0,
-            heatmap_png: heatmap(ours, &[], 0, 0),
+            heatmap_png: heatmap(ours, &[]),
         };
     }
     let w = a.w.max(b.w);
@@ -90,7 +99,9 @@ pub fn score_pages(ours: &DynamicImage, truth: &DynamicImage) -> PageScore {
     let a = a.padded(w, h);
     let b = b.padded(w, h);
 
-    let mut total = 0.0;
+    let mut weighted_total = 0.0;
+    let mut total_weight = 0.0;
+    let mut unweighted_total = 0.0;
     let mut windows = 0usize;
     let mut fail_blocks: Vec<(usize, usize)> = Vec::new();
     let mut diff_px = 0usize;
@@ -100,6 +111,7 @@ pub fn score_pages(ours: &DynamicImage, truth: &DynamicImage) -> PageScore {
     for by in 0..bh {
         for bx in 0..bw {
             let (mut sx, mut sy, mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            let (mut ink_a, mut ink_b) = (0usize, 0usize);
             for j in 0..8 {
                 for i in 0..8 {
                     let x = bx * 8 + i;
@@ -111,6 +123,8 @@ pub fn score_pages(ours: &DynamicImage, truth: &DynamicImage) -> PageScore {
                     sxx += va * va;
                     syy += vb * vb;
                     sxy += va * vb;
+                    ink_a += usize::from(va < INK_THRESHOLD);
+                    ink_b += usize::from(vb < INK_THRESHOLD);
                     if (va - vb).abs() > DIFF_THRESHOLD {
                         diff_px += 1;
                     }
@@ -124,7 +138,11 @@ pub fn score_pages(ours: &DynamicImage, truth: &DynamicImage) -> PageScore {
             let cov = sxy / n - mx * my;
             let s = ((2.0 * mx * my + C1) * (2.0 * cov + C2))
                 / ((mx * mx + my * my + C1) * (vx + vy + C2));
-            total += s;
+            let ink = ink_a.max(ink_b) as f64 / n;
+            let weight = ink.max(BLANK_WINDOW_WEIGHT);
+            weighted_total += weight * s;
+            total_weight += weight;
+            unweighted_total += s;
             windows += 1;
             if s < HEATMAP_THRESHOLD {
                 fail_blocks.push((bx, by));
@@ -132,21 +150,27 @@ pub fn score_pages(ours: &DynamicImage, truth: &DynamicImage) -> PageScore {
         }
     }
 
-    let ssim = if windows == 0 {
+    let ssim = if windows == 0 || total_weight <= f64::EPSILON {
         1.0
     } else {
-        total / windows as f64
+        weighted_total / total_weight
+    };
+    let ssim_unweighted = if windows == 0 {
+        1.0
+    } else {
+        unweighted_total / windows as f64
     };
     let diff_pct = diff_px as f64 / (w * h).max(1) as f64;
     PageScore {
         ssim,
+        ssim_unweighted,
         diff_pct,
-        heatmap_png: heatmap(ours, &fail_blocks, w, h),
+        heatmap_png: heatmap(ours, &fail_blocks),
     }
 }
 
 /// Builds a heatmap PNG: `ours` with a red tint over failed 8×8 windows.
-fn heatmap(ours: &DynamicImage, fail_blocks: &[(usize, usize)], _w: usize, _h: usize) -> Vec<u8> {
+fn heatmap(ours: &DynamicImage, fail_blocks: &[(usize, usize)]) -> Vec<u8> {
     let (iw, ih) = ours.dimensions();
     let mut out = RgbImage::new(iw, ih);
     for (x, y, p) in ours.pixels() {
@@ -199,7 +223,38 @@ mod tests {
         let a = noise(64, 64, 5);
         let s = score_pages(&a, &a);
         assert!(s.ssim > 0.999, "identical → ~1.0, got {}", s.ssim);
+        assert!(s.ssim_unweighted > 0.999);
         assert_eq!(s.diff_pct, 0.0);
+    }
+
+    #[test]
+    fn sparse_ink_mismatch_is_not_averaged_away_by_blank_windows() {
+        let blank = solid(64, 64, 255);
+        let mut marked = RgbImage::from_pixel(64, 64, Rgb([255, 255, 255]));
+        for y in 24..40 {
+            for x in 24..40 {
+                marked.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        let score = score_pages(&DynamicImage::ImageRgb8(marked), &blank);
+        assert!(
+            score.ssim_unweighted > 0.92 && score.ssim_unweighted < 0.96,
+            "the legacy mean should document its sparse-page blind spot: {}",
+            score.ssim_unweighted
+        );
+        assert!(
+            score.ssim < 0.2,
+            "ink weighting must make the small black rectangle decisive: {}",
+            score.ssim
+        );
+    }
+
+    #[test]
+    fn blank_page_pair_scores_one_in_both_metrics() {
+        let blank = solid(64, 64, 255);
+        let score = score_pages(&blank, &blank);
+        assert_eq!(score.ssim, 1.0);
+        assert_eq!(score.ssim_unweighted, 1.0);
     }
 
     #[test]
@@ -238,6 +293,7 @@ mod tests {
         let b = solid(200, 64, 128);
         let s = score_pages(&a, &b);
         assert_eq!(s.ssim, 0.0);
+        assert_eq!(s.ssim_unweighted, 0.0);
     }
 
     #[test]
@@ -264,7 +320,7 @@ mod tests {
     #[test]
     fn heatmap_base_composites_transparency_over_white() {
         let transparent = DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 0])));
-        let png = heatmap(&transparent, &[], 8, 8);
+        let png = heatmap(&transparent, &[]);
         let decoded = image::load_from_memory(&png)
             .expect("decode heatmap")
             .to_rgb8();

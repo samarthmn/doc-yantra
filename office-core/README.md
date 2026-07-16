@@ -131,8 +131,14 @@ their producer and export-date provenance are recorded in each manifest.
 failure or an extended-tier pass rate below 90%, and emits
 `tmp/fidelity-report/index.html` at the repository root. Pass
 `--report-dir <path>` to keep a named audit report elsewhere under the repo.
-Pass repeatable `--font-dir <path>` only for host-font fidelity diagnostics;
-the normal corpus command retains the hermetic native bundled-font default.
+Normal corpus runs resolve the document's fonts automatically from the
+hash-pinned `fidelity/fonts.lock`, populating the ignored, content-addressed
+`fidelity/fonts-cache/` on the first run and reusing verified cached bytes
+thereafter. The cache needs network access only when a required entry is cold.
+Do not pass host font directories to `run`; repeatable `--font-dir <path>` is
+available only on `probe` for host-font diagnostics. Run
+`cargo run -p fidelity -- lock-fonts` only when deliberately refreshing the
+committed font lock.
 Calibration constants and their adjustments are logged in
 `LAYOUT_CALIBRATION.md`.
 
@@ -152,7 +158,7 @@ within 0.3 pt of Word. The executable core gate is 0.90, and the rebuilt
 six-page fixture passes with a minimum SSIM of 0.9374006584. PDF.js extracts zero NUL or
 U+FFFE characters and finds the expected headings and body phrases. The final
 package source fingerprint is
-`b618638e6fea70ecfa6934a2d22af4e4a64c178df5e53dc2f02dce665a795807`.
+`add0e1fe34024cc8b5494cb4c2bd99dc31c05702c50127b7b1abf632cfdc962d`.
 Focused native PDFium and package-level PDF.js regressions preserve logical
 source order, line ownership, and selection geometry for decomposed Latin,
 Arabic and Hebrew mark stacks, and wrapped right-to-left text.

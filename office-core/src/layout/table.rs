@@ -2,14 +2,15 @@
 //! and shading. Produces per-row [`RowLayout`]s that [`super::flow`] places and
 //! page-breaks between (repeating header rows).
 //!
-//! v1 uses Word's stored `tblGrid` widths (Word writes resolved widths even for
-//! autofit tables), scaled to the available width; the min/max autofit refit is
-//! a fidelity-harness refinement.
+//! Stored `tblGrid` widths remain authoritative for fixed or explicitly-sized
+//! tables. Tables with Word's unqualified automatic layout use shaped
+//! min/max-content widths instead.
 
 use super::assemble::WordDoc;
 use super::numbering_layout::ListCounters;
 use super::paragraph::{
-    InternalLinkRect, LineItem, NoteSequence, layout_paragraph_with_note_sequence,
+    InternalLinkRect, IntrinsicWidths, LineItem, NoteSequence, layout_paragraph_with_note_sequence,
+    measure_intrinsic_widths,
 };
 use super::{FillRule, Item, PathCommand, Positioned, Stroke};
 use crate::Result;
@@ -21,6 +22,10 @@ use std::collections::HashMap;
 
 /// Default cell side margin (108 twips = 5.4pt) when unset.
 const DEFAULT_CELL_MARGIN_PT: f64 = 5.4;
+/// Word's implicit side inset for an unqualified AutoFit table. Unlike the
+/// `TableNormal` default used by stored-grid tables, a bare synthetic table
+/// exported by Word places text 0.5pt inside the grid centerline.
+const AUTOFIT_CELL_MARGIN_PT: f64 = 0.5;
 
 /// A laid-out table row: items positioned relative to the row's top-left
 /// (row-left is the table's left edge in content coordinates).
@@ -117,7 +122,7 @@ pub(crate) fn layout_table_with_width(
         table_left,
         note_sequence,
     } = *options;
-    let cols = resolve_columns(table, avail_width_pt);
+    let cols = resolve_columns(doc, warnings, table, rels, avail_width_pt, note_sequence)?;
     let grid_width: f64 = cols.iter().sum();
     let visible_rows: Vec<&Row> = table.rows.iter().filter(|row| !row.props.hidden).collect();
     let (left_outer_half, right_outer_half) =
@@ -131,7 +136,11 @@ pub(crate) fn layout_table_with_width(
         .props
         .cell_margins
         .left
-        .unwrap_or(DEFAULT_CELL_MARGIN_PT);
+        .unwrap_or(if should_autofit(table) {
+            AUTOFIT_CELL_MARGIN_PT
+        } else {
+            DEFAULT_CELL_MARGIN_PT
+        });
     let start_offset = if table.props.floating.is_some() {
         0.0
     } else {
@@ -689,9 +698,25 @@ fn counter_label(
     super::numbering_layout::build_label(doc, warnings, p, &text, &level)
 }
 
-/// Resolves column widths from the grid, scaled to the available width.
-fn resolve_columns(table: &Table, avail: f64) -> Vec<f64> {
-    let column_count = table
+/// Resolves column widths. Word AutoFit applies only to an automatic table
+/// whose cells carry no explicit absolute/percentage widths; every other table
+/// retains the calibrated stored-grid path.
+fn resolve_columns(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    table: &Table,
+    rels: &HashMap<String, String>,
+    avail: f64,
+    note_sequence: Option<&NoteSequence>,
+) -> Result<Vec<f64>> {
+    if should_autofit(table) {
+        return autofit_columns(doc, warnings, table, rels, avail, note_sequence);
+    }
+    Ok(resolve_stored_columns(table, avail))
+}
+
+fn table_column_count(table: &Table) -> usize {
+    table
         .rows
         .iter()
         .map(|row| {
@@ -705,7 +730,188 @@ fn resolve_columns(table: &Table, avail: f64) -> Vec<f64> {
         })
         .max()
         .unwrap_or(1)
-        .max(1);
+        .max(1)
+}
+
+fn should_autofit(table: &Table) -> bool {
+    !table.props.layout_fixed
+        && matches!(
+            table.props.width,
+            None | Some(TblWidth::Auto | TblWidth::Nil)
+        )
+        && !table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .any(|cell| matches!(cell.props.width, Some(TblWidth::Pt(_) | TblWidth::Pct(_))))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SpanningIntrinsic {
+    start: usize,
+    span: usize,
+    widths: IntrinsicWidths,
+}
+
+fn autofit_columns(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    table: &Table,
+    rels: &HashMap<String, String>,
+    avail: f64,
+    note_sequence: Option<&NoteSequence>,
+) -> Result<Vec<f64>> {
+    let (column_min, column_max) =
+        autofit_intrinsic_columns(doc, warnings, table, rels, note_sequence)?;
+    let min_total: f64 = column_min.iter().sum();
+    let max_total: f64 = column_max.iter().sum();
+    let available = avail.max(1.0);
+    let target = if min_total > available {
+        min_total
+    } else {
+        max_total.min(available)
+    };
+    if (target - max_total).abs() <= 0.01 {
+        return Ok(column_max);
+    }
+
+    let remaining = (target - min_total).max(0.0);
+    let flexibility = column_min
+        .iter()
+        .zip(&column_max)
+        .map(|(minimum, maximum)| (maximum - minimum).max(0.0))
+        .collect::<Vec<_>>();
+    let total_flexibility: f64 = flexibility.iter().sum();
+    if total_flexibility <= f64::EPSILON {
+        return Ok(column_min);
+    }
+    Ok(column_min
+        .into_iter()
+        .zip(flexibility)
+        .map(|(minimum, flex)| minimum + remaining * flex / total_flexibility)
+        .collect())
+}
+
+fn autofit_intrinsic_columns(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    table: &Table,
+    rels: &HashMap<String, String>,
+    note_sequence: Option<&NoteSequence>,
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    let column_count = table_column_count(table);
+    let mut requirements = Vec::new();
+    for row in table.rows.iter().filter(|row| !row.props.hidden) {
+        let mut column = row.props.grid_before as usize;
+        for cell in &row.cells {
+            let span = (cell.props.grid_span.max(1) as usize)
+                .min(column_count.saturating_sub(column).max(1));
+            if cell.props.v_merge != Some(VMerge::Continue) {
+                let content =
+                    measure_cell_intrinsics(doc, warnings, &cell.content, rels, note_sequence)?;
+                let (margin_left, margin_right, _, _) = cell_margins(cell, table);
+                requirements.push(SpanningIntrinsic {
+                    start: column,
+                    span,
+                    widths: IntrinsicWidths {
+                        min_content_pt: content.min_content_pt + margin_left + margin_right,
+                        max_content_pt: content.max_content_pt + margin_left + margin_right,
+                    },
+                });
+            }
+            column += span;
+        }
+    }
+    requirements.sort_by_key(|requirement| requirement.span);
+
+    let mut column_min = vec![1.0; column_count];
+    let mut column_max = vec![1.0; column_count];
+    for requirement in requirements {
+        apply_required_width(
+            &mut column_min,
+            requirement.start,
+            requirement.span,
+            requirement.widths.min_content_pt,
+        );
+        apply_required_width(
+            &mut column_max,
+            requirement.start,
+            requirement.span,
+            requirement.widths.max_content_pt,
+        );
+        for index in requirement.start..(requirement.start + requirement.span).min(column_count) {
+            column_max[index] = column_max[index].max(column_min[index]);
+        }
+    }
+    Ok((column_min, column_max))
+}
+
+fn measure_cell_intrinsics(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    blocks: &[BlockContent],
+    rels: &HashMap<String, String>,
+    note_sequence: Option<&NoteSequence>,
+) -> Result<IntrinsicWidths> {
+    let mut widths = IntrinsicWidths::default();
+    for block in blocks {
+        let block_widths = match block {
+            BlockContent::Paragraph(paragraph) => {
+                measure_intrinsic_widths(doc, warnings, paragraph, rels, note_sequence)?
+            }
+            BlockContent::Table(table) => {
+                measure_table_intrinsics(doc, warnings, table, rels, note_sequence)?
+            }
+        };
+        widths.min_content_pt = widths.min_content_pt.max(block_widths.min_content_pt);
+        widths.max_content_pt = widths.max_content_pt.max(block_widths.max_content_pt);
+    }
+    Ok(widths)
+}
+
+fn measure_table_intrinsics(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    table: &Table,
+    rels: &HashMap<String, String>,
+    note_sequence: Option<&NoteSequence>,
+) -> Result<IntrinsicWidths> {
+    if should_autofit(table) {
+        let (minimums, maximums) =
+            autofit_intrinsic_columns(doc, warnings, table, rels, note_sequence)?;
+        return Ok(IntrinsicWidths {
+            min_content_pt: minimums.iter().sum(),
+            max_content_pt: maximums.iter().sum(),
+        });
+    }
+    let columns = resolve_stored_columns(table, f64::MAX / 4.0);
+    let total: f64 = columns.iter().sum();
+    Ok(IntrinsicWidths {
+        min_content_pt: total,
+        max_content_pt: total,
+    })
+}
+
+fn apply_required_width(columns: &mut [f64], start: usize, span: usize, required: f64) {
+    if span == 0 || start >= columns.len() || !required.is_finite() {
+        return;
+    }
+    let end = (start + span).min(columns.len());
+    let current: f64 = columns[start..end].iter().sum();
+    let deficit = (required - current).max(0.0);
+    if deficit <= f64::EPSILON {
+        return;
+    }
+    let share = deficit / (end - start) as f64;
+    for column in &mut columns[start..end] {
+        *column += share;
+    }
+}
+
+/// Resolves the calibrated non-AutoFit path from the stored grid and authored
+/// widths, scaled to the available width.
+fn resolve_stored_columns(table: &Table, avail: f64) -> Vec<f64> {
+    let column_count = table_column_count(table);
     let target_width = table
         .props
         .width
@@ -817,8 +1023,13 @@ fn column_offsets(cols: &[f64], table_left: f64) -> Vec<f64> {
 fn cell_margins(cell: &Cell, table: &Table) -> (f64, f64, f64, f64) {
     let m = &cell.props.margins;
     let d = &table.props.cell_margins;
-    let l = m.left.or(d.left).unwrap_or(DEFAULT_CELL_MARGIN_PT);
-    let r = m.right.or(d.right).unwrap_or(DEFAULT_CELL_MARGIN_PT);
+    let default_side = if should_autofit(table) {
+        AUTOFIT_CELL_MARGIN_PT
+    } else {
+        DEFAULT_CELL_MARGIN_PT
+    };
+    let l = m.left.or(d.left).unwrap_or(default_side);
+    let r = m.right.or(d.right).unwrap_or(default_side);
     let t = m.top.or(d.top).unwrap_or(0.0);
     let b = m.bottom.or(d.bottom).unwrap_or(0.0);
     (l, r, t, b)

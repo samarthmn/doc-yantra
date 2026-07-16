@@ -27,6 +27,7 @@ Per failing case:
 | `paragraph.rs` | `SCRIPT_RISE` | 0.35 | super/subscript baseline rise (× size) |
 | `paragraph.rs` | line height | OS/2 winAscent+winDescent | the primary parity lever (T2.5) |
 | `table.rs` | `DEFAULT_CELL_MARGIN_PT` | 5.4 | 108 twips default cell side margin |
+| `table.rs` | `AUTOFIT_CELL_MARGIN_PT` | 0.5 | bare AutoFit table side inset; stored-grid tables keep 5.4pt |
 | `flow.rs` | paragraph gap | `max(after_prev, before_next)` | Word collapse rule |
 | `flow.rs` | `MIN_TEXT_WINDOW_PT` | 36.0 | minimum useful middle/side wrap interval |
 | `flow.rs` | `PAGE_FLOAT_REFLOW_LIMIT` | 3 | deterministic page-float pagination fixpoint bound |
@@ -201,5 +202,28 @@ Per failing case:
   dense TOC page rises from 0.886703 to 0.935346. `complex` stays above the
   required 0.937401 floor and page 6 rises to 0.949921. The 44-page table case
   remains green at 0.918135 minimum.
+
+### 2026-07-16 — shaped min/max AutoFit for unqualified tables
+
+- **Axis:** the three synthetic table fixtures omitted `tblW`, `tcW`, and
+  `tblLayout`, so Word ignored their 130pt stored grid columns and fitted the
+  grid to shaped cell content. The engine continued to paint three 130pt
+  columns.
+- **Gate:** AutoFit runs only when layout is not fixed, table width is absent,
+  `auto`, or `nil`, and no cell has a `dxa`/`pct` width. The calibrated Google
+  fixtures (`tblLayout=fixed`) and `complex` (explicit `tcW`) retain the stored
+  grid path.
+- **Change:** paragraph runs are shaped once into minimum and maximum intrinsic
+  widths; cell spans distribute deficits over their columns, flexible columns
+  interpolate between min/max at the available width, and nested tables recurse.
+  A bare AutoFit table uses Word's measured 0.5pt implicit side inset; its grid
+  is border-center to border-center, so the stroke is not added to that width.
+  Stored-grid tables retain the existing 5.4pt `TableNormal` default.
+- **Probe evidence:** `table-fixed` moved from 130.000pt columns to 23.988pt;
+  Word's edges are 24.000pt apart. Final truth-minus-ours vertical-edge deltas
+  are 0.02–0.06pt. `table-merges` edges are within 0.09pt and `table-nested`
+  within 0.08pt.
+- **Result before ink weighting:** SSIM is 0.999422 (`table-fixed`), 0.999697
+  (`table-merges`), and 0.999851 (`table-nested`), with exact page counts.
 
 _Invariant going forward: a calibration commit gets a log entry here._

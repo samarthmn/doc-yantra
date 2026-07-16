@@ -1,6 +1,7 @@
 title = "Nested table inside a cell"
 tier = "extended"
 ssim_threshold = 0.93
+expected_fonts = ["Carlito"]
 max_page_count_delta = 0
 word_version = "Microsoft Word LTSC (exact build unavailable in PDF metadata)"
 ground_truth_exported_at = "2026-07-09"
