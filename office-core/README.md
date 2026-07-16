@@ -84,8 +84,9 @@ officecore profile report.docx | jq .            # DocProfile JSON
 
 ```js
 const engine = require("@samarthmn/doc-yantra-office");
+const provider = new engine.FontsourceProvider();
 const result = await engine.convertOnDemand(bytes, "docx", {
-  provider,                                      // trusted, batched FontProvider
+  provider,                                      // allowlisted Fontsource aliases
   mode: "compatible",                          // or "strict"
   persistentCache: new engine.NodeFontCache(cacheDirectory),
 });
@@ -104,6 +105,17 @@ order. This is an explicit host-authorized asset path; the production wasm
 package itself contains no fonts. `convertOnDemand` and `profileOnDemand`
 resolve missing faces through the configured provider and caches.
 
+For the isolated Node worker, `FontsourceProvider` maps Office families to
+fetchable metric-compatible faces (for example Calibri → Carlito and Courier
+New → Cousine). Ubuntu and Ubuntu Mono use the verified Fontsource 5.2.8
+artifacts whose internal versions are 0.83 and 0.80; other catalog families use
+the documented `latest` policy. In compatible mode the worker also boot-loads
+six SHA-256-pinned Noto Sans/Symbols faces from DocKosha's first-party origin.
+They are persisted through the same cache, re-registered after worker
+replacement, and selected only after normal resolution fails. Strict mode
+never fetches or considers this fallback. CI injects the local mock provider
+and disables fallback networking; package tests never call a public CDN.
+
 The `unsupported:` message prefix and the 50 MiB pre-copy input guard are a
 stable API (DocKosha parses them). Trap contract is identical to `pdf-core`:
 recoverable failures are `JsError`; a panic/OOM traps and the instance must be
@@ -119,6 +131,8 @@ their producer and export-date provenance are recorded in each manifest.
 failure or an extended-tier pass rate below 90%, and emits
 `tmp/fidelity-report/index.html` at the repository root. Pass
 `--report-dir <path>` to keep a named audit report elsewhere under the repo.
+Pass repeatable `--font-dir <path>` only for host-font fidelity diagnostics;
+the normal corpus command retains the hermetic native bundled-font default.
 Calibration constants and their adjustments are logged in
 `LAYOUT_CALIBRATION.md`.
 

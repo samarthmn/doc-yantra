@@ -132,7 +132,7 @@ if (profile.supported) office.office_to_pdf(bytes, "docx");
 
 // Convenience facade performs the same sequence, batching the provider call.
 const result = await office.convertOnDemand(bytes, "docx", {
-  provider: trustedProvider,
+  provider: new office.FontsourceProvider(),
   mode: "compatible", // or "strict"
   memoryCache: new office.MemoryFontCache(),
   persistentCache: new office.NodeFontCache(absoluteCacheDirectory),
@@ -146,6 +146,16 @@ Browser consumers initialize the ESM default export first and may use
 bytes (never a document-derived URL), enforce CORS/content type/redirect ≤3,
 and pin SHA-256. The package validates identity, coverage, collection index,
 variable axes, and OS/2 embedding permission before registration.
+
+`FontsourceProvider` is the packaged allowlisted provider for Node and browser.
+It maps Calibri/Cambria/Arial/Times/Courier-compatible families to Fontsource
+IDs, fetches one static TTF per required Unicode subset, and registers sibling
+subset faces as one request result. Ubuntu (`v21`) and Ubuntu Mono (`v19`) use
+the immutable Fontsource `5.2.8` artifact paths and exact internal-version
+checks (`0.83` / `Version 0.80`). Other built-in families intentionally follow
+the accepted `latest` version policy; resolved hashes and name-table versions
+remain visible in font telemetry. A trusted `fallbackSource` callback may point
+at a commit-pinned Google Fonts mirror.
 
 **Stable API surface DocKosha depends on:**
 
@@ -173,9 +183,16 @@ superscripts use bundled U+207x glyph coverage; uncovered glyphs fail closed as
 DocKosha's adapter is `src/server/officeCoreWasm.ts` (mirrors `pdfCoreWasm.ts`).
 
 `createOfficeEngineWorker({ fontProvider, fontMemoryCache,
-fontPersistentCache, fontMode })` exposes `convertOnDemand()` and
+fontPersistentCache, fontMode, notoFallback })` exposes `convertOnDemand()` and
 `profileOnDemand()`. `extraFontDirs` remains an explicit, host-authorized boot
 registration mechanism; system-font scanning is never implicit.
+When `fontProvider` is configured, compatible worker operations automatically
+register the six hash/version-pinned first-party Noto fallback faces and persist
+them through the same cache. Warm operations perform no fallback network I/O,
+and worker replacement re-registers cached bytes. Strict operations return an
+empty `fallbackResults` array and never touch the fallback origin. Set
+`notoFallback: false` only for a deliberately provisioned offline/test worker,
+or inject a provider/options object for controlled deployments.
 
 Office → PDF is provided by the separate
 `@samarthmn/doc-yantra-office` package for supported DOCX/PPTX/XLSX/XLSM

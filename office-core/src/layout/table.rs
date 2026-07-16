@@ -38,8 +38,12 @@ pub struct RowLayout {
 /// Laid-out table rows plus the resolved grid footprint.
 #[derive(Debug, Default)]
 pub(crate) struct TableLayout {
-    /// Resolved table width in points.
+    /// Resolved painted table width in points, including both outer half-strokes.
     pub(crate) width_pt: f64,
+    /// Outer half-stroke reserved before the first row of every page fragment.
+    pub(crate) leading_pt: f64,
+    /// Outer half-stroke reserved after the last row of every page fragment.
+    pub(crate) trailing_pt: f64,
     /// Rows positioned relative to the table's left edge.
     pub(crate) rows: Vec<TableRowLayout>,
 }
@@ -69,13 +73,25 @@ pub fn layout_table(
         table_left,
         note_sequence: None,
     };
-    Ok(
-        layout_table_with_width(doc, warnings, table, &options, counters)?
-            .rows
-            .into_iter()
-            .map(|row| row.layout)
-            .collect(),
-    )
+    let layout = layout_table_with_width(doc, warnings, table, &options, counters)?;
+    let mut rows = layout
+        .rows
+        .into_iter()
+        .map(|row| row.layout)
+        .collect::<Vec<_>>();
+    // Standalone callers (headers, footers, and text boxes) never paginate a
+    // table row-by-row, so retain the complete-table reservation here. Body
+    // flow uses `layout_table_with_width` and applies these values per fragment.
+    if let Some(first) = rows.first_mut() {
+        for item in &mut first.items {
+            item.y_pt += layout.leading_pt;
+        }
+        first.height_pt += layout.leading_pt;
+    }
+    if let Some(last) = rows.last_mut() {
+        last.height_pt += layout.trailing_pt;
+    }
+    Ok(rows)
 }
 
 #[derive(Clone, Copy)]
@@ -102,8 +118,12 @@ pub(crate) fn layout_table_with_width(
         note_sequence,
     } = *options;
     let cols = resolve_columns(table, avail_width_pt);
-    let table_width: f64 = cols.iter().sum();
-    let free_width = (avail_width_pt - table_width).max(0.0);
+    let grid_width: f64 = cols.iter().sum();
+    let visible_rows: Vec<&Row> = table.rows.iter().filter(|row| !row.props.hidden).collect();
+    let (left_outer_half, right_outer_half) =
+        vertical_outer_half_widths(doc, &visible_rows, table, cols.len());
+    let painted_width = left_outer_half + grid_width + right_outer_half;
+    let free_width = (avail_width_pt - painted_width).max(0.0);
     // `tblInd` positions an in-flow table. A floating table's frame is instead
     // positioned exclusively by `tblpPr`; applying both offsets shifts its
     // painted grid away from the wrap exclusion Word computes for that frame.
@@ -128,19 +148,35 @@ pub(crate) fn layout_table_with_width(
             }
         })
     };
-    let aligned_left = table_left
-        + match table.props.alignment.unwrap_or(Jc::Start) {
+    let alignment = table.props.alignment.unwrap_or(Jc::Start);
+    let painted_left = table_left
+        + match alignment {
             Jc::Center => free_width / 2.0,
             Jc::End => free_width,
             Jc::Start => start_offset,
             Jc::Both | Jc::Distribute => 0.0,
         };
-    let col_x = column_offsets(&cols, aligned_left);
+    // Center/end/floating placement operates on the painted footprint. For a
+    // start-aligned in-flow table, Word preserves the historical centerline
+    // anchor when `tblInd` is absent; `complex` page 6 measures within 0.02pt
+    // under that convention. An explicit negative `tblInd`, however, anchors
+    // the painted outer edge: the page-41 probe for `gdocs-tables-longdoc`
+    // measured the complete block +0.5pt from the former centerline anchor.
+    let reserves_painted_left = table.props.floating.is_some()
+        || matches!(alignment, Jc::Center | Jc::End)
+        || (alignment == Jc::Start && table.props.indent_pt.is_some_and(|indent| indent < 0.0));
+    let grid_left = painted_left
+        + if reserves_painted_left {
+            left_outer_half
+        } else {
+            0.0
+        };
+    let col_x = column_offsets(&cols, grid_left);
     let mut rows = Vec::new();
 
-    let visible_rows: Vec<&Row> = table.rows.iter().filter(|row| !row.props.hidden).collect();
     let horizontal_boundaries =
-        horizontal_boundary_plan(doc, &visible_rows, table, &cols, aligned_left);
+        horizontal_boundary_plan(doc, &visible_rows, table, &cols, grid_left);
+    let vertical_boundaries = vertical_boundary_plan(doc, &visible_rows, table, &cols, grid_left);
 
     let mut prepared_rows = Vec::with_capacity(visible_rows.len());
     for (row_index, row) in visible_rows.iter().copied().enumerate() {
@@ -198,7 +234,6 @@ pub(crate) fn layout_table_with_width(
                 merge_end_row,
                 v_align: cell.props.v_align,
                 shading: cell.props.shading.map(Rgba::opaque),
-                borders: resolve_cell_borders(doc, cell, table, col == 0, col + span == cols.len()),
                 content,
                 clip_content: matches!(row.props.height, Some(RowHeight::Exact(_))),
             });
@@ -260,7 +295,7 @@ pub(crate) fn layout_table_with_width(
         let mut internal_links = Vec::new();
         for cb in &prepared.cells {
             let content_span_height: f64 = row_heights[row_index..=cb.merge_end_row].iter().sum();
-            emit_cell(cb, height, content_span_height, &mut items);
+            emit_cell(cb, content_span_height, &mut items);
             place_cell_metadata(
                 cb,
                 content_span_height,
@@ -274,6 +309,7 @@ pub(crate) fn layout_table_with_width(
         // new page still has the top edge Word paints for that fragment.
         emit_horizontal_boundary(&horizontal_boundaries[row_index], 0.0, &mut items);
         emit_horizontal_boundary(&horizontal_boundaries[row_index + 1], height, &mut items);
+        emit_vertical_boundaries(&vertical_boundaries[row_index], height, &mut items);
         rows.push(TableRowLayout {
             layout: RowLayout {
                 height_pt: height,
@@ -286,33 +322,19 @@ pub(crate) fn layout_table_with_width(
         });
     }
 
-    // Row heights run from horizontal border center to border center. Reserve
-    // the two outer half-strokes as part of the table block as well, so the
-    // paragraph gap ends at the table's outer edge and following content starts
-    // after its bottom outer edge. Internal shared boundaries remain unchanged.
+    // Row heights run from horizontal border center to border center. Flow owns
+    // these outer reservations because every page fragment needs them, not just
+    // the first and last row of the complete table.
     let leading = horizontal_boundaries
         .first()
         .map_or(0.0, |boundary| boundary.max_width_pt / 2.0);
     let trailing = horizontal_boundaries
         .last()
         .map_or(0.0, |boundary| boundary.max_width_pt / 2.0);
-    if let Some(first) = rows.first_mut() {
-        for item in &mut first.layout.items {
-            item.y_pt += leading;
-        }
-        for (_, y_pt) in &mut first.bookmarks {
-            *y_pt += leading;
-        }
-        for link in &mut first.internal_links {
-            link.y_pt += leading;
-        }
-        first.layout.height_pt += leading;
-    }
-    if let Some(last) = rows.last_mut() {
-        last.layout.height_pt += trailing;
-    }
     Ok(TableLayout {
-        width_pt: table_width,
+        width_pt: painted_width,
+        leading_pt: leading,
+        trailing_pt: trailing,
         rows,
     })
 }
@@ -337,7 +359,6 @@ struct CellBox {
     merge_end_row: usize,
     v_align: VAlign,
     shading: Option<Rgba>,
-    borders: [Option<Stroke>; 4], // top, right, bottom, left
     content: CellLayout,
     clip_content: bool,
 }
@@ -352,19 +373,10 @@ struct CellLayout {
 }
 
 /// Emits a cell's shading, content, and borders into the row's item list.
-fn emit_cell(cb: &CellBox, row_height: f64, content_span_height: f64, items: &mut Vec<LineItem>) {
+fn emit_cell(cb: &CellBox, content_span_height: f64, items: &mut Vec<LineItem>) {
     if cb.is_continue {
-        // Merged-away cell: draw only side borders so the column stays framed.
-        push_border(
-            items,
-            cb,
-            1,
-            cb.x + cb.width,
-            0.0,
-            cb.x + cb.width,
-            row_height,
-        ); // right
-        push_border(items, cb, 3, cb.x, 0.0, cb.x, row_height); // left
+        // The shared-edge planner owns every border, including the sides of a
+        // vertical-merge continuation cell.
         return;
     }
     // Row coordinates run from collapsed-border centre to collapsed-border
@@ -451,18 +463,6 @@ fn emit_cell(cb: &CellBox, row_height: f64, content_span_height: f64, items: &mu
             });
         }
     }
-    // Vertical borders remain cell-owned. Horizontal collapsed boundaries are
-    // emitted once from the precomputed table boundary plan.
-    push_border(
-        items,
-        cb,
-        1,
-        cb.x + cb.width,
-        0.0,
-        cb.x + cb.width,
-        row_height,
-    );
-    push_border(items, cb, 3, cb.x, 0.0, cb.x, row_height);
 }
 
 fn place_cell_metadata(
@@ -537,28 +537,6 @@ fn rectangle_path(left: f64, top: f64, width: f64, height: f64) -> Vec<PathComma
         PathCommand::LineTo { x: left, y: bottom },
         PathCommand::Close,
     ]
-}
-
-fn push_border(
-    items: &mut Vec<LineItem>,
-    cb: &CellBox,
-    edge: usize,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-) {
-    if let Some(stroke) = &cb.borders[edge] {
-        items.push(LineItem {
-            x_pt: x1,
-            y_pt: y1,
-            item: Item::Line {
-                dx_pt: x2 - x1,
-                dy_pt: y2 - y1,
-                stroke: stroke.clone(),
-            },
-        });
-    }
 }
 
 /// Lays out a cell's block content (paragraphs; nested tables recurse) into a
@@ -655,9 +633,9 @@ fn layout_cell(
                     table_left: 0.0,
                     note_sequence,
                 };
-                for row in
-                    layout_table_with_width(doc, warnings, t, &nested_options, counters)?.rows
-                {
+                let nested = layout_table_with_width(doc, warnings, t, &nested_options, counters)?;
+                y += nested.leading_pt;
+                for row in nested.rows {
                     for note_ref in row.note_refs {
                         if !note_refs.contains(&note_ref) {
                             note_refs.push(note_ref);
@@ -681,6 +659,7 @@ fn layout_cell(
                     }
                     y += row.layout.height_pt;
                 }
+                y += nested.trailing_pt;
             }
         }
     }
@@ -886,6 +865,12 @@ struct BoundarySegment {
     stroke: Stroke,
 }
 
+#[derive(Debug, Clone)]
+struct VerticalBoundarySegment {
+    x_pt: f64,
+    stroke: Stroke,
+}
+
 #[derive(Debug, Clone, Default)]
 struct HorizontalBoundary {
     max_width_pt: f64,
@@ -984,6 +969,122 @@ fn horizontal_boundary_plan(
             }
         })
         .collect()
+}
+
+fn vertical_outer_half_widths(
+    doc: &WordDoc,
+    rows: &[&Row],
+    table: &Table,
+    column_count: usize,
+) -> (f64, f64) {
+    let width_at = |boundary: usize| {
+        if rows.is_empty() {
+            let table_border = if boundary == 0 {
+                table.props.borders.left.as_ref()
+            } else {
+                table.props.borders.right.as_ref()
+            };
+            return stroke_from_state(&effective_border_state(None, table_border), doc)
+                .map_or(0.0, |stroke| stroke.width_pt);
+        }
+        rows.iter()
+            .filter_map(|row| {
+                stroke_from_state(
+                    &vertical_boundary_state(row, table, boundary, column_count, doc),
+                    doc,
+                )
+            })
+            .map(|stroke| stroke.width_pt)
+            .fold(0.0_f64, f64::max)
+    };
+    (width_at(0) / 2.0, width_at(column_count) / 2.0)
+}
+
+fn vertical_boundary_plan(
+    doc: &WordDoc,
+    rows: &[&Row],
+    table: &Table,
+    cols: &[f64],
+    grid_left: f64,
+) -> Vec<Vec<VerticalBoundarySegment>> {
+    let mut edges = Vec::with_capacity(cols.len() + 1);
+    let mut x = grid_left;
+    edges.push(x);
+    for width in cols {
+        x += *width;
+        edges.push(x);
+    }
+    rows.iter()
+        .map(|row| {
+            (0..=cols.len())
+                .filter_map(|boundary| {
+                    let state = vertical_boundary_state(row, table, boundary, cols.len(), doc);
+                    stroke_from_state(&state, doc).map(|stroke| VerticalBoundarySegment {
+                        x_pt: edges[boundary],
+                        stroke,
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn vertical_boundary_state(
+    row: &Row,
+    table: &Table,
+    boundary: usize,
+    column_count: usize,
+    doc: &WordDoc,
+) -> BorderState {
+    if boundary == 0 {
+        return vertical_edge_state(row_cell_placement(row, 0), table, true, true);
+    }
+    if boundary == column_count {
+        return vertical_edge_state(
+            row_cell_placement(row, column_count.saturating_sub(1)),
+            table,
+            false,
+            true,
+        );
+    }
+    let left = row_cell_placement(row, boundary - 1);
+    let right = row_cell_placement(row, boundary);
+    if left
+        .zip(right)
+        .is_some_and(|(left, right)| left.start == right.start && left.end == right.end)
+    {
+        return BorderState::Suppressed;
+    }
+    choose_boundary_border(
+        vertical_edge_state(left, table, false, false),
+        vertical_edge_state(right, table, true, false),
+        doc,
+    )
+}
+
+fn vertical_edge_state(
+    placement: Option<CellPlacement<'_>>,
+    table: &Table,
+    left: bool,
+    outer: bool,
+) -> BorderState {
+    let cell_border = placement.and_then(|placement| {
+        if left {
+            placement.cell.props.borders.left.as_ref()
+        } else {
+            placement.cell.props.borders.right.as_ref()
+        }
+    });
+    let table_border = if outer {
+        if left {
+            table.props.borders.left.as_ref()
+        } else {
+            table.props.borders.right.as_ref()
+        }
+    } else {
+        table.props.borders.inside_v.as_ref()
+    };
+    effective_border_state(cell_border, table_border)
 }
 
 fn row_cell_placement(row: &Row, column: usize) -> Option<CellPlacement<'_>> {
@@ -1113,6 +1214,24 @@ fn emit_horizontal_boundary(boundary: &HorizontalBoundary, y_pt: f64, items: &mu
     }
 }
 
+fn emit_vertical_boundaries(
+    boundaries: &[VerticalBoundarySegment],
+    height_pt: f64,
+    items: &mut Vec<LineItem>,
+) {
+    for boundary in boundaries {
+        items.push(LineItem {
+            x_pt: boundary.x_pt,
+            y_pt: 0.0,
+            item: Item::Line {
+                dx_pt: 0.0,
+                dy_pt: height_pt,
+                stroke: boundary.stroke.clone(),
+            },
+        });
+    }
+}
+
 fn apply_row_height(height: Option<crate::oxml::wml::RowHeight>, content: f64) -> f64 {
     use crate::oxml::wml::RowHeight;
     match height {
@@ -1120,35 +1239,6 @@ fn apply_row_height(height: Option<crate::oxml::wml::RowHeight>, content: f64) -
         Some(RowHeight::AtLeast(v)) => v.max(content),
         None => content.max(1.0),
     }
-}
-
-/// Resolves the cell-owned vertical strokes. Horizontal strokes are collapsed
-/// and emitted by [`horizontal_boundary_plan`].
-fn resolve_cell_borders(
-    doc: &WordDoc,
-    cell: &Cell,
-    table: &Table,
-    outer_left: bool,
-    outer_right: bool,
-) -> [Option<Stroke>; 4] {
-    let cb = &cell.props.borders;
-    let tb = &table.props.borders;
-    let right_table = if outer_right {
-        tb.right.as_ref()
-    } else {
-        tb.inside_v.as_ref()
-    };
-    let left_table = if outer_left {
-        tb.left.as_ref()
-    } else {
-        tb.inside_v.as_ref()
-    };
-    [
-        None,
-        stroke_from_state(&effective_border_state(cb.right.as_ref(), right_table), doc),
-        None,
-        stroke_from_state(&effective_border_state(cb.left.as_ref(), left_table), doc),
-    ]
 }
 
 fn stroke_from_state(state: &BorderState, doc: &WordDoc) -> Option<Stroke> {

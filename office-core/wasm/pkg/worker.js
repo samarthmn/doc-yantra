@@ -11,6 +11,10 @@ const {
   mergeHostTelemetry,
   resolveAndRegisterFonts,
 } = require('./font-provider.cjs');
+const {
+  NotoFallbackProvider,
+  registerNotoFallbackFonts,
+} = require('./noto-fallback.cjs');
 
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 
@@ -115,6 +119,19 @@ function createOfficeEngineWorker(options = {}) {
   const extraFontDirs = options.extraFontDirs === undefined
     ? []
     : requireStringArray(options.extraFontDirs, 'extraFontDirs');
+  let notoFallbackProvider;
+  if (options.notoFallback !== false && fontProvider !== undefined) {
+    if (options.notoFallback === undefined || options.notoFallback === true) {
+      notoFallbackProvider = new NotoFallbackProvider();
+    } else if (options.notoFallback && typeof options.notoFallback === 'object' &&
+               !Array.isArray(options.notoFallback) && !isProxy(options.notoFallback)) {
+      notoFallbackProvider = typeof options.notoFallback.resolve === 'function'
+        ? options.notoFallback
+        : new NotoFallbackProvider(requireRecord(options.notoFallback, 'notoFallback'));
+    } else {
+      throw errorFor('invalid_input', 'notoFallback must be false, true, a provider, or provider options');
+    }
+  }
   const entryPath = process.env.DOC_YANTRA_WORKER_TEST_HOOKS === '1' && options.__workerEntryPath
     ? options.__workerEntryPath
     : require.resolve('./worker-entry.cjs');
@@ -148,6 +165,29 @@ function createOfficeEngineWorker(options = {}) {
       client.assertInvocationActive(invocation);
       return client.invoke(workerOp, args, Math.max(1, invocation.deadlineAt - Date.now()));
     };
+    // The worker itself boots lazily. Register the hash-pinned fallback faces
+    // at the start of each compatible operation: cache hits avoid network, and
+    // repeating registration restores the faces after a trap/timeout replaces
+    // the isolated worker. Strict mode intentionally never touches fallback.
+    const fallbackResults = mode === 'compatible' && notoFallbackProvider
+      ? await registerNotoFallbackFonts(
+        (fontBytes, expectation) => invoke('registerFont', {
+          bytes: fontBytes,
+          expectation,
+        }),
+        {
+          provider: notoFallbackProvider,
+          memoryCache: fontMemoryCache,
+          persistentCache: fontPersistentCache,
+          signal: snapshot.signal,
+          timeoutMs: fontProviderTimeoutMs === undefined
+            ? Math.max(1, invocation.deadlineAt - Date.now())
+            : Math.min(fontProviderTimeoutMs, Math.max(1, invocation.deadlineAt - Date.now())),
+          negativeTtlMs: negativeFontTtlMs,
+          maxFontBytes,
+        },
+      )
+      : [];
     const requests = await invoke('fontRequests', { bytes, extension });
     if (requests.length > 0 && fontProvider === undefined) {
       throw errorFor('missing_asset', 'on-demand Office conversion requires a fontProvider');
@@ -181,6 +221,7 @@ function createOfficeEngineWorker(options = {}) {
       profile,
       fonts: profile.fonts ?? [],
       providerResults,
+      fallbackResults,
     };
     if (includePdf) {
       result.pdf = await invoke('convertWithOptions', {

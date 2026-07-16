@@ -29,11 +29,15 @@ export interface FontArtifact {
   sha256: string;
   source: string;
   license: { id: string; embeddable: boolean; subsettable: boolean };
+  coverageScripts?: string[];
+  coverageCodepoints?: number[];
+  expectedVersion?: string;
+  subset?: string;
   bytes: Uint8Array;
 }
 
 export type FontResult =
-  | { status: 'found'; request: CanonicalFontRequest; artifact: FontArtifact }
+  | { status: 'found'; request: CanonicalFontRequest; artifact: FontArtifact; artifacts?: FontArtifact[] }
   | { status: 'not_found'; request: CanonicalFontRequest }
   | { status: 'denied'; request: CanonicalFontRequest; reason: string }
   | { status: 'temporary_failure'; request: CanonicalFontRequest; reason: string };

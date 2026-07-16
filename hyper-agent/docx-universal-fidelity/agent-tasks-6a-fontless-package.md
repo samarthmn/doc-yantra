@@ -1,6 +1,6 @@
 # Agent tasks 6A — fontless package + host font-resolution architecture
 
-> **STATUS: planning complete (owner-approved restructure, 2026-07-15). Implementation not started.** This file and `agent-tasks-6b-on-demand-ubuntu.md` together replace `agent-tasks-6-on-demand-fonts.md` (deleted; its design is preserved, re-bucketed, and amended per owner review). 6A is a **pure infrastructure migration with zero fidelity movement**; 6B exercises the architecture for real (Ubuntu) and owns the `gdocs-anchors-toc` gate.
+> **STATUS: implemented and verified 2026-07-15 (`729f9a5`).** This file and `agent-tasks-6b-on-demand-ubuntu.md` together replace `agent-tasks-6-on-demand-fonts.md` (deleted; its design is preserved, re-bucketed, and amended per owner review). 6A is a **pure infrastructure migration with zero fidelity movement**; 6B exercises the architecture for real (Ubuntu) and owns the `gdocs-anchors-toc` gate.
 
 ## ⚠️ Release coupling rule (non-negotiable)
 

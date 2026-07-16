@@ -8,7 +8,7 @@ DocKosha's suites use):
 | --- | --- | --- | --- |
 | **PDF npm package** (`@samarthmn/doc-yantra`) | `tests/package-features.test.mjs` | `node --test` | Every PDF export of the built wasm package behaves correctly on real files. |
 | **Redaction package contract** | `tests/redact-package.test.mjs` | `node --test` | `redact_pdf` removes content, validates JSON, preserves recoverable errors, and guards wasm allocation. |
-| **Office npm package** (`@samarthmn/doc-yantra-office`) | `tests/office.test.mjs`, `tests/office-font-provider.test.mjs` | `node --test` | Fontless staged/on-demand APIs, deterministic mock provider, caches, telemetry, format coverage, and pre-copy guards work through the built package. |
+| **Office npm package** (`@samarthmn/doc-yantra-office`) | `tests/office.test.mjs`, `tests/office-font-provider.test.mjs`, `tests/fontsource-provider*.test.mjs`, `tests/noto-fallback.test.mjs` | `node --test` | Fontless staged/on-demand APIs, deterministic mock provider, Node/browser Fontsource resolution, fallback boot/cache recovery, telemetry, format coverage, and pre-copy guards work through the built package. |
 | **Release contract** | `tests/release-contract.test.mjs` | `node --test` | Versions align and `npm pack --dry-run` proves the Office artifact contains no font files or embedded font programs. |
 | **Rust engine** (`pdf-core`) | `pdf-core/tests/*.rs` | `cargo test` | The crate's features, plus a real-file end-to-end pipeline. |
 
@@ -35,7 +35,9 @@ Office wasm yet may run the Rust suites, but it is not release-ready until
 
 Office tests never use a public CDN. `tests/fixtures/mock-office-font-provider.cjs`
 serves pinned local OFL fixture bytes through the same provider/cache path used
-by production hosts.
+by production hosts; worker tests inject it for both authored and fallback
+registrations. This is the settled 6B CI strategy (mock provider + local fixture
+fonts), rather than a seeded cache.
 
 ### Notes on the invocation
 

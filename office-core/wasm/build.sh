@@ -62,10 +62,12 @@ node ./postprocess-glue.mjs \
 # Server worker API. Runtime is single-source at repo root; only engine op
 # tables and public facades are package-specific.
 cp ../../wasm-worker/worker-client.cjs ../../wasm-worker/worker-entry.cjs pkg/
-cp worker.js worker.d.ts worker-ops.cjs index.cjs index.d.ts font-provider.cjs font-provider.d.ts pkg/
+cp worker.js worker.d.ts worker-ops.cjs index.cjs index.d.ts font-provider.cjs font-provider.d.ts fontsource-provider.cjs fontsource-provider.d.ts noto-fallback.cjs noto-fallback.d.ts pkg/
 cp web-index.js web-index.d.ts pkg/web/
 cp font-provider-web.js pkg/web/font-provider.js
 cp font-provider-web.d.ts pkg/web/font-provider.d.ts
+cp fontsource-provider-web.js pkg/web/fontsource-provider.js
+cp fontsource-provider.d.ts pkg/web/fontsource-provider.d.ts
 
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \
 node -e '
@@ -77,7 +79,7 @@ node -e '
   j.main = "index.cjs";
   j.types = "index.d.ts";
   j.publishConfig = { registry: "https://npm.pkg.github.com" };
-  j.files = Array.from(new Set([...(j.files || []), "web", "index.cjs", "index.d.ts", "font-provider.cjs", "font-provider.d.ts", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json"]));
+  j.files = Array.from(new Set([...(j.files || []), "web", "index.cjs", "index.d.ts", "font-provider.cjs", "font-provider.d.ts", "fontsource-provider.cjs", "fontsource-provider.d.ts", "noto-fallback.cjs", "noto-fallback.d.ts", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json"]));
   j.exports = {
     ".": {
       types: "./index.d.ts",
@@ -90,6 +92,9 @@ node -e '
       default: "./web/web-index.js",
     },
     "./web/font-provider": { types: "./web/font-provider.d.ts", import: "./web/font-provider.js" },
+    "./web/fontsource-provider": { types: "./web/fontsource-provider.d.ts", import: "./web/fontsource-provider.js" },
+    "./fontsource-provider": { types: "./fontsource-provider.d.ts", require: "./fontsource-provider.cjs", default: "./fontsource-provider.cjs" },
+    "./noto-fallback": { types: "./noto-fallback.d.ts", require: "./noto-fallback.cjs", default: "./noto-fallback.cjs" },
     "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
     "./worker": { types: "./worker.d.ts", require: "./worker.js", default: "./worker.js" },
     "./package.json": "./package.json",

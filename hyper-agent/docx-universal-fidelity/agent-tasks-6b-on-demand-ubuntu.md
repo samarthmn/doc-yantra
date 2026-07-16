@@ -1,6 +1,6 @@
 # Agent tasks 6B — on-demand fonts via Fontsource (`gdocs-anchors-toc` gate)
 
-> **STATUS: planning complete (owner-approved, 2026-07-15 — third revision: Fontsource provider, minimal local fonts). Implementation not started.** Depends on **6A complete** (`agent-tasks-6a-fontless-package.md`). Together with 6A this replaces all earlier phase-6 designs (metric overlay → owner catalog/broker → **this**).
+> **STATUS: implemented and verified 2026-07-15.** The provider-font gate passes 10/10 pages at 0.9070758765 minimum SSIM, the package remains fontless, and deterministic CI performs no public network calls. Depends on **6A complete** (`agent-tasks-6a-fontless-package.md`). Together with 6A this replaces all earlier phase-6 designs (metric overlay → owner catalog/broker → **this**).
 
 **Owner's operating principle (verbatim intent):** *discover which font the document needs → fetch it → inject it → produce the perfect PDF.* Almost nothing ships locally: the office package stays fontless (6A gate), and the worker carries exactly **one local fallback family** used only when font loading fails. Everything else is fetched on demand and cached.
 

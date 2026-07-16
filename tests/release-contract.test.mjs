@@ -117,6 +117,11 @@ test("office source fingerprint covers the fontless host package surface", () =>
     "office-core/wasm/index.d.ts",
     "office-core/wasm/font-provider.cjs",
     "office-core/wasm/font-provider.d.ts",
+    "office-core/wasm/fontsource-provider.cjs",
+    "office-core/wasm/fontsource-provider.d.ts",
+    "office-core/wasm/fontsource-provider-web.js",
+    "office-core/wasm/noto-fallback.cjs",
+    "office-core/wasm/noto-fallback.d.ts",
     "office-core/wasm/font-provider-web.js",
     "office-core/wasm/font-provider-web.d.ts",
     "office-core/wasm/web-index.js",
@@ -124,6 +129,20 @@ test("office source fingerprint covers the fontless host package surface", () =>
   ]) {
     assert.match(officeInputs, new RegExp(JSON.stringify(path).replaceAll("/", "\\/")));
   }
+});
+
+test("Office CJS provider subpaths are also importable from ESM", () => {
+  const packageRoot = join(root, "office-core", "wasm", "pkg");
+  const script = `
+    const fontsource = await import('@samarthmn/doc-yantra-office/fontsource-provider');
+    const noto = await import('@samarthmn/doc-yantra-office/noto-fallback');
+    if (typeof fontsource.default?.FontsourceProvider !== 'function') throw new Error('FontsourceProvider missing');
+    if (typeof noto.default?.NotoFallbackProvider !== 'function') throw new Error('NotoFallbackProvider missing');
+  `;
+  execFileSync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: packageRoot,
+    stdio: "pipe",
+  });
 });
 
 test("packed Office artifact contains no font file or embedded font program", () => {

@@ -2,7 +2,7 @@
 
 use image::DynamicImage;
 use office_core::testkit::{DOC_NAMESPACES, minimal_docx, wrap_document, zip_package};
-use office_core::{ConvertOptions, OfficeError, OfficeFormat, convert, profile};
+use office_core::{ConvertOptions, OfficeError, OfficeFormat, UnsupportedCode, convert, profile};
 use pdf_core::extract::extract_text;
 use pdf_core::meta::page_sizes;
 use pdf_core::raster::{RenderOptions, render_page};
@@ -147,11 +147,27 @@ fn transformed_shape_pptx(attributes: &str) -> Vec<u8> {
 fn docx_missing_glyph_must_render_or_return_error() {
     let input = minimal_docx(r#"<w:p><w:r><w:t>snowman ☃ survives</w:t></w:r></w:p>"#);
     let prof = profile(&input, OfficeFormat::Docx).expect("profile missing-glyph fixture");
-    assert!(prof.supported, "unexpected reasons: {:?}", prof.reasons);
-    let output = convert(&input, OfficeFormat::Docx, &ConvertOptions::default())
-        .expect("coverage fallback should render snowman");
-    let extracted = extract_text(&output.pdf).expect("extract snowman fixture");
-    assert!(extracted.contains('☃'), "snowman vanished: {extracted:?}");
+    if prof.supported {
+        let output = convert(&input, OfficeFormat::Docx, &ConvertOptions::default())
+            .expect("a supported profile must convert the snowman");
+        let extracted = extract_text(&output.pdf).expect("extract snowman fixture");
+        assert!(extracted.contains('☃'), "snowman vanished: {extracted:?}");
+    } else {
+        assert!(
+            prof.reasons.iter().any(|reason| {
+                reason.code == UnsupportedCode::MissingGlyph && reason.detail.contains("U+2603")
+            }),
+            "unexpected reasons: {:?}",
+            prof.reasons
+        );
+        assert!(matches!(
+            convert(&input, OfficeFormat::Docx, &ConvertOptions::default()),
+            Err(OfficeError::Unsupported {
+                code: UnsupportedCode::MissingGlyph,
+                ref detail,
+            }) if detail.contains("U+2603")
+        ));
+    }
 }
 
 #[test]

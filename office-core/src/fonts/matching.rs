@@ -61,22 +61,22 @@ pub fn resolve_with_stretch(
     }
 
     // 3: metric-compatible substitution.
-    if let Some(target) = substitute(family)
-        && let Some(pick) = pick_in_family(db, target, weight, italic, stretch)
-    {
-        out.face = Some(pick.face);
-        out.warnings.push(Warning::new(
-            "font_substituted",
-            format!("{family} -> {target}"),
-        ));
-        push_style_warning(&mut out, db, target, weight, italic, stretch, &pick);
-        if pick.synthetic_italic {
+    for target in substitution_targets(family) {
+        if let Some(pick) = pick_in_family(db, target, weight, italic, stretch) {
+            out.face = Some(pick.face);
             out.warnings.push(Warning::new(
-                "synthetic_style_unavailable",
-                family.to_string(),
+                "font_substituted",
+                format!("{family} -> {target}"),
             ));
+            push_style_warning(&mut out, db, target, weight, italic, stretch, &pick);
+            if pick.synthetic_italic {
+                out.warnings.push(Warning::new(
+                    "synthetic_style_unavailable",
+                    family.to_string(),
+                ));
+            }
+            return out;
         }
-        return out;
     }
 
     // 4: family-class fallback by name heuristic.
@@ -86,6 +86,19 @@ pub fn resolve_with_stretch(
         out.warnings.push(Warning::new(
             "font_fallback",
             format!("{family} -> {fallback}"),
+        ));
+        out.missing = Some(family.to_string());
+        return out;
+    }
+
+    // The fontless worker's only boot family is Noto Sans. It is a visible,
+    // reported last resort in compatible mode and is never considered by the
+    // strict branch above.
+    if let Some(pick) = pick_in_family(db, "Noto Sans", weight, italic, stretch) {
+        out.face = Some(pick.face);
+        out.warnings.push(Warning::new(
+            "font_fallback_used",
+            format!("{family} -> Noto Sans"),
         ));
         out.missing = Some(family.to_string());
         return out;
@@ -129,11 +142,26 @@ pub fn resolve_exact_with_stretch(
 }
 
 /// Returns deterministic coverage-fallback candidates after `primary`.
-/// Embedded document faces win, then packaged Noto faces, then metric-compatible
-/// bundled faces, with style distance breaking ties inside each class.
+/// Sibling faces from the primary family win first so split Unicode-subset
+/// artifacts preserve the requested typeface. Other embedded faces, Noto, and
+/// metric-compatible faces follow, with style distance breaking ties.
 pub fn coverage_fallbacks(db: &FontDb, primary: FaceId, weight: u16, italic: bool) -> Vec<FaceId> {
+    let primary_face = &db.faces()[primary.0];
+    let primary_family = family_key(&primary_face.family_name);
     if db.resolution_mode() == crate::ResolutionMode::Strict {
-        return vec![primary];
+        let mut exact_subset_faces = (0..db.len())
+            .map(FaceId)
+            .filter(|id| {
+                let face = &db.faces()[id.0];
+                *id == primary
+                    || (family_key(&face.family_name) == primary_family
+                        && face.weight == primary_face.weight
+                        && face.italic == primary_face.italic
+                        && face.stretch == primary_face.stretch)
+            })
+            .collect::<Vec<_>>();
+        exact_subset_faces.sort_by_key(|id| (u8::from(*id != primary), id.0));
+        return exact_subset_faces;
     }
     let mut ids: Vec<FaceId> = (0..db.len()).map(FaceId).collect();
     ids.retain(|id| {
@@ -144,17 +172,26 @@ pub fn coverage_fallbacks(db: &FontDb, primary: FaceId, weight: u16, italic: boo
         let family = family_key(&face.family_name);
         let class = if *id == primary {
             0
-        } else if face.embedded {
+        } else if family == primary_family {
             1
-        } else if family.starts_with("noto") {
+        } else if face.embedded {
             2
+        } else if family.starts_with("noto") {
+            3
         } else if matches!(
             family.as_str(),
-            "carlito" | "caladea" | "liberation sans" | "liberation serif" | "liberation mono"
+            "arimo"
+                | "caladea"
+                | "carlito"
+                | "cousine"
+                | "liberation sans"
+                | "liberation serif"
+                | "liberation mono"
+                | "tinos"
         ) {
-            3
-        } else {
             4
+        } else {
+            5
         };
         (
             class,
@@ -183,13 +220,23 @@ pub fn substitute_bullet_char(db: &FontDb, faces: &[FaceId], ch: char) -> Option
     }
     let candidates: &[char] = match ch {
         // Google/Office arrowhead bullets -> black right-pointing pointer.
-        '\u{2B9A}' | '\u{27A2}' | '\u{27A4}' => &['\u{25BA}', '\u{2022}'],
+        '\u{2B9A}' | '\u{27A2}' | '\u{27A4}' => &[
+            '\u{25BA}', '\u{25CF}', '\u{25A0}', '\u{25CB}', '\u{25AA}', '\u{2192}', '\u{2022}',
+        ],
         // Diamond ornaments retain filled/outlined intent before generic bullet.
-        '\u{2756}' => &['\u{2666}', '\u{2022}'],
-        '\u{2726}' => &['\u{25C6}', '\u{2022}'],
-        '\u{2727}' => &['\u{25C7}', '\u{2022}'],
+        '\u{2756}' => &[
+            '\u{2666}', '\u{25CF}', '\u{25A0}', '\u{25CB}', '\u{25AA}', '\u{2192}', '\u{2022}',
+        ],
+        '\u{2726}' => &[
+            '\u{25C6}', '\u{25CF}', '\u{25A0}', '\u{25CB}', '\u{25AA}', '\u{2192}', '\u{2022}',
+        ],
+        '\u{2727}' => &[
+            '\u{25C7}', '\u{25CF}', '\u{25A0}', '\u{25CB}', '\u{25AA}', '\u{2192}', '\u{2022}',
+        ],
         // Dot operators and middle dots normalize to the ordinary bullet.
-        '\u{2219}' | '\u{00B7}' => &['\u{2022}'],
+        '\u{2219}' | '\u{00B7}' => &[
+            '\u{25CF}', '\u{25A0}', '\u{25CB}', '\u{25AA}', '\u{2192}', '\u{2022}',
+        ],
         _ => &[],
     };
     candidates
@@ -279,15 +326,15 @@ fn family_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
-/// The metric-compatible substitution target for a Microsoft family, if any.
-fn substitute(family: &str) -> Option<&'static str> {
+/// Fetchable-first metric-compatible targets with bundled native fallbacks.
+fn substitution_targets(family: &str) -> &'static [&'static str] {
     match family_key(family).as_str() {
-        "calibri" | "calibri light" => Some("Carlito"),
-        "cambria" => Some("Caladea"),
-        "arial" | "helvetica" | "segoe ui" => Some("Liberation Sans"),
-        "times new roman" | "times" => Some("Liberation Serif"),
-        "courier new" | "courier" => Some("Liberation Mono"),
-        _ => None,
+        "calibri" | "calibri light" => &["Carlito"],
+        "cambria" => &["Caladea"],
+        "arial" | "helvetica" | "segoe ui" | "liberation sans" => &["Arimo", "Liberation Sans"],
+        "times new roman" | "times" | "liberation serif" => &["Tinos", "Liberation Serif"],
+        "courier new" | "courier" | "liberation mono" => &["Cousine", "Liberation Mono"],
+        _ => &[],
     }
 }
 
@@ -399,13 +446,19 @@ mod tests {
 
     #[test]
     fn substitution_map_covers_core_families() {
-        assert_eq!(substitute("Calibri"), Some("Carlito"));
-        assert_eq!(substitute("CALIBRI LIGHT"), Some("Carlito"));
-        assert_eq!(substitute("Cambria"), Some("Caladea"));
-        assert_eq!(substitute("Arial"), Some("Liberation Sans"));
-        assert_eq!(substitute("Times New Roman"), Some("Liberation Serif"));
-        assert_eq!(substitute("Courier New"), Some("Liberation Mono"));
-        assert_eq!(substitute("Comic Sans MS"), None);
+        assert_eq!(substitution_targets("Calibri"), &["Carlito"]);
+        assert_eq!(substitution_targets("CALIBRI LIGHT"), &["Carlito"]);
+        assert_eq!(substitution_targets("Cambria"), &["Caladea"]);
+        assert_eq!(substitution_targets("Arial"), &["Arimo", "Liberation Sans"]);
+        assert_eq!(
+            substitution_targets("Times New Roman"),
+            &["Tinos", "Liberation Serif"]
+        );
+        assert_eq!(
+            substitution_targets("Courier New"),
+            &["Cousine", "Liberation Mono"]
+        );
+        assert!(substitution_targets("Comic Sans MS").is_empty());
     }
 
     #[test]
@@ -463,5 +516,38 @@ mod tests {
         let r = resolve(&db, "Arial", 700, false);
         let face = r.face.expect("Arial resolves");
         assert_eq!(db.face(face).unwrap().weight, 700);
+    }
+
+    #[test]
+    fn coverage_fallbacks_keep_exact_family_siblings_ahead_of_other_families() {
+        let mut db = FontDb::new();
+        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
+            .expect("register unrelated fallback");
+        db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())
+            .expect("register primary subset face");
+        db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())
+            .expect("register exact-family sibling subset face");
+
+        let fallbacks = coverage_fallbacks(&db, FaceId(1), 400, false);
+        assert_eq!(fallbacks[..3], [FaceId(1), FaceId(2), FaceId(0)]);
+    }
+
+    #[test]
+    fn strict_coverage_keeps_only_exact_style_siblings() {
+        let mut db = FontDb::new();
+        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
+            .expect("register unrelated fallback");
+        db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())
+            .expect("register primary subset face");
+        db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())
+            .expect("register exact-family sibling subset face");
+        db.register(include_bytes!("../../fonts/carlito/Carlito-Bold.ttf").to_vec())
+            .expect("register different-style family face");
+        db.set_resolution_mode(crate::ResolutionMode::Strict);
+
+        assert_eq!(
+            coverage_fallbacks(&db, FaceId(1), 400, false),
+            [FaceId(1), FaceId(2)]
+        );
     }
 }

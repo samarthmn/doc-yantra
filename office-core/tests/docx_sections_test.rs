@@ -800,22 +800,31 @@ fn explicit_page_break_at_a_continuous_run_boundary_starts_a_new_page() {
 }
 
 #[test]
-fn negative_decimal_table_indent_positions_the_grid_edge_from_the_margin() {
+fn negative_decimal_table_indent_positions_the_painted_edge_from_the_margin() {
     let body = format!(
         r#"<w:tbl><w:tblPr><w:tblW w:w="2160.0" w:type="dxa"/><w:tblInd w:w="-108.0" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="8"/><w:left w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/><w:right w:val="single" w:sz="8"/></w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2160.0"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>INDENTED</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr>{LETTER_SECTION}</w:sectPr>"#
     );
     let laid = open_layout(&minimal_docx(&body));
-    let left_edge = laid.pages[0]
+    let (left_center, left_width) = laid.pages[0]
         .items
         .iter()
-        .filter_map(|positioned| {
-            matches!(positioned.item, Item::Line { .. }).then_some(positioned.x_pt)
+        .filter_map(|positioned| match &positioned.item {
+            Item::Line {
+                dx_pt,
+                dy_pt,
+                stroke,
+            } if dx_pt.abs() < 0.01 && dy_pt.abs() > 0.01 => {
+                Some((positioned.x_pt, stroke.width_pt))
+            }
+            _ => None,
         })
-        .fold(f64::INFINITY, f64::min);
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .expect("left table edge");
+    let painted_left = left_center - left_width / 2.0;
 
     assert!(
-        (left_edge - 84.6).abs() < 0.1,
-        "-108 twips must put the table grid at 90 - 5.4 = 84.6pt, got {left_edge}"
+        (painted_left - 84.6).abs() < 0.1,
+        "-108 twips must put the painted table edge at 90 - 5.4 = 84.6pt, got {painted_left}"
     );
 }
 

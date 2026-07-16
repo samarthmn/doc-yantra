@@ -1426,7 +1426,7 @@ fn flatten_run(
         ascent_pt: metrics.ascent_pt(size),
         line_height_pt: metrics.line_height_pt(size),
         line_box_size_pt: base_size,
-        line_box_ascent_pt: metrics.ascent_pt(base_size),
+        line_box_ascent_pt: metrics.line_box_ascent_pt(base_size),
         line_box_height_pt: metrics.line_height_pt(base_size),
         link,
     });
@@ -2096,7 +2096,7 @@ fn fallback_style(fonts: &FontDb, face: FaceId, base: &RunStyle) -> Rc<RunStyle>
             .map_or(base.line_height_pt, |m| m.line_height_pt(base.size_pt)),
         line_box_size_pt: base.line_box_size_pt,
         line_box_ascent_pt: metrics.as_ref().map_or(base.line_box_ascent_pt, |m| {
-            m.ascent_pt(base.line_box_size_pt)
+            m.line_box_ascent_pt(base.line_box_size_pt)
         }),
         line_box_height_pt: metrics.as_ref().map_or(base.line_box_height_pt, |m| {
             m.line_height_pt(base.line_box_size_pt)

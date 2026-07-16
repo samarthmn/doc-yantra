@@ -455,6 +455,7 @@ dependencies = [
  "anyhow",
  "clap",
  "image",
+ "lopdf",
  "office-core",
  "pdf-core",
  "serde",

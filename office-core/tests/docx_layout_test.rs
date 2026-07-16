@@ -1232,6 +1232,23 @@ fn two_line_auto_spacing_uses_the_face_hhea_line_gap() {
 }
 
 #[test]
+fn hhea_line_gap_is_reserved_above_the_first_line_baseline() {
+    let laid = layout_body(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="24"/></w:rPr><w:t>BASELINE</w:t></w:r></w:p>"#,
+    );
+    let baseline = glyph_runs(&laid.pages[0])
+        .into_iter()
+        .find(|(text, ..)| text == "BASELINE")
+        .map(|(_, _, y, _)| y)
+        .expect("baseline run");
+    let expected = 72.0 + (1854.0 + 67.0) / 2048.0 * 12.0;
+    assert!(
+        (baseline - expected).abs() < 0.01,
+        "Word places the hhea line gap above the glyph ascent: baseline={baseline}, expected={expected}"
+    );
+}
+
+#[test]
 fn paragraph_shading_and_run_highlight_are_painted_behind_text() {
     let laid = layout_body(
         r#"<w:p><w:pPr><w:shd w:val="clear" w:fill="D9D9D9"/></w:pPr><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>highlighted</w:t></w:r></w:p>"#,
@@ -1282,10 +1299,10 @@ fn a_table_fragment_repaints_its_collapsed_top_boundary_on_the_next_page() {
                 Item::Line { dx_pt, dy_pt, .. }
                     if dx_pt > 100.0
                         && dy_pt.abs() < 0.01
-                        && (positioned.y_pt - 36.0).abs() < 0.1
+                        && (positioned.y_pt - 36.5).abs() < 0.1
             )
         }),
-        "the continuation fragment must have a horizontal edge at the page text top"
+        "the continuation fragment must reserve the top border's outer half-stroke"
     );
 }
 

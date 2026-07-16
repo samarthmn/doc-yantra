@@ -7,6 +7,11 @@ import {
   createOfficeEngineWorker,
   type OfficeProfile,
 } from "../../office-core/wasm/pkg/worker.js";
+import {
+  FontsourceProvider,
+  MemoryFontCache,
+  NodeFontCache,
+} from "../../office-core/wasm/pkg/index.cjs";
 
 const bytes = new Uint8Array();
 const pdf = createPdfEngineWorker({ defaultTimeoutMs: 5_000, maxInputDepth: 32 });
@@ -25,10 +30,21 @@ void pdf.validatePdf({ pdf: bytes });
 void pdf.engineVersion();
 void pdf.close();
 
-const office = createOfficeEngineWorker({ extraFontDirs: [], maxInputItems: 50_000 });
+const fontProvider = new FontsourceProvider();
+const office = createOfficeEngineWorker({
+  extraFontDirs: [],
+  maxInputItems: 50_000,
+  fontProvider,
+  fontMemoryCache: new MemoryFontCache(),
+  fontPersistentCache: new NodeFontCache("/absolute/font-cache"),
+  notoFallback: true,
+});
 void office.convert({ bytes, extension: "docx", timeoutMs: 100 });
 void office.profile({ bytes, extension: "docx" }).then((profile: OfficeProfile) => profile.supported);
 void office.engineVersion();
+void office.profileOnDemand({ bytes, extension: "docx", mode: "strict" }).then((result) => {
+  console.log(result.providerResults.length, result.fallbackResults.length);
+});
 void office.close();
 
 const error = new PdfWorkerError("invalid_input", "bad input");

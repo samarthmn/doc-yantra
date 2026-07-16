@@ -159,4 +159,47 @@ Per failing case:
   now green: 52/52 color probes, 0.4685 pt text-position p95, and 0.000214
   global raster MAD.
 
+### 2026-07-15 — fragment-aware table edges and shared vertical seams
+
+- **Axis:** `gdocs-tables-longdoc` table blocks were about 0.5pt left on every
+  page and about 0.5pt high on continuation pages; adjacent cells also emitted
+  the same vertical seam twice.
+- **Probe evidence:** before the fix, page 40 (table start) measured median
+  truth-minus-ours deltas of roughly `(+0.55, +0.13)` for vertical borders and
+  `(+0.60, +0.09)` for text. Page 41 (continuation) measured roughly
+  `(+0.55, +0.61)` and `(+0.60, +0.58)`. The output contained 112 and 71 exact
+  duplicate vertical segments respectively. The passing `complex` page-6
+  control already had an x delta near +0.05pt for its unindented start table.
+- **Change:** table layout exposes top/bottom outer half-strokes to pagination,
+  which reserves the top half on every fragment and the bottom half in fragment
+  fit accounting. Explicit negative `tblInd` anchors the painted outer edge;
+  default-start tables without `tblInd` retain Word's centerline convention,
+  while center/end/floating placement accounts for the complete painted
+  footprint. Vertical borders use the same wider-then-darker shared-edge
+  resolver as horizontal borders and merge collinear same-stroke row segments
+  after page slicing. Cell top margins remain measured from the border inner
+  edge; the probe did not support an H5 inset change.
+- **Result:** the final page-41 probe clusters table text around +0.05pt x and
+  near-zero y, with zero duplicate segments. `gdocs-tables-longdoc` has exact
+  44/44 page parity and 0.918135 minimum SSIM (required 0.90, prior 0.812452).
+  The `complex` control retains its exact 0.937401 observed floor.
+
+### 2026-07-15 — hhea line gap participates in baseline placement
+
+- **Axis:** with the verified Ubuntu 0.83 files registered, line breaks and
+  advances matched Word but text origins remained roughly 0.3pt high. On the
+  dense TOC page this held `gdocs-anchors-toc` at 0.886703 minimum SSIM.
+- **Root cause:** natural line height included hhea `lineGap`, but the line-box
+  baseline offset used only the face ascent, leaving the complete gap below the
+  descent. Word reserves the hhea gap above the glyph ascent. Ubuntu's 28/1000
+  gap is 0.308pt at 11pt; Liberation Sans' 67/2048 gap is 0.393pt at 12pt,
+  matching the vector-probe deltas in both fixtures.
+- **Change:** retain the same natural line height and pagination, but use
+  `ascent + lineGap` for DOCX line-box and numbering-label baseline placement.
+  Glyph metrics, script rise, and PDF font programs are unchanged.
+- **Result:** `gdocs-anchors-toc` passes 10/10 pages at 0.907076 minimum; its
+  dense TOC page rises from 0.886703 to 0.935346. `complex` stays above the
+  required 0.937401 floor and page 6 rises to 0.949921. The 44-page table case
+  remains green at 0.918135 minimum.
+
 _Invariant going forward: a calibration commit gets a log entry here._

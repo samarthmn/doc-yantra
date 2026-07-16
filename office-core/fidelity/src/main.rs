@@ -5,6 +5,7 @@
 //! case needs a source, manifest, ground truth, and recorded Word provenance.
 
 mod corpus;
+mod probe;
 mod ssim;
 
 use anyhow::{Context, Result};
@@ -44,6 +45,27 @@ enum Cmd {
         /// Directory for generated JSON, HTML, and page-render evidence.
         #[arg(long)]
         report_dir: Option<PathBuf>,
+        /// Additional runtime font directory. Repeat to model host-resolved fonts.
+        #[arg(long = "font-dir")]
+        font_dirs: Vec<PathBuf>,
+    },
+    /// Compare vector border and text geometry between our PDF and Word's.
+    Probe {
+        /// Reference-corpus case under `fidelity-corpus/docx/`.
+        #[arg(long, conflicts_with = "diag")]
+        case: Option<String>,
+        /// Diagnostic fixture under `office-core/fidelity/diag/`.
+        #[arg(long, conflicts_with = "case")]
+        diag: Option<String>,
+        /// One-based page number.
+        #[arg(long)]
+        page: u32,
+        /// Optional JSON report path.
+        #[arg(long)]
+        json: Option<PathBuf>,
+        /// Additional runtime font directory (repeatable).
+        #[arg(long = "font-dir")]
+        font_dirs: Vec<PathBuf>,
     },
     /// List corpus cases lacking a `ground-truth.pdf`.
     MissingGroundTruth,
@@ -83,11 +105,25 @@ fn main() -> Result<()> {
             println!("seeded {n} docx cases under {}", corpus_root().display());
         }
         Cmd::MissingGroundTruth => list_missing()?,
+        Cmd::Probe {
+            case,
+            diag,
+            page,
+            json,
+            font_dirs,
+        } => run_probe(
+            case.as_deref(),
+            diag.as_deref(),
+            page,
+            json.as_deref(),
+            &font_dirs,
+        )?,
         Cmd::Run {
             format,
             case,
             update_report,
             report_dir: selected_report_dir,
+            font_dirs,
         } => {
             let selected_report_dir = selected_report_dir.unwrap_or_else(report_dir);
             run(
@@ -95,8 +131,51 @@ fn main() -> Result<()> {
                 case.as_deref(),
                 update_report,
                 &selected_report_dir,
+                &font_dirs,
             )?
         }
+    }
+    Ok(())
+}
+
+fn run_probe(
+    case: Option<&str>,
+    diag: Option<&str>,
+    page: u32,
+    json_path: Option<&Path>,
+    font_dirs: &[PathBuf],
+) -> Result<()> {
+    let directory = match (case, diag) {
+        (Some(case), None) => corpus_root().join("docx").join(case),
+        (None, Some(diag)) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("diag")
+            .join(diag),
+        _ => anyhow::bail!("probe requires exactly one of --case or --diag"),
+    };
+    let source_path = directory.join("source.docx");
+    let truth_path = directory.join("ground-truth.pdf");
+    let source = std::fs::read(&source_path)
+        .with_context(|| format!("read probe source {}", source_path.display()))?;
+    let truth = std::fs::read(&truth_path)
+        .with_context(|| format!("read probe ground truth {}", truth_path.display()))?;
+    let options = ConvertOptions {
+        font_dirs: font_dirs.to_vec(),
+        ..ConvertOptions::default()
+    };
+    let ours = convert(&source, OfficeFormat::Docx, &options)
+        .with_context(|| format!("convert probe source {}", source_path.display()))?;
+    let report = probe::compare_page(&ours.pdf, &truth, page)?;
+    probe::print_report(&report);
+    if let Some(path) = json_path {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create probe report directory {}", parent.display()))?;
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&report)?)
+            .with_context(|| format!("write probe JSON {}", path.display()))?;
+        println!("JSON: {}", path.display());
     }
     Ok(())
 }
@@ -146,6 +225,7 @@ fn run(
     only: Option<&str>,
     _update_report: bool,
     selected_report_dir: &Path,
+    font_dirs: &[PathBuf],
 ) -> Result<()> {
     if format != "docx" {
         anyhow::bail!(
@@ -189,6 +269,7 @@ fn run(
             &ground_truth_bytes,
             &manifest,
             &pages_dir,
+            font_dirs,
         ));
     }
 
@@ -542,6 +623,7 @@ fn score_case(
     truth_pdf: &[u8],
     manifest: &Manifest,
     pages_dir: &Path,
+    font_dirs: &[PathBuf],
 ) -> CaseReport {
     let mut report = CaseReport {
         name: name.to_string(),
@@ -556,7 +638,11 @@ fn score_case(
         note: String::new(),
     };
 
-    let our_pdf = match convert(source, OfficeFormat::Docx, &ConvertOptions::default()) {
+    let options = ConvertOptions {
+        font_dirs: font_dirs.to_vec(),
+        ..ConvertOptions::default()
+    };
+    let our_pdf = match convert(source, OfficeFormat::Docx, &options) {
         Ok(out) => {
             report.our_pages = out.page_count;
             out.pdf

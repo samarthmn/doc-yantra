@@ -6,6 +6,11 @@ import {
   mergeHostTelemetry,
   resolveAndRegisterFonts,
 } from './font-provider.js';
+export {
+  DEFAULT_FONTSOURCE_ALIASES,
+  DEFAULT_FONTSOURCE_CATALOG,
+  FontsourceProvider,
+} from './fontsource-provider.js';
 
 export * from './office_core_wasm.js';
 export {

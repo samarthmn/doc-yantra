@@ -802,6 +802,75 @@ fn horizontal_table_border_widths(page: &Page) -> Vec<f64> {
     widths
 }
 
+fn vertical_table_borders(page: &Page) -> Vec<(f64, f64, f64)> {
+    let mut borders = page
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Line {
+                dx_pt,
+                dy_pt,
+                stroke,
+            } if dx_pt.abs() < 0.01 && dy_pt.abs() > 0.01 => {
+                Some((positioned.x_pt, *dy_pt, stroke.width_pt))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    borders.sort_by(|left, right| left.0.total_cmp(&right.0));
+    borders
+}
+
+#[test]
+fn vertical_table_borders_choose_one_shared_edge_and_merge_across_rows() {
+    let bytes = minimal_docx(
+        r#"<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/><w:tblBorders>
+        <w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/>
+        <w:left w:val="single" w:sz="8"/><w:right w:val="single" w:sz="8"/>
+        <w:insideV w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="8"/>
+        </w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+        <w:tr><w:tc><w:tcPr><w:tcBorders><w:right w:val="single" w:sz="16" w:color="111111"/></w:tcBorders></w:tcPr><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcBorders><w:left w:val="single" w:sz="8" w:color="EEEEEE"/></w:tcBorders></w:tcPr><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc></w:tr>
+        <w:tr><w:tc><w:tcPr><w:tcBorders><w:right w:val="single" w:sz="16" w:color="111111"/></w:tcBorders></w:tcPr><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcBorders><w:left w:val="single" w:sz="8" w:color="EEEEEE"/></w:tcBorders></w:tcPr><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc></w:tr>
+        </w:tbl>"#,
+    );
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let borders = vertical_table_borders(&laid.pages[0]);
+
+    assert_eq!(
+        borders.len(),
+        3,
+        "two rows must collapse into one run for each outer/shared vertical seam: {borders:?}"
+    );
+    assert!(
+        (borders[1].2 - 2.0).abs() < 0.01,
+        "the wider left-cell edge must win the shared seam: {borders:?}"
+    );
+}
+
+#[test]
+fn centered_table_alignment_uses_the_asymmetric_painted_border_footprint() {
+    let bytes = minimal_docx(
+        r#"<w:tbl><w:tblPr><w:jc w:val="center"/><w:tblW w:w="2000" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders>
+        <w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/>
+        <w:left w:val="single" w:sz="32"/><w:right w:val="single" w:sz="16"/>
+        </w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+        <w:tr><w:tc><w:p><w:r><w:t>CENTERED</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let borders = vertical_table_borders(&laid.pages[0]);
+    assert_eq!(borders.len(), 2, "expected two outer seams: {borders:?}");
+    let painted_left = borders[0].0 - borders[0].2 / 2.0;
+    let painted_right = borders[1].0 + borders[1].2 / 2.0;
+    assert!(
+        ((painted_left + painted_right) / 2.0 - 306.0).abs() < 0.01,
+        "the painted footprint, not the border centerline grid, must be centered: {borders:?}"
+    );
+}
+
 #[test]
 fn horizontal_table_borders_choose_context_and_paint_shared_edge_once() {
     let bytes = minimal_docx(

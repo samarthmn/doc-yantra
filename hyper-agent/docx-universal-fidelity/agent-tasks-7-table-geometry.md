@@ -1,5 +1,7 @@
 # Agent tasks 7 — the table half-point displacement (unblocks `gdocs-tables-longdoc`)
 
+> **STATUS: implemented and verified 2026-07-15.** The vector probe reports zero duplicate segments on page 41; `gdocs-tables-longdoc` passes 44/44 pages at 0.9181457056 minimum SSIM in the combined resolved-font corpus. Human task H7 remains an external diagnostic-export task and is not an engine implementation dependency.
+
 **Evidence base (handoff, 2026-07-15):** page 41 translated +1 raster px right/down (= **0.5 pt** at the harness's 144 dpi) scores 0.9571 vs 0.8125, with identical glyph outlines; borders contribute 68.2% of the deficit and border-free glyph windows 31.7%, and **they move together**; a global shift drops the corpus from 16/18 to 11/18 passes and is **forbidden**. Conclusion: a *constant, conditional* displacement of whole table blocks on specific table/page states. The fix sequence below is: measure exactly (T7.1–T7.3), fix the confirmed convention(s) (T7.4), finish the border painter (T7.5). Code references are against branch `e1ca853` — complete step 0 of `agent-tasks-6a-fontless-package.md` first and re-locate by symbol. Phase 7 is independent of the 6A/6B font work (the fidelity harness runs natively with dev bundled fonts); only note that once 6A lands, the `node --test tests/` step below runs with the deterministic mock font provider configured.
 
 ## Code-grounded hypotheses (from the current `layout/table.rs`)

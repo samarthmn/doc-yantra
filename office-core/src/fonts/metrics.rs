@@ -70,6 +70,12 @@ impl<'a> FaceMetrics<'a> {
         self.scale(self.line_gap, size_pt)
     }
 
+    /// Baseline offset inside a Word line box. Word places the hhea line gap
+    /// above the glyph ascent rather than leaving it below the descent.
+    pub fn line_box_ascent_pt(&self, size_pt: f64) -> f64 {
+        self.scale(self.ascent + self.line_gap, size_pt)
+    }
+
     /// Natural line height in points: `(ascent + descent + gap) / upem * size`.
     pub fn line_height_pt(&self, size_pt: f64) -> f64 {
         self.scale(self.ascent + self.descent + self.line_gap, size_pt)

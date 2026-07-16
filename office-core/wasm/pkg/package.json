@@ -11,6 +11,10 @@
     "index.d.ts",
     "font-provider.cjs",
     "font-provider.d.ts",
+    "fontsource-provider.cjs",
+    "fontsource-provider.d.ts",
+    "noto-fallback.cjs",
+    "noto-fallback.d.ts",
     "worker.js",
     "worker.d.ts",
     "worker-client.cjs",
@@ -42,6 +46,20 @@
     "./web/font-provider": {
       "types": "./web/font-provider.d.ts",
       "import": "./web/font-provider.js"
+    },
+    "./web/fontsource-provider": {
+      "types": "./web/fontsource-provider.d.ts",
+      "import": "./web/fontsource-provider.js"
+    },
+    "./fontsource-provider": {
+      "types": "./fontsource-provider.d.ts",
+      "require": "./fontsource-provider.cjs",
+      "default": "./fontsource-provider.cjs"
+    },
+    "./noto-fallback": {
+      "types": "./noto-fallback.d.ts",
+      "require": "./noto-fallback.cjs",
+      "default": "./noto-fallback.cjs"
     },
     "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
     "./worker": {

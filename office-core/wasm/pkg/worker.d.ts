@@ -4,6 +4,7 @@ import type {
   FontResult,
   MemoryFontCache,
 } from './font-provider';
+import type { NotoFallbackProviderOptions } from './noto-fallback';
 
 export type WorkerBinary = ArrayBuffer | ArrayBufferView;
 
@@ -63,6 +64,9 @@ export interface OfficeEngineWorkerOptions {
   negativeFontTtlMs?: number;
   maxFontBytes?: number;
   fontMode?: 'strict' | 'compatible';
+  /** Hash-pinned first-party Noto fallback. Enabled when a fontProvider is set.
+   * Set false for strict/offline fixtures, pass provider options, or inject a provider. */
+  notoFallback?: boolean | FontProvider | NotoFallbackProviderOptions;
 }
 
 export interface OfficeWorkerInput {
@@ -124,6 +128,7 @@ export interface OfficeWorkerProfileOutput {
   profile: OfficeProfile;
   fonts: Array<Record<string, unknown>>;
   providerResults: Array<FontResult & { cacheStatus?: string; fetchDurationMs?: number }>;
+  fallbackResults: Array<FontResult & { cacheStatus?: string; fetchDurationMs?: number }>;
 }
 
 export interface OfficeWorkerConvertOutput extends OfficeWorkerProfileOutput {

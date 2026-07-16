@@ -218,7 +218,10 @@ pub fn build_label(
         .filter_map(|run| doc.fonts.face(run.face).and_then(|font| font.parsed()))
         .map(|font| {
             let metrics = FaceMetrics::new(font);
-            (metrics.line_height_pt(size), metrics.ascent_pt(size))
+            (
+                metrics.line_height_pt(size),
+                metrics.line_box_ascent_pt(size),
+            )
         })
         .fold((0.0_f64, 0.0_f64), |(height, ascent), current| {
             (height.max(current.0), ascent.max(current.1))

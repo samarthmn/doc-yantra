@@ -16,7 +16,7 @@ use super::paragraph::{
 use super::table::{TableLayoutOptions, layout_table, layout_table_with_width};
 use super::{
     EncodedImage, FillRule, Item, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned,
-    ResolvedInternalLink,
+    ResolvedInternalLink, Stroke,
 };
 use crate::oxml::numbering::{NumFmt, format_number};
 use crate::oxml::wml::{
@@ -51,6 +51,12 @@ struct Unit {
     fallback_group: usize,
     table_id: Option<usize>,
     is_header_row: bool,
+    /// Horizontal top-border outer half-stroke for a table page fragment.
+    table_leading_pt: f64,
+    /// Horizontal bottom-border outer half-stroke for a table page fragment.
+    table_trailing_pt: f64,
+    /// This is the final row of the complete logical table.
+    is_last_table_row: bool,
     outline: Option<(String, u8)>,
     bookmarks: Vec<(String, f64)>,
     internal_links: Vec<InternalLinkRect>,
@@ -546,7 +552,11 @@ fn align_body_vertically(
         let body_bottom = page
             .unit_ys
             .iter()
-            .filter_map(|(index, y)| units.get(*index).map(|unit| y + unit.height))
+            .filter_map(|(index, y)| {
+                units
+                    .get(*index)
+                    .map(|unit| placed_unit_painted_bottom(unit, *y))
+            })
             .fold(geo.content_top_pt, f64::max);
         let free = (geo.content_bottom_pt - body_bottom).max(0.0);
         let shift = match alignment {
@@ -556,6 +566,10 @@ fn align_body_vertically(
         };
         for item in &mut page.page.items {
             item.y_pt += shift;
+        }
+        for segment in &mut page.table_verticals {
+            segment.y0_pt += shift;
+            segment.y1_pt += shift;
         }
         for (_, item) in &mut page.underlays {
             item.y_pt += shift;
@@ -573,6 +587,16 @@ fn align_body_vertically(
             link.y_pt += shift;
         }
     }
+}
+
+fn placed_unit_painted_bottom(unit: &Unit, unit_top: f64) -> f64 {
+    unit_top
+        + unit.height
+        + if unit.table_id.is_some() {
+            unit.table_trailing_pt
+        } else {
+            0.0
+        }
 }
 
 fn section_columns(geo: &PageGeometry, spec: &ColumnSpec) -> (Vec<f64>, Vec<f64>) {
@@ -657,6 +681,9 @@ struct WorkPage {
     overlays: Vec<(u32, Positioned)>,
     page_underlays: Vec<(u32, Positioned)>,
     page_overlays: Vec<(u32, Positioned)>,
+    /// Table-owned vertical rules are held until page slicing is final, then
+    /// merged into one vector segment per collinear same-stroke seam run.
+    table_verticals: Vec<TableVerticalSegment>,
     /// The set of (unit index) placed, for outline mapping.
     unit_ys: Vec<(usize, f64)>,
     bookmarks: Vec<(String, f64)>,
@@ -664,6 +691,15 @@ struct WorkPage {
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
     float_bands: Vec<ResolvedPageBand>,
     float_carriers: Vec<FloatCarrier>,
+}
+
+#[derive(Clone)]
+struct TableVerticalSegment {
+    table_id: usize,
+    x_pt: f64,
+    y0_pt: f64,
+    y1_pt: f64,
+    stroke: Stroke,
 }
 
 // --- Unit construction ------------------------------------------------------
@@ -880,7 +916,7 @@ fn build_units(
                     let mut bookmarks = Vec::new();
                     let mut note_refs = Vec::new();
                     let mut internal_links = Vec::new();
-                    let mut row_y = 0.0;
+                    let mut row_y = table_layout.leading_pt;
                     for row in table_layout.rows {
                         bookmarks.extend(
                             row.bookmarks
@@ -905,6 +941,7 @@ fn build_units(
                         }
                         row_y += row.layout.height_pt;
                     }
+                    row_y += table_layout.trailing_pt;
                     let distances = doc.floating_table_distances(Some(source_block_index), t);
                     // Resolve the authored origin into content-relative physical
                     // coordinates before deciding whether the table hugs a text
@@ -985,6 +1022,9 @@ fn build_units(
                         fallback_group,
                         table_id: None,
                         is_header_row: false,
+                        table_leading_pt: 0.0,
+                        table_trailing_pt: 0.0,
+                        is_last_table_row: false,
                         outline: None,
                         bookmarks,
                         internal_links,
@@ -1005,6 +1045,9 @@ fn build_units(
                 }
                 let mut headers = Vec::new();
                 let mut first_row = true;
+                let row_count = table_layout.rows.len();
+                let table_leading_pt = table_layout.leading_pt;
+                let table_trailing_pt = table_layout.trailing_pt;
                 for (row_index, row) in table_layout.rows.into_iter().enumerate() {
                     let row_layout = row.layout;
                     let fresh_group = next_group();
@@ -1031,6 +1074,9 @@ fn build_units(
                         fallback_group,
                         table_id: Some(table_id),
                         is_header_row: row_layout.is_header,
+                        table_leading_pt,
+                        table_trailing_pt,
+                        is_last_table_row: row_index + 1 == row_count,
                         outline: None,
                         bookmarks: row.bookmarks,
                         internal_links: row.internal_links,
@@ -1118,6 +1164,9 @@ fn clone_unit(u: &Unit) -> Unit {
         fallback_group: u.fallback_group,
         table_id: u.table_id,
         is_header_row: u.is_header_row,
+        table_leading_pt: u.table_leading_pt,
+        table_trailing_pt: u.table_trailing_pt,
+        is_last_table_row: u.is_last_table_row,
         outline: u.outline.clone(),
         bookmarks: u.bookmarks.clone(),
         internal_links: u.internal_links.clone(),
@@ -1232,6 +1281,9 @@ fn push_paragraph_units(
             fallback_group: fallback_ids[i],
             table_id: None,
             is_header_row: false,
+            table_leading_pt: 0.0,
+            table_trailing_pt: 0.0,
+            is_last_table_row: false,
             outline,
             bookmarks: line.bookmarks.into_iter().map(|name| (name, 0.0)).collect(),
             internal_links: line.internal_links,
@@ -1395,6 +1447,9 @@ fn push_frame_unit(
         fallback_group: group,
         table_id: None,
         is_header_row: false,
+        table_leading_pt: 0.0,
+        table_trailing_pt: 0.0,
+        is_last_table_row: false,
         outline: layout
             .outline_level
             .map(|level| (layout.text.clone(), level)),
@@ -1522,6 +1577,7 @@ fn paginate(
         );
         let mut active_table: Option<usize> = None;
         let mut table_first_page: Option<usize> = None;
+        let mut fragment_table: Option<usize> = None;
 
         for unit_run in coalesce_runs(
             units,
@@ -1531,9 +1587,33 @@ fn paginate(
         ) {
             let first_unit_index = unit_run[0];
             let mut probe_y = y;
+            let mut probe_table = fragment_table;
             for &unit_index in &unit_run {
-                probe_y += effective_gap_before(&units[unit_index], probe_y, band_top);
-                probe_y += units[unit_index].height;
+                let unit = &units[unit_index];
+                probe_y += effective_gap_before(unit, probe_y, band_top);
+                if unit.table_id.is_some() && unit.table_id != probe_table {
+                    probe_y += unit.table_leading_pt;
+                }
+                probe_y += unit.height;
+                if unit.is_last_table_row {
+                    probe_y += unit.table_trailing_pt;
+                    probe_table = None;
+                } else {
+                    probe_table = unit.table_id;
+                }
+            }
+            // A non-final table row can become the bottom of this fragment if
+            // the next group advances. Keep its outer half-stroke inside the
+            // fit envelope without inserting a gap between rows that stay on
+            // the same page.
+            if let Some(table_id) = probe_table
+                && let Some(unit) = unit_run
+                    .iter()
+                    .rev()
+                    .map(|index| &units[*index])
+                    .find(|unit| unit.table_id == Some(table_id))
+            {
+                probe_y += unit.table_trailing_pt;
             }
             let break_before = units[first_unit_index].break_before;
             let fits = probe_y <= content_bottom + 0.01;
@@ -1574,11 +1654,13 @@ fn paginate(
                     table_headers,
                     geo.content_height_pt(),
                 );
+                fragment_table = None;
                 advanced = true;
             } else if units[first_unit_index].column_break_before || !fits {
                 if column + 1 < run_layout.column_widths.len() {
                     column += 1;
                     y = band_top + band_leading;
+                    fragment_table = None;
                     advanced = true;
                 } else if y > band_top + 0.01 || column > 0 {
                     pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
@@ -1610,16 +1692,19 @@ fn paginate(
                         table_headers,
                         geo.content_height_pt(),
                     );
+                    fragment_table = None;
                     advanced = true;
                 }
             }
 
             if advanced
                 && let Some(table_id) = active_table
+                && units[first_unit_index].table_id == Some(table_id)
                 && table_first_page.is_some()
                 && let Some(headers) = table_headers.get(&table_id)
             {
                 for header in headers {
+                    let fragment_start = fragment_table != Some(table_id);
                     place_unit(
                         &mut page,
                         &mut y,
@@ -1627,7 +1712,9 @@ fn paginate(
                         run_layout.column_offsets[column],
                         header,
                         usize::MAX,
+                        fragment_start,
                     );
+                    fragment_table = Some(table_id);
                 }
             }
 
@@ -1642,6 +1729,7 @@ fn paginate(
                     active_table = None;
                     table_first_page = None;
                 }
+                let fragment_start = unit.table_id.is_some() && unit.table_id != fragment_table;
                 place_unit(
                     &mut page,
                     &mut y,
@@ -1649,7 +1737,13 @@ fn paginate(
                     run_layout.column_offsets[column],
                     unit,
                     unit_index,
+                    fragment_start,
                 );
+                fragment_table = if unit.is_last_table_row {
+                    None
+                } else {
+                    unit.table_id
+                };
                 band_extent = band_extent.max(y);
             }
         }
@@ -1732,10 +1826,7 @@ fn column_band_bottom(
     table_headers: &HashMap<usize, Vec<Unit>>,
     max_atomic_height: f64,
 ) -> f64 {
-    let total_height: f64 = units[start..end]
-        .iter()
-        .map(|unit| unit.gap_before + unit.float_leading + unit.height)
-        .sum();
+    let total_height = fragment_height(units[start..end].iter(), None).fit;
     let available_height = (full_bottom - band_top).max(0.0);
     let balanced_height = balanced_column_height(
         units,
@@ -1765,16 +1856,9 @@ fn balanced_column_height(
     let groups = coalesce_runs(units, start, end, max_atomic_height);
     let group_heights = groups
         .iter()
-        .map(|run| {
-            run.iter()
-                .map(|index| {
-                    let unit = &units[*index];
-                    unit.gap_before + unit.float_leading + unit.height
-                })
-                .sum::<f64>()
-        })
+        .map(|run| fragment_height(run.iter().map(|index| &units[*index]), None).fit)
         .collect::<Vec<_>>();
-    let total = group_heights.iter().sum::<f64>();
+    let total = fragment_height(units[start..end].iter(), None).fit;
     let largest = group_heights.iter().copied().fold(0.0, f64::max);
     let mut low = (total / column_count as f64).max(largest);
     let repeat_allowance = table_headers
@@ -1782,29 +1866,42 @@ fn balanced_column_height(
         .map(|headers| repeated_header_height(headers))
         .sum::<f64>()
         * column_count.saturating_sub(1) as f64;
-    let mut high = (total + repeat_allowance).max(low);
+    let fragment_edge_allowance = units[start..end]
+        .iter()
+        .filter(|unit| unit.table_id.is_some())
+        .map(|unit| unit.table_leading_pt + unit.table_trailing_pt)
+        .fold(0.0_f64, f64::max)
+        * column_count.saturating_sub(1) as f64;
+    let mut high = (total + repeat_allowance + fragment_edge_allowance).max(low);
     for _ in 0..32 {
         let candidate = (low + high) / 2.0;
         let mut used_columns = 1usize;
         let mut column_height = 0.0;
-        let mut active_table = None;
-        for (group, height) in groups.iter().zip(&group_heights) {
-            if column_height > 0.0 && column_height + height > candidate + 0.001 {
+        let mut fragment_table = None;
+        for group in &groups {
+            let mut metrics =
+                fragment_height(group.iter().map(|index| &units[*index]), fragment_table);
+            if column_height > 0.0 && column_height + metrics.fit > candidate + 0.001 {
+                let continuing_table =
+                    fragment_table.filter(|table_id| units[group[0]].table_id == Some(*table_id));
                 used_columns += 1;
                 column_height = 0.0;
-                if let Some(table_id) = active_table
-                    && units[group[0]].table_id == Some(table_id)
+                fragment_table = None;
+                if let Some(table_id) = continuing_table
                     && let Some(headers) = table_headers.get(&table_id)
                 {
-                    column_height += repeated_header_height(headers);
+                    let header_metrics = fragment_height(headers.iter(), None);
+                    column_height += header_metrics.advance;
+                    fragment_table = header_metrics.end_table;
                 }
-                if column_height + height > candidate + 0.001 {
-                    used_columns = column_count + 1;
-                    break;
-                }
+                metrics = fragment_height(group.iter().map(|index| &units[*index]), fragment_table);
             }
-            column_height += height;
-            active_table = units[group[0]].table_id;
+            if column_height + metrics.fit > candidate + 0.001 {
+                used_columns = column_count + 1;
+                break;
+            }
+            column_height += metrics.advance;
+            fragment_table = metrics.end_table;
         }
         if used_columns <= column_count {
             high = candidate;
@@ -1816,10 +1913,48 @@ fn balanced_column_height(
 }
 
 fn repeated_header_height(headers: &[Unit]) -> f64 {
-    headers
-        .iter()
-        .map(|header| header.float_leading + header.height)
-        .sum()
+    fragment_height(headers.iter(), None).advance
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FragmentHeight {
+    /// Height that advances the cursor when the next unit stays in this fragment.
+    advance: f64,
+    /// Painted fit envelope, including a possible fragment-bottom half-stroke.
+    fit: f64,
+    end_table: Option<usize>,
+}
+
+fn fragment_height<'a>(
+    units: impl IntoIterator<Item = &'a Unit>,
+    mut fragment_table: Option<usize>,
+) -> FragmentHeight {
+    let mut advance = 0.0;
+    let mut fragment_trailing = 0.0;
+    for unit in units {
+        advance += unit.gap_before + unit.float_leading;
+        if unit.table_id.is_some() && unit.table_id != fragment_table {
+            advance += unit.table_leading_pt;
+        }
+        advance += unit.height;
+        if unit.is_last_table_row {
+            advance += unit.table_trailing_pt;
+            fragment_table = None;
+            fragment_trailing = 0.0;
+        } else {
+            fragment_table = unit.table_id;
+            fragment_trailing = if fragment_table.is_some() {
+                unit.table_trailing_pt
+            } else {
+                0.0
+            };
+        }
+    }
+    FragmentHeight {
+        advance,
+        fit: advance + fragment_trailing,
+        end_table: fragment_table,
+    }
 }
 
 fn page_band_schedule(
@@ -1994,8 +2129,15 @@ fn place_unit(
     column_offset: f64,
     unit: &Unit,
     index: usize,
+    table_fragment_start: bool,
 ) {
     *y += effective_gap_before(unit, *y, geo.content_top_pt);
+    if table_fragment_start {
+        // The vector probe measured Word reserving the table top rule's outer
+        // half-stroke on both the original and continuation fragments. Keeping
+        // this at pagination time is what lets a sliced table repeat it.
+        *y += unit.table_leading_pt;
+    }
     let unit_top = *y;
     let (frame_x, frame_y) = if let Some(floating) = unit.floating_table {
         floating_table_origin(floating, geo, column_offset, unit_top)
@@ -2007,6 +2149,27 @@ fn place_unit(
     for li in &unit.items {
         let x_pt = frame_x + li.x_pt;
         let y_pt = frame_y + li.y_pt;
+        if let Some(table_id) = unit.table_id
+            && let Item::Line {
+                dx_pt,
+                dy_pt,
+                stroke,
+            } = &li.item
+            && dx_pt.abs() <= 0.01
+            && dy_pt.abs() > 0.01
+            && li.y_pt.abs() <= 0.01
+            && (dy_pt.abs() - unit.height).abs() <= 0.01
+        {
+            let end_y = y_pt + dy_pt;
+            page.table_verticals.push(TableVerticalSegment {
+                table_id,
+                x_pt,
+                y0_pt: y_pt.min(end_y),
+                y1_pt: y_pt.max(end_y),
+                stroke: stroke.clone(),
+            });
+            continue;
+        }
         // Each table row retains its collapsed top boundary so a row beginning
         // a continuation page can paint that edge. On an unbroken page the
         // preceding row already painted the identical shared boundary; avoid
@@ -2055,6 +2218,9 @@ fn place_unit(
             link
         }));
     *y += unit.height;
+    if unit.is_last_table_row {
+        *y += unit.table_trailing_pt;
+    }
 }
 
 fn is_duplicate_table_boundary(
@@ -2293,6 +2459,7 @@ fn new_page(geo: &PageGeometry, governing_run: usize) -> WorkPage {
         overlays: Vec::new(),
         page_underlays: Vec::new(),
         page_overlays: Vec::new(),
+        table_verticals: Vec::new(),
         unit_ys: Vec::new(),
         bookmarks: Vec::new(),
         internal_links: Vec::new(),
@@ -2304,6 +2471,7 @@ fn new_page(geo: &PageGeometry, governing_run: usize) -> WorkPage {
 
 fn work_page_is_empty(page: &WorkPage) -> bool {
     page.page.items.is_empty()
+        && page.table_verticals.is_empty()
         && page.underlays.is_empty()
         && page.overlays.is_empty()
         && page.page_underlays.is_empty()
@@ -2312,6 +2480,7 @@ fn work_page_is_empty(page: &WorkPage) -> bool {
 }
 
 fn finish_work_page(mut work: WorkPage) -> Page {
+    append_merged_table_verticals(&mut work.page.items, work.table_verticals);
     work.underlays.append(&mut work.page_underlays);
     work.overlays.append(&mut work.page_overlays);
     work.underlays.sort_by_key(|(height, _)| *height);
@@ -2323,6 +2492,48 @@ fn finish_work_page(mut work: WorkPage) -> Page {
     items.extend(work.overlays.into_iter().map(|(_, item)| item));
     work.page.items = items;
     work.page
+}
+
+fn append_merged_table_verticals(
+    items: &mut Vec<Positioned>,
+    mut segments: Vec<TableVerticalSegment>,
+) {
+    segments.sort_by(|left, right| {
+        left.table_id
+            .cmp(&right.table_id)
+            .then_with(|| left.x_pt.total_cmp(&right.x_pt))
+            .then_with(|| left.y0_pt.total_cmp(&right.y0_pt))
+    });
+    let mut merged: Vec<TableVerticalSegment> = Vec::new();
+    for segment in segments {
+        if let Some(existing) = merged.iter_mut().rev().find(|existing| {
+            existing.table_id == segment.table_id
+                && (existing.x_pt - segment.x_pt).abs() <= 0.01
+                && same_stroke(&existing.stroke, &segment.stroke)
+                && segment.y0_pt <= existing.y1_pt + 0.01
+                && segment.y1_pt >= existing.y0_pt - 0.01
+        }) {
+            existing.y0_pt = existing.y0_pt.min(segment.y0_pt);
+            existing.y1_pt = existing.y1_pt.max(segment.y1_pt);
+        } else {
+            merged.push(segment);
+        }
+    }
+    items.extend(merged.into_iter().map(|segment| Positioned {
+        x_pt: segment.x_pt,
+        y_pt: segment.y0_pt,
+        item: Item::Line {
+            dx_pt: 0.0,
+            dy_pt: segment.y1_pt - segment.y0_pt,
+            stroke: segment.stroke,
+        },
+    }));
+}
+
+fn same_stroke(left: &Stroke, right: &Stroke) -> bool {
+    (left.width_pt - right.width_pt).abs() <= 0.01
+        && left.color == right.color
+        && left.dash == right.dash
 }
 
 fn build_note_sequence(units: &[Unit]) -> NoteSequence {
@@ -2574,17 +2785,45 @@ fn place_footnotes(
         let note_top = separator_y + NOTE_SEPARATOR_GAP_PT;
         let mut target = page_index;
         let mut y = note_top;
+        let mut fragment_table = None;
         add_note_separator(&mut pages[target], geo, false, separator_y);
         for unit in &note_units {
-            let needed = effective_gap_before(unit, y, note_top) + unit.height;
+            let fragment_start = unit.table_id.is_some() && unit.table_id != fragment_table;
+            let needed = effective_gap_before(unit, y, note_top)
+                + if fragment_start {
+                    unit.table_leading_pt
+                } else {
+                    0.0
+                }
+                + unit.height
+                + if unit.is_last_table_row {
+                    unit.table_trailing_pt
+                } else {
+                    0.0
+                };
             if y + needed > geo.content_bottom_pt && y > note_top {
                 target += 1;
                 pages.insert(target, new_page(geo, governing_run));
                 let continuation_separator_y = geo.content_top_pt;
                 y = continuation_separator_y + NOTE_SEPARATOR_GAP_PT;
                 add_note_separator(&mut pages[target], geo, true, continuation_separator_y);
+                fragment_table = None;
             }
-            place_unit(&mut pages[target], &mut y, geo, 0.0, unit, usize::MAX);
+            let fragment_start = unit.table_id.is_some() && unit.table_id != fragment_table;
+            place_unit(
+                &mut pages[target],
+                &mut y,
+                geo,
+                0.0,
+                unit,
+                usize::MAX,
+                fragment_start,
+            );
+            fragment_table = if unit.is_last_table_row {
+                None
+            } else {
+                unit.table_id
+            };
         }
         page_index = target + 1;
     }
@@ -2655,15 +2894,43 @@ fn append_endnotes(
     }
     let mut page = new_page(geo, governing_run);
     let mut y = geo.content_top_pt;
+    let mut fragment_table = None;
     for unit in &units {
-        if y + effective_gap_before(unit, y, geo.content_top_pt) + unit.height
+        let fragment_start = unit.table_id.is_some() && unit.table_id != fragment_table;
+        if y + effective_gap_before(unit, y, geo.content_top_pt)
+            + if fragment_start {
+                unit.table_leading_pt
+            } else {
+                0.0
+            }
+            + unit.height
+            + if unit.is_last_table_row {
+                unit.table_trailing_pt
+            } else {
+                0.0
+            }
             > geo.content_bottom_pt
             && !work_page_is_empty(&page)
         {
             pages.push(std::mem::replace(&mut page, new_page(geo, governing_run)));
             y = geo.content_top_pt;
+            fragment_table = None;
         }
-        place_unit(&mut page, &mut y, geo, 0.0, unit, usize::MAX);
+        let fragment_start = unit.table_id.is_some() && unit.table_id != fragment_table;
+        place_unit(
+            &mut page,
+            &mut y,
+            geo,
+            0.0,
+            unit,
+            usize::MAX,
+            fragment_start,
+        );
+        fragment_table = if unit.is_last_table_row {
+            None
+        } else {
+            unit.table_id
+        };
     }
     pages.push(page);
     Ok(())
@@ -2894,6 +3161,10 @@ fn place_hf(
             for positioned in &mut wp.page.items {
                 positioned.y_pt += overlap;
             }
+            for segment in &mut wp.table_verticals {
+                segment.y0_pt += overlap;
+                segment.y1_pt += overlap;
+            }
             for (_, positioned) in &mut wp.underlays {
                 positioned.y_pt += overlap;
             }
@@ -2973,6 +3244,50 @@ fn resolve_internal_links(pages: &[WorkPage]) -> Vec<ResolvedInternalLink> {
 mod tests {
     use super::*;
     use crate::layout::paragraph::Line;
+
+    fn table_unit(table_id: usize, group: usize, is_last: bool) -> Unit {
+        Unit {
+            height: 10.0,
+            gap_before: 0.0,
+            float_leading: 0.0,
+            items: Vec::new(),
+            anchored_items: Vec::new(),
+            page_floats: Vec::new(),
+            break_before: false,
+            column_break_before: false,
+            group,
+            fallback_group: group,
+            table_id: Some(table_id),
+            is_header_row: false,
+            table_leading_pt: 0.5,
+            table_trailing_pt: 0.5,
+            is_last_table_row: is_last,
+            outline: None,
+            bookmarks: Vec::new(),
+            internal_links: Vec::new(),
+            note_refs: Vec::new(),
+            frame: None,
+            block_index: 0,
+            block_unit_index: group,
+            floating_table: None,
+        }
+    }
+
+    #[test]
+    fn painted_body_bottom_includes_terminal_table_half_stroke() {
+        let unit = table_unit(1, 1, true);
+        assert_eq!(placed_unit_painted_bottom(&unit, 20.0), 30.5);
+    }
+
+    #[test]
+    fn balanced_columns_include_table_fragment_outer_half_strokes() {
+        let units = vec![table_unit(1, 1, false), table_unit(1, 2, true)];
+        let height = balanced_column_height(&units, 0, units.len(), 2, &HashMap::new(), 100.0);
+        assert!(
+            (height - 11.0).abs() <= 0.01,
+            "each bordered table fragment needs 0.5pt leading and trailing: {height}"
+        );
+    }
 
     #[test]
     fn transitive_keep_next_chain_uses_bounded_terminal_fallback_groups() {
@@ -3084,6 +3399,9 @@ mod tests {
             fallback_group: 1,
             table_id: Some(1),
             is_header_row: true,
+            table_leading_pt: 0.5,
+            table_trailing_pt: 0.5,
+            is_last_table_row: false,
             outline: None,
             bookmarks: vec![("header-target".to_string(), 3.0)],
             internal_links: Vec::new(),
@@ -3100,6 +3418,7 @@ mod tests {
             overlays: Vec::new(),
             page_underlays: Vec::new(),
             page_overlays: Vec::new(),
+            table_verticals: Vec::new(),
             unit_ys: Vec::new(),
             bookmarks: Vec::new(),
             internal_links: Vec::new(),

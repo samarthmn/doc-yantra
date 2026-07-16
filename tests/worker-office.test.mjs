@@ -21,7 +21,7 @@ const { createMockOfficeFontProvider } = require("./fixtures/mock-office-font-pr
 const COMPLEX_INPUT_SHA256 =
   "8c2a8c4725e77bbfb4ddc7925674dc221611a39b876dbd7ea2efc829e70b8530";
 const COMPLEX_OUTPUT_SHA256 =
-  "a3629b6aae822d56127cba7ab07ea6c0fc3ab51910b72bad0e0db301cdde3e1a";
+  "74a9552684aa6f8484b4a7f608688e738386dcac777a47c83c012bf7c7b948ad";
 const MOCK_REGISTERED_FONT_SHA256S = [
   "51edbfa32d8af939913ae1f4ad0a5173e32083499218c133384638090295f0b0", // Carlito Bold
   "59faf27a90dee5c1b7813b12b26c725ea88adc1bfe37b0ac8e0b8b32a5732c2a", // Caladea Regular
@@ -56,6 +56,7 @@ function withoutFetchTiming(profile) {
 async function withWorker(run, options) {
   const worker = createOfficeEngineWorker({
     fontProvider: createMockOfficeFontProvider(),
+    notoFallback: false,
     ...options,
   });
   try {
@@ -143,6 +144,37 @@ describe("Office worker API", () => {
       const output = await worker.convertOnDemand({ bytes: docx(), extension: "docx" });
       assert.equal(Buffer.from(output.pdf.subarray(0, 5)).toString(), "%PDF-");
     });
+  });
+
+  test("strict skips Noto while compatible boot-caches and restores it after replacement", async () => {
+    let fallbackCalls = 0;
+    const fixtureProvider = createMockOfficeFontProvider();
+    const fallbackProvider = {
+      id: "noto-worker-bootstrap-test",
+      cacheKey(request) {
+        return fixtureProvider.cacheKey(request);
+      },
+      async resolve(requests, signal) {
+        fallbackCalls += 1;
+        return fixtureProvider.resolve(requests, signal);
+      },
+    };
+    await withWorker(async (worker) => {
+      const bytes = docx();
+      const strict = await worker.profileOnDemand({ bytes, extension: "docx", mode: "strict" });
+      assert.equal(fallbackCalls, 0);
+      assert.equal(strict.fallbackResults.length, 0);
+
+      const compatible = await worker.profileOnDemand({ bytes, extension: "docx", mode: "compatible" });
+      assert.equal(fallbackCalls, 1);
+      assert.equal(compatible.fallbackResults.length, 6);
+      assert.ok(compatible.fallbackResults.every(({ cacheStatus }) => cacheStatus === "miss"));
+
+      await assert.rejects(worker.__testTrap(), (error) => assertWorkerError(error, "trap"));
+      const replacement = await worker.profileOnDemand({ bytes, extension: "docx", mode: "compatible" });
+      assert.equal(fallbackCalls, 1, "replacement should restore fallback from cache without fetching");
+      assert.ok(replacement.fallbackResults.every(({ cacheStatus }) => cacheStatus === "memory_hit"));
+    }, { notoFallback: fallbackProvider });
   });
 
   test("three concurrent profile calls serialize and resolve", async () => {

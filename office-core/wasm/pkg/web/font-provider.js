@@ -1,5 +1,6 @@
 const DEFAULT_MAX_FONT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_NEGATIVE_TTL_MS = 5_000;
+const MAX_ARTIFACTS_PER_REQUEST = 16;
 const IN_FLIGHT = new Map();
 const REQUEST_KEYS = new Set([
   'family', 'altFamilies', 'weight', 'italic', 'stretch', 'slots', 'panose',
@@ -23,7 +24,24 @@ function requestIdentityKey(request) {
 }
 
 function requestKey(request, providerId) {
-  return `${providerId}|${requestIdentityKey(request)}`;
+  const sorted = (values) => [...values].sort((left, right) =>
+    String(left).localeCompare(String(right), 'en-US'));
+  return JSON.stringify([
+    providerId,
+    request.family.trim().toLocaleLowerCase('en-US'),
+    sorted(request.altFamilies.map((family) => family.trim().toLocaleLowerCase('en-US'))),
+    request.weight,
+    request.italic ? 1 : 0,
+    request.stretch,
+    sorted(request.slots),
+    request.panose,
+    request.familyClass,
+    request.pitch,
+    request.charset,
+    sorted(request.unicodeRanges),
+    sorted(request.scripts.map((script) => script.trim().toLocaleLowerCase('en-US'))),
+    sorted(request.vfCoords),
+  ]);
 }
 
 function canonicalRequest(value) {
@@ -127,6 +145,21 @@ async function validateArtifact(value, maxFontBytes) {
       !Number.isInteger(value.stretch ?? 5)) {
     throw new TypeError('font artifact numeric identity is invalid');
   }
+  if (value.coverageScripts !== undefined &&
+      (!Array.isArray(value.coverageScripts) ||
+       value.coverageScripts.some((script) => typeof script !== 'string' || script.length === 0))) {
+    throw new TypeError('font artifact coverageScripts must contain non-empty strings');
+  }
+  if (value.coverageCodepoints !== undefined &&
+      (!Array.isArray(value.coverageCodepoints) ||
+       value.coverageCodepoints.some((codepoint) =>
+         !Number.isSafeInteger(codepoint) || codepoint < 0 || codepoint > 0x10ffff ||
+         (codepoint >= 0xd800 && codepoint <= 0xdfff)))) {
+    throw new TypeError('font artifact coverageCodepoints must contain Unicode scalar values');
+  }
+  if (value.expectedVersion !== undefined && typeof value.expectedVersion !== 'string') {
+    throw new TypeError('font artifact expectedVersion must be a string');
+  }
   return { ...structuredClone(value), sha256: actual, bytes };
 }
 
@@ -136,11 +169,11 @@ function expectationFor(artifact, request) {
     weight: artifact.weight,
     italic: artifact.italic,
     stretch: artifact.stretch ?? 5,
-    version: artifact.version ?? null,
+    version: artifact.expectedVersion ?? null,
     sha256: artifact.sha256,
     faceIndex: artifact.faceIndex ?? 0,
-    requiredScripts: [...request.scripts],
-    requiredCodepoints: [],
+    requiredScripts: [...(artifact.coverageScripts ?? request.scripts)],
+    requiredCodepoints: [...(artifact.coverageCodepoints ?? [])],
     vfCoords: request.vfCoords.map((coordinate) => {
       const [axis, value] = String(coordinate).split('=');
       return { axis, value: Number(value) };
@@ -268,20 +301,32 @@ async function cacheLookup(cache, persistentCache, key, catalogKey) {
     await persistentCache?.deleteRequest(key);
     return undefined;
   }
-  let bytes = await cache.getArtifact(index.sha256);
-  if (!bytes && persistentCache) {
-    bytes = await persistentCache.getArtifact(index.sha256);
-    if (bytes) await cache.putArtifact(index.sha256, bytes);
-  }
-  if (!bytes || await sha256(bytes) !== index.sha256) {
-    await cache.deleteArtifact(index.sha256);
+  const entries = Array.isArray(index.artifacts)
+    ? index.artifacts
+    : [{ sha256: index.sha256, artifact: index.artifact }];
+  if (entries.length === 0 || entries.length > MAX_ARTIFACTS_PER_REQUEST) {
     await cache.deleteRequest(key);
-    await persistentCache?.deleteArtifact(index.sha256);
     await persistentCache?.deleteRequest(key);
     return undefined;
   }
+  const artifacts = [];
+  for (const entry of entries) {
+    let bytes = await cache.getArtifact(entry.sha256);
+    if (!bytes && persistentCache) {
+      bytes = await persistentCache.getArtifact(entry.sha256);
+      if (bytes) await cache.putArtifact(entry.sha256, bytes);
+    }
+    if (!bytes || await sha256(bytes) !== entry.sha256) {
+      await cache.deleteArtifact(entry.sha256);
+      await cache.deleteRequest(key);
+      await persistentCache?.deleteArtifact(entry.sha256);
+      await persistentCache?.deleteRequest(key);
+      return undefined;
+    }
+    artifacts.push({ ...entry.artifact, bytes });
+  }
   await cache.putRequest(key, index);
-  return { artifact: { ...index.artifact, bytes }, cacheStatus };
+  return { artifact: artifacts[0], artifacts, cacheStatus };
 }
 
 function validateProvider(provider) {
@@ -377,7 +422,7 @@ export async function resolveAndRegisterFonts(requestValues, register, options =
       }
       const inFlightKey = `${key}|${catalogKey ?? ''}`;
       const existing = IN_FLIGHT.get(inFlightKey);
-      if (existing) providerWaits.set(key, existing);
+      if (existing) providerWaits.set(key, withAbort(existing, signal));
       else newRequests.push({ request, key, catalogKey, inFlightKey });
     }
 
@@ -405,7 +450,18 @@ export async function resolveAndRegisterFonts(requestValues, register, options =
         providerWaits.set(key, promise);
       }
     }
-    for (const [key, promise] of providerWaits) outcomes.set(key, await promise);
+    for (const [key, promise] of providerWaits) {
+      try {
+        outcomes.set(key, await promise);
+      } catch (error) {
+        if (signal.aborted && !timedOut) throw signal.reason ?? error;
+        const request = requests.find((candidate) => requestKey(candidate, provider.id) === key);
+        outcomes.set(key, {
+          status: 'temporary_failure', request,
+          reason: String(error?.message ?? error), cacheStatus: 'miss',
+        });
+      }
+    }
 
     const ordered = [];
     for (const request of requests) {
@@ -416,10 +472,28 @@ export async function resolveAndRegisterFonts(requestValues, register, options =
         ordered.push(outcome);
         continue;
       }
-      let artifact;
+      let artifacts;
       try {
-        artifact = await validateArtifact(outcome.artifact, maxFontBytes);
-        await register(artifact.bytes, JSON.stringify(expectationFor(artifact, request)));
+        const supplied = Array.isArray(outcome.artifacts) ? outcome.artifacts : [outcome.artifact];
+        if (supplied.length === 0 || supplied.length > MAX_ARTIFACTS_PER_REQUEST) {
+          throw new RangeError(`provider returned ${supplied.length} artifacts for one request`);
+        }
+        artifacts = await Promise.all(supplied.map((artifact) => validateArtifact(artifact, maxFontBytes)));
+        for (const artifact of artifacts) {
+          const registration = await register(
+            artifact.bytes,
+            JSON.stringify(expectationFor(artifact, request)),
+          );
+          let identity = registration;
+          if (typeof identity === 'string') {
+            try { identity = JSON.parse(identity); } catch { identity = undefined; }
+          }
+          if (identity && typeof identity === 'object') {
+            artifact.fullName = identity.fullName ?? artifact.fullName;
+            artifact.postscriptName = identity.postscriptName ?? artifact.postscriptName;
+            artifact.version = identity.version ?? artifact.version;
+          }
+        }
       } catch (error) {
         const failureCode = registrationFailureCode(error);
         const status = failureCode === 'font_license_restricted' ? 'denied' : 'temporary_failure';
@@ -435,14 +509,24 @@ export async function resolveAndRegisterFonts(requestValues, register, options =
         const catalogKey = typeof provider.cacheKey === 'function'
           ? String(await provider.cacheKey(request))
           : undefined;
-        const index = { sha256: artifact.sha256, artifact: artifactMetadata(artifact), catalogKey };
-        await memoryCache.putArtifact(artifact.sha256, artifact.bytes);
+        const index = {
+          artifacts: artifacts.map((artifact) => ({
+            sha256: artifact.sha256,
+            artifact: artifactMetadata(artifact),
+          })),
+          catalogKey,
+        };
+        for (const artifact of artifacts) {
+          await memoryCache.putArtifact(artifact.sha256, artifact.bytes);
+          await persistentCache?.putArtifact(artifact.sha256, artifact.bytes);
+        }
         await memoryCache.putRequest(key, index);
-        await persistentCache?.putArtifact(artifact.sha256, artifact.bytes);
         await persistentCache?.putRequest(key, index);
       }
+      const metadata = artifacts.map(artifactMetadata);
       ordered.push({
-        status: 'found', request, artifact: artifactMetadata(artifact),
+        status: 'found', request, artifact: metadata[0],
+        ...(metadata.length > 1 ? { artifacts: metadata } : {}),
         cacheStatus: outcome.cacheStatus, fetchDurationMs: outcome.fetchDurationMs,
       });
     }

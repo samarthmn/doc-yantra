@@ -148,6 +148,71 @@ describe('office font provider orchestration', () => {
     assert.deepEqual(registered, [3, 3]);
   });
 
+  test('a joining caller enforces its own timeout without cancelling shared resolution', async () => {
+    let calls = 0;
+    const provider = {
+      id: 'mock-concurrent-timeout',
+      async resolve(requests) {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return requests.map((requested) => ({
+          status: 'found', request: requested, artifact: artifact(),
+        }));
+      },
+    };
+    const first = resolveAndRegisterFonts([request], async () => {}, {
+      provider,
+      memoryCache: new MemoryFontCache(),
+      timeoutMs: 200,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const startedAt = Date.now();
+    const [timedOut] = await resolveAndRegisterFonts([request], async () => {}, {
+      provider,
+      memoryCache: new MemoryFontCache(),
+      timeoutMs: 10,
+      negativeTtlMs: 0,
+    });
+    const timeoutElapsedMs = Date.now() - startedAt;
+    const [resolved] = await first;
+
+    assert.equal(timedOut.status, 'temporary_failure');
+    assert.match(timedOut.reason, /timeout/i);
+    assert.ok(timeoutElapsedMs < 55, 'joining timeout must not wait for the shared fetch');
+    assert.equal(resolved.status, 'found');
+    assert.equal(calls, 1);
+  });
+
+  test('an aborted joining caller does not poison shared resolution', async () => {
+    let calls = 0;
+    const provider = {
+      id: 'mock-concurrent-abort',
+      async resolve(requests) {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return requests.map((requested) => ({
+          status: 'found', request: requested, artifact: artifact(),
+        }));
+      },
+    };
+    const first = resolveAndRegisterFonts([request], async () => {}, {
+      provider,
+      memoryCache: new MemoryFontCache(),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const controller = new AbortController();
+    const joining = resolveAndRegisterFonts([request], async () => {}, {
+      provider,
+      memoryCache: new MemoryFontCache(),
+      signal: controller.signal,
+    });
+    controller.abort(new Error('joining caller cancelled'));
+
+    await assert.rejects(joining, /joining caller cancelled/);
+    assert.equal((await first)[0].status, 'found');
+    assert.equal(calls, 1);
+  });
+
   test('not_found, denied, and temporary_failure remain distinct', async () => {
     for (const result of [
       { status: 'not_found', request },
@@ -202,9 +267,76 @@ describe('office font provider orchestration', () => {
     assert.equal(calls, 2);
 
     const index = [...memoryCache.requests.values()][0];
-    memoryCache.artifacts.set(index.sha256, Uint8Array.from([0xff]));
+    memoryCache.artifacts.set(index.artifacts[0].sha256, Uint8Array.from([0xff]));
     await resolveAndRegisterFonts([request], register, { provider, memoryCache });
     assert.equal(calls, 3);
+  });
+
+  test('one request registers and content-caches every supplied subset artifact', async () => {
+    const memoryCache = new MemoryFontCache();
+    const latin = artifact(Uint8Array.from([1, 2, 3]));
+    const greek = {
+      ...artifact(Uint8Array.from([4, 5, 6])),
+      coverageScripts: ['greek'],
+    };
+    latin.coverageScripts = ['latin'];
+    let calls = 0;
+    const provider = {
+      id: 'mock-subsets',
+      resolve: async () => {
+        calls += 1;
+        return [{ status: 'found', request, artifact: latin, artifacts: [latin, greek] }];
+      },
+    };
+    const registrations = [];
+    const register = async (bytes, expectation) => registrations.push({
+      bytes: [...bytes],
+      expectation: JSON.parse(expectation),
+    });
+
+    const cold = await resolveAndRegisterFonts([request], register, { provider, memoryCache });
+    const warm = await resolveAndRegisterFonts([request], register, { provider, memoryCache });
+
+    assert.equal(calls, 1);
+    assert.equal(cold[0].artifacts.length, 2);
+    assert.equal(warm[0].cacheStatus, 'memory_hit');
+    assert.deepEqual(registrations.map(({ bytes }) => bytes), [
+      [1, 2, 3], [4, 5, 6], [1, 2, 3], [4, 5, 6],
+    ]);
+    assert.deepEqual(registrations.map(({ expectation }) => expectation.requiredScripts), [
+      ['latin'], ['greek'], ['latin'], ['greek'],
+    ]);
+  });
+
+  test('cache identity keeps different coverage requests separate without provider cacheKey', async () => {
+    const memoryCache = new MemoryFontCache();
+    const greekRequest = Object.freeze({
+      ...request,
+      slots: ['hAnsi'],
+      unicodeRanges: [7],
+      scripts: ['greek'],
+    });
+    let calls = 0;
+    const provider = {
+      id: 'mock-coverage-keys',
+      resolve: async (requests) => {
+        calls += 1;
+        return requests.map((requested) => ({
+          status: 'found',
+          request: requested,
+          artifact: artifact(Uint8Array.from([calls, 2, 3])),
+        }));
+      },
+    };
+
+    await resolveAndRegisterFonts([request], async () => {}, { provider, memoryCache });
+    const second = await resolveAndRegisterFonts([greekRequest], async () => {}, {
+      provider,
+      memoryCache,
+    });
+
+    assert.equal(calls, 2);
+    assert.equal(second[0].cacheStatus, 'miss');
   });
 
   test('offline warm succeeds while offline cold is a deterministic temporary failure', async () => {
@@ -291,6 +423,25 @@ describe('office font provider orchestration', () => {
     );
     assert.equal(outcomes[0].status, 'temporary_failure');
     assert.equal(outcomes[0].failureCode, 'font_identity_mismatch');
+  });
+
+  test('artifact coverage rejects surrogate code points before registration', async () => {
+    const provider = {
+      id: 'mock-surrogate-coverage',
+      resolve: async () => [{
+        status: 'found',
+        request,
+        artifact: { ...artifact(), coverageCodepoints: [0xd800] },
+      }],
+    };
+    let registrations = 0;
+    const [outcome] = await resolveAndRegisterFonts([request], async () => {
+      registrations += 1;
+    }, { provider, memoryCache: new MemoryFontCache(), negativeTtlMs: 0 });
+
+    assert.equal(outcome.status, 'temporary_failure');
+    assert.match(outcome.reason, /Unicode scalar values/);
+    assert.equal(registrations, 0);
   });
 
   test('provider timeout is reported as temporary_failure without changing mode', async () => {
