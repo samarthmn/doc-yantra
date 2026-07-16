@@ -28,10 +28,11 @@ Details and exact code references: [`01-findings.md`](./01-findings.md). Full fi
 
 ## Re-verification required for sign-off
 
-From a **fresh checkout** with no local font directories:
+From a **fresh checkout** with no local font directories and no manual pre-steps (owner direction: fidelity must exercise the real on-demand font pipeline — no `--font-dir`):
 ```bash
 cd office-core && cargo test && cargo clippy --all-targets -- -D warnings
-cargo run -p fidelity -- fetch-fonts          # new (B1) — then:
-cargo run -p fidelity -- run --format docx    # green incl. gdocs-anchors-toc, with font assertions (S3)
+cargo run -p fidelity -- run --format docx    # resolves fonts itself (preflight → locked fetch → register);
+                                              # green incl. gdocs-anchors-toc, with font assertions (S3)
+cargo run -p fidelity -- run --format docx    # second run: warm cache, zero network — must also be green
 cd wasm && ./build.sh && cd ../.. && node --test tests/   # fresh pkg committed (B2), fontless tarball gate (S4)
 ```
