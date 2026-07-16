@@ -40,6 +40,14 @@ wasmpack() {
   fi
 }
 
+# Cargo can reuse a wasm artifact when only Cargo.toml's package version moved,
+# even though version() embeds CARGO_PKG_VERSION. Invalidate the two local
+# crates when the committed package or embedded engine reports another version.
+if node ../../scripts/wasm-version.mjs needs-clean Cargo.toml pkg; then
+  cargo clean --manifest-path Cargo.toml --release --target wasm32-unknown-unknown \
+    -p pdf-core -p pdf-core-wasm
+fi
+
 echo "Building ${PKG_NAME} (browser target, Zone 1) ..."
 rm -rf pkg-web
 wasmpack build --release --target web --out-dir pkg-web --scope "${OWNER}"
@@ -115,6 +123,7 @@ node -e '
 # Stamp the source fingerprint so consumers can detect a stale pkg/ build
 # (doc-kosha tests/unit/package-freshness.test.ts recomputes and compares).
 node ../../scripts/source-fingerprint.mjs pdf --out pkg/build-fingerprint.json
+node ../../scripts/wasm-version.mjs verify Cargo.toml pkg
 
 echo "Sizes:"
 ls -la pkg/pdf_core_wasm_bg.wasm pkg/web/pdf_core_wasm_bg.wasm | awk '{print $5, $9}'

@@ -20,8 +20,9 @@ const { createMockOfficeFontProvider } = require("./fixtures/mock-office-font-pr
 
 const COMPLEX_INPUT_SHA256 =
   "8c2a8c4725e77bbfb4ddc7925674dc221611a39b876dbd7ea2efc829e70b8530";
+// Includes the stable office-core-pdf-id-v1 trailer ID, not the package patch version.
 const COMPLEX_OUTPUT_SHA256 =
-  "74a9552684aa6f8484b4a7f608688e738386dcac777a47c83c012bf7c7b948ad";
+  "a7fde8def61640c180cfab10f2fbd368129a6544420127f7dce0aecc33675bd4";
 const MOCK_REGISTERED_FONT_SHA256S = [
   "51edbfa32d8af939913ae1f4ad0a5173e32083499218c133384638090295f0b0", // Carlito Bold
   "59faf27a90dee5c1b7813b12b26c725ea88adc1bfe37b0ac8e0b8b32a5732c2a", // Caladea Regular

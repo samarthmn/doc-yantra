@@ -35,6 +35,13 @@ wasmpack() {
   fi
 }
 
+# A package-version-only change must rebuild both the wrapper's version() and
+# office-core's embedded engine version instead of reusing their wasm artifacts.
+if node ../../scripts/wasm-version.mjs needs-clean Cargo.toml pkg; then
+  cargo clean --manifest-path Cargo.toml --release --target wasm32-unknown-unknown \
+    -p office-core -p office-core-wasm
+fi
+
 echo "Building ${PKG_NAME} (browser target) ..."
 rm -rf pkg-web
 wasmpack build --release --target web --out-dir pkg-web --scope "${OWNER}"
@@ -106,6 +113,7 @@ node -e '
 # Stamp the source fingerprint so consumers can detect a stale pkg/ build
 # (doc-kosha tests/unit/package-freshness.test.ts recomputes and compares).
 node ../../scripts/source-fingerprint.mjs office --out pkg/build-fingerprint.json
+node ../../scripts/wasm-version.mjs verify Cargo.toml pkg
 
 WASM_BYTES=$(wc -c < pkg/office_core_wasm_bg.wasm)
 WASM_MB=$(( WASM_BYTES / 1024 / 1024 ))

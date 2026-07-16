@@ -1,7 +1,7 @@
 {
   "name": "@samarthmn/doc-yantra-office",
   "description": "DocKosha office-core Office->PDF engine compiled to WebAssembly (Node/Vercel + browser)",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "files": [
     "office_core_wasm_bg.wasm",
     "office_core_wasm.js",

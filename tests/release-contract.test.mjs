@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -77,6 +77,57 @@ function cargoPackageVersion(relativePath) {
 function packageVersion(relativePath) {
   return JSON.parse(readFileSync(join(root, relativePath), "utf8")).version;
 }
+
+function runWasmVersionGuard(...args) {
+  return spawnSync(process.execPath, [join(root, "scripts", "wasm-version.mjs"), ...args], {
+    cwd: root,
+    encoding: "utf8",
+  });
+}
+
+test("wasm version guard detects and rejects a stale embedded engine version", () => {
+  const scratch = join(root, "tmp", `wasm-version-guard-${process.pid}`);
+  const packageRoot = join(scratch, "pkg");
+  mkdirSync(packageRoot, { recursive: true });
+  try {
+    const manifest = join(scratch, "Cargo.toml");
+    writeFileSync(manifest, '[package]\nname = "fixture-wasm"\nversion = "0.0.11"\n');
+    writeFileSync(
+      join(packageRoot, "package.json"),
+      `${JSON.stringify({ name: "fixture-wasm", version: "0.0.11", main: "index.cjs" })}\n`,
+    );
+    writeFileSync(join(packageRoot, "index.cjs"), 'exports.version = () => "0.0.10";\n');
+
+    const stale = runWasmVersionGuard("needs-clean", manifest, packageRoot);
+    assert.equal(stale.status, 0, stale.stderr);
+    const rejected = runWasmVersionGuard("verify", manifest, packageRoot);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /embedded engine version 0\.0\.10, expected 0\.0\.11/u);
+
+    writeFileSync(join(packageRoot, "index.cjs"), 'exports.version = () => "0.0.11";\n');
+    const current = runWasmVersionGuard("needs-clean", manifest, packageRoot);
+    assert.equal(current.status, 1, current.stderr);
+    const accepted = runWasmVersionGuard("verify", manifest, packageRoot);
+    assert.equal(accepted.status, 0, accepted.stderr);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("both wasm build scripts invalidate stale versioned artifacts before building", () => {
+  for (const [relativePath, packages] of [
+    ["pdf-core/wasm/build.sh", ["pdf-core", "pdf-core-wasm"]],
+    ["office-core/wasm/build.sh", ["office-core", "office-core-wasm"]],
+  ]) {
+    const source = readFileSync(join(root, relativePath), "utf8");
+    assert.match(source, /wasm-version\.mjs needs-clean Cargo\.toml pkg/u, relativePath);
+    assert.match(source, /cargo clean/u, relativePath);
+    for (const packageName of packages) {
+      assert.match(source, new RegExp(`-p ${packageName}(?:\\s|$)`, "u"), relativePath);
+    }
+    assert.match(source, /wasm-version\.mjs verify Cargo\.toml pkg/u, relativePath);
+  }
+});
 
 test("all release surfaces carry one immutable version", () => {
   const versions = new Map([

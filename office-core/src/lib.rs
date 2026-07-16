@@ -310,12 +310,16 @@ fn convert_docx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
     })
 }
 
-/// Deterministic 16-byte document id: first half of `SHA-256(input ‖ version)`.
+/// Stable PDF-ID schema. Package patch versions are deliberately excluded so a
+/// release-only version bump does not alter otherwise identical PDF bytes.
+const PDF_DOCUMENT_ID_SCHEMA: &[u8] = b"office-core-pdf-id-v1";
+
+/// Deterministic 16-byte document id: first half of `SHA-256(input ‖ schema)`.
 fn document_id(bytes: &[u8]) -> [u8; 16] {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.update(DocProfile::VERSION.as_bytes());
+    hasher.update(PDF_DOCUMENT_ID_SCHEMA);
     let digest = hasher.finalize();
     let mut id = [0u8; 16];
     id.copy_from_slice(&digest[..16]);
@@ -357,6 +361,17 @@ pub fn font_requests(
 #[cfg(test)]
 mod runtime_font_tests {
     use super::*;
+
+    #[test]
+    fn document_id_is_stable_across_package_patch_releases() {
+        assert_eq!(
+            document_id(b"release-stable"),
+            [
+                0xb3, 0xfa, 0x4a, 0x13, 0xaf, 0x5c, 0x4e, 0x9c, 0xeb, 0x6d, 0x4a, 0x64, 0xc1, 0x08,
+                0xd1, 0xa8,
+            ]
+        );
+    }
 
     #[test]
     fn public_runtime_font_registration_validates_bytes() {
