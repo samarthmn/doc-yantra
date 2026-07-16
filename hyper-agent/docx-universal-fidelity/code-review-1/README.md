@@ -30,6 +30,10 @@ The post-implementation per-case weighted/unweighted comparison is recorded in
 [`03-ink-weighted-rollout.md`](./03-ink-weighted-rollout.md); thresholds and
 goldens remain frozen as required by §3.4.
 
+The remaining metric-policy conflict, supporting evidence, and owner decisions
+needed for sign-off are documented in
+[`04-ink-weighted-testing-blocker.md`](./04-ink-weighted-testing-blocker.md).
+
 ## Re-verification required for sign-off
 
 From a **fresh checkout** with no local font directories and no manual pre-steps (owner direction: fidelity must exercise the real on-demand font pipeline — no `--font-dir`):
