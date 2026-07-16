@@ -90,9 +90,14 @@ function boot() {
   }
   const glue = require(workerData.gluePath);
   if (typeof glue.version !== 'function') throw new Error('engine glue has no version()');
+  const registerFont = typeof glue.office_register_font === 'function'
+    ? (bytes) => glue.office_register_font(bytes, undefined)
+    : typeof glue.register_font === 'function'
+      ? (bytes) => glue.register_font(bytes)
+      : undefined;
 
   if (workerData.fontsDir !== undefined) {
-    if (typeof workerData.fontsDir !== 'string' || typeof glue.register_font !== 'function') {
+    if (typeof workerData.fontsDir !== 'string' || registerFont === undefined) {
       throw new Error('invalid font registration configuration');
     }
     const availableFonts = readdirSync(workerData.fontsDir)
@@ -105,14 +110,14 @@ function boot() {
       throw new Error('invalid font registration order');
     }
     for (const name of fontNames) {
-      glue.register_font(readFileSync(join(workerData.fontsDir, name)));
+      registerFont(readFileSync(join(workerData.fontsDir, name)));
     }
   }
 
   if (workerData.extraFontDirs !== undefined) {
     if (!Array.isArray(workerData.extraFontDirs) ||
         workerData.extraFontDirs.some((dir) => typeof dir !== 'string' || dir.length === 0) ||
-        typeof glue.register_font !== 'function') {
+        registerFont === undefined) {
       throw new Error('invalid extraFontDirs configuration');
     }
     const paths = workerData.extraFontDirs.flatMap((dir) =>
@@ -121,7 +126,7 @@ function boot() {
         .map((item) => join(dir, item)))
       .sort();
     for (const path of paths) {
-      glue.register_font(readFileSync(path));
+      registerFont(readFileSync(path));
     }
   }
 
