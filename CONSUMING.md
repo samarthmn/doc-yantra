@@ -25,9 +25,9 @@ pushes (requires Rust; the build scripts pin wasm-pack 0.15.0 and use pnpm or
 npx when it is not installed globally):
 
 ```bash
-pdf-core/scripts/release.sh            # auto: next patch, commit, tag, push
-pdf-core/scripts/release.sh 7          # explicit: release 0.0.7
-DRY_RUN=1 pdf-core/scripts/release.sh  # preview only
+scripts/release.sh            # auto: next patch, commit, tag, push
+scripts/release.sh 7          # explicit: release 0.0.7
+DRY_RUN=1 scripts/release.sh  # preview only
 ```
 
 Published versions are immutable — the script refuses to reuse or go below an

@@ -63,7 +63,7 @@ and conversion; native default builds alone retain `bundled-fonts` for hermetic
 tests and fidelity scoring.
 
 **Versioning now spans four Cargo.tomls** kept in lockstep by
-`pdf-core/scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
+`scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
 `office-core/Cargo.toml`, `office-core/wasm/Cargo.toml`. One `0.0.*` tag publishes
 both npm packages via `publish-wasm.yml`.
 
@@ -100,12 +100,12 @@ derives the next `x` from the highest `0.0.*` git tag, writes both
 Cargo.tomls, rebuilds `pkg/`, commits, tags, and pushes (the `publish-wasm.yml`
 Action then publishes to GitHub Packages on the tag):
 ```bash
-pdf-core/scripts/release.sh          # auto: next patch after the highest tag
-pdf-core/scripts/release.sh 7        # explicit: release 0.0.7
-DRY_RUN=1 pdf-core/scripts/release.sh  # preview, change nothing
+scripts/release.sh          # auto: next patch after the highest tag
+scripts/release.sh 7        # explicit: release 0.0.7
+DRY_RUN=1 scripts/release.sh  # preview, change nothing
 ```
 It refuses to reuse or go below an existing tag (published versions are immutable).
-Run it from a clean-enough tree — it does `git add pdf-core` and commits the version
+Run it from a clean-enough tree — it does `git add` for every released package and commits the version
 bump plus the regenerated `pkg/` together.
 
 ## Rules that are easy to get wrong
@@ -117,10 +117,10 @@ bump plus the regenerated `pkg/` together.
 - **Version lives in TWO Cargo.tomls** — `pdf-core/Cargo.toml` and
   `pdf-core/wasm/Cargo.toml` — plus both `Cargo.lock`s and the built
   `pkg/package.json`; keep all of them on the same `0.0.x`. The package's
-  `version()` returns the wasm crate's. `pdf-core/scripts/release.sh` bumps them
+  `version()` returns the wasm crate's. `scripts/release.sh` bumps them
   for you (via the Cargo.tomls + `build.sh`). Published versions are **immutable**.
 - **Releasing** is tag-driven and stays on the `0.0.x` line — just run
-  `pdf-core/scripts/release.sh` (see the Releasing section above). It picks the
+  `scripts/release.sh` (see the Releasing section above). It picks the
   next patch, rebuilds/commits `pkg/`, tags `0.0.x`, and pushes; the
   `publish-wasm.yml` Action publishes to GitHub Packages on `0.0.*` tags.
 - **GitHub Packages requires the npm scope to equal the repo owner.** If the owner

@@ -129,9 +129,9 @@ that the tagged commit is on `main` and both committed package versions match
 the tag, then publishes those artifacts without rebuilding or retesting them:
 
 ```bash
-pdf-core/scripts/release.sh            # auto: next patch, commit, tag, push
-pdf-core/scripts/release.sh 7          # explicit: release 0.0.7
-DRY_RUN=1 pdf-core/scripts/release.sh  # preview only
+scripts/release.sh            # auto: next patch, commit, tag, push
+scripts/release.sh 7          # explicit: release 0.0.7
+DRY_RUN=1 scripts/release.sh  # preview only
 
 # then, in a follow-up, bump DocKosha's package.json pin to the new 0.0.x + pnpm install
 ```
