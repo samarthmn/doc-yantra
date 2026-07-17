@@ -1,0 +1,12 @@
+title = "CJK text: Japanese glyph coverage"
+tier = "extended"
+ssim_threshold = 0.90
+geometry_median_pt = 3.5
+geometry_p95_pt = 5.5
+expected_fonts = ["Caladea", "Carlito", "Liberation Sans", "Liberation Serif", "Noto Sans CJK JP"]
+max_page_count_delta = 0
+word_version = "Microsoft Word"
+ground_truth_exported_at = "2026-07-17"
+input_sha256 = "e21abf3dc65f4dd8a8b401765f771d10bcec4b8d78a9a4056c4387b19fc77cbf"
+golden_sha256 = "8414dccd76d2e7ae5c7db264c6672304322b25886a86f73a3f256d15f157d3a3"
+notes = "Pan-CJK host-provider coverage: theme-resolved MS Mincho/MS Gothic text with a Word-authored display equation. Thresholds calibrated 2026-07-17 against the sans-for-serif pan-CJK substitution; geometry bounds reflect the residual East Asian leading model gap."
