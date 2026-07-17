@@ -4,7 +4,9 @@ const { createHash, randomUUID } = require('node:crypto');
 const { mkdir, readFile, rename, unlink, writeFile } = require('node:fs/promises');
 const { isAbsolute, join } = require('node:path');
 
-const DEFAULT_MAX_FONT_BYTES = 10 * 1024 * 1024;
+// Matches the engine's validated-registration cap: large enough for the
+// pan-CJK Noto Sans CJK regional OTFs (~16.5 MiB) a host provider may supply.
+const DEFAULT_MAX_FONT_BYTES = 24 * 1024 * 1024;
 const DEFAULT_NEGATIVE_TTL_MS = 5_000;
 const MAX_ARTIFACTS_PER_REQUEST = 16;
 const IN_FLIGHT = new Map();

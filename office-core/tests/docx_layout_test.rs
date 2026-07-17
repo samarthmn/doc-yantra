@@ -2469,3 +2469,26 @@ fn uncached_field_uses_field_unsupported_code() {
         })
     ));
 }
+
+/// Regression: CFF-flavoured faces (the pan-CJK Noto Sans CJK OTFs) must emit
+/// as CIDFontType0 + FontFile3 with an embedded encoding CMap — never as
+/// CIDFontType2 + FontFile2, which is invalid for CFF programs.
+#[test]
+fn docx_cjk_text_embeds_cff_faces_as_cid_font_type0() {
+    let bytes = minimal_docx("<w:p><w:r><w:t>你好世界 CJK regression</w:t></w:r></w:p>");
+    let options = ConvertOptions {
+        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        ..opts()
+    };
+    let prof = profile_with_options(&bytes, OfficeFormat::Docx, &options).unwrap();
+    assert!(prof.supported, "CJK profile miss: {:?}", prof.reasons);
+    let pdf = convert(&bytes, OfficeFormat::Docx, &options).unwrap().pdf;
+
+    let contains = |needle: &[u8]| pdf.windows(needle.len()).any(|window| window == needle);
+    assert!(contains(b"CIDFontType0C"), "CFF program must embed as FontFile3/CIDFontType0C");
+    assert!(contains(b"FontFile3"), "CFF descriptor must reference FontFile3");
+    assert!(
+        contains(b"/DocYantra-CFF-Encoding"),
+        "CFF Type0 font must map codes through the embedded encoding CMap"
+    );
+}

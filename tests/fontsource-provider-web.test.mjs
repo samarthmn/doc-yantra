@@ -52,6 +52,32 @@ describe('browser FontsourceProvider', () => {
     assert.equal(result.artifact.expectedVersion, '0.83');
   });
 
+  test('symbol-bearing requests append the same pinned supplements as Node', async () => {
+    const modulePath = join(ROOT, 'office-core', 'wasm', 'pkg', 'web', 'fontsource-provider.js');
+    const { FontsourceProvider } = await import(pathToFileURL(modulePath));
+    const urls = [];
+    const provider = new FontsourceProvider({
+      fetch: async (url) => {
+        urls.push(String(url));
+        return new Response(Uint8Array.of(0, 1, 0, urls.length), {
+          headers: { 'content-type': 'font/ttf' },
+        });
+      },
+    });
+    const [result] = await provider.resolve([
+      request({ family: 'Calibri', scripts: ['latin', 'symbols'] }),
+    ], new AbortController().signal);
+
+    assert.equal(result.status, 'found');
+    assert.deepEqual(urls.slice(-2), [
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-math@5.2.9/latin-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-symbols-2@5.2.8/symbols-400-normal.ttf',
+    ]);
+    assert.deepEqual(result.artifacts.slice(-2).map(({ family }) => family), [
+      'Noto Sans Math', 'Noto Sans Symbols 2',
+    ]);
+  });
+
   test('rejects an HTML 200 response before treating it as a font', async () => {
     const modulePath = join(ROOT, 'office-core', 'wasm', 'pkg', 'web', 'fontsource-provider.js');
     const { FontsourceProvider } = await import(pathToFileURL(modulePath));

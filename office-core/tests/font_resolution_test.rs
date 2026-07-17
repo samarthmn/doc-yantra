@@ -88,9 +88,9 @@ fn validated_registration_rejects_identity_and_hash_mismatches() {
 fn validated_registration_rejects_corrupt_and_oversized_inputs() {
     assert!(register_font_validated(b"not a font", None).is_err());
 
-    let oversized = vec![0_u8; 10 * 1024 * 1024 + 1];
+    let oversized = vec![0_u8; 24 * 1024 * 1024 + 1];
     let error = register_font_validated(&oversized, None)
-        .expect_err("the default registration cap is ten MiB");
+        .expect_err("the default registration cap is 24 MiB");
     assert!(matches!(
         error,
         OfficeError::Unsupported {

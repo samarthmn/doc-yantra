@@ -106,6 +106,20 @@ pub fn subset_for_pdf(
     }
 }
 
+impl SubsetFont {
+    /// Bare `CFF ` table bytes for `FontFile3` embedding. `None` when the
+    /// program is not CFF-flavoured or the table cannot be located.
+    pub fn cff_table(&self) -> Option<Vec<u8>> {
+        if !self.is_cff {
+            return None;
+        }
+        let face = ttf_parser::Face::parse(&self.data, 0).ok()?;
+        face.raw_face()
+            .table(ttf_parser::Tag::from_bytes(b"CFF "))
+            .map(<[u8]>::to_vec)
+    }
+}
+
 fn build(
     data: Vec<u8>,
     remap: BTreeMap<u16, u16>,

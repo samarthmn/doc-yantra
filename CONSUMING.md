@@ -137,7 +137,7 @@ const result = await office.convertOnDemand(bytes, "docx", {
   memoryCache: new office.MemoryFontCache(),
   persistentCache: new office.NodeFontCache(absoluteCacheDirectory),
   signal,
-  limits: { maxFontBytes: 10 * 1024 * 1024 },
+  limits: { maxFontBytes: 24 * 1024 * 1024 },
 });
 ```
 
@@ -156,6 +156,34 @@ checks (`0.83` / `Version 0.80`). Other built-in families intentionally follow
 the accepted `latest` version policy; resolved hashes and name-table versions
 remain visible in font telemetry. A trusted `fallbackSource` callback may point
 at a commit-pinned Google Fonts mirror.
+
+Because Google-style `latin`/`latin-ext` subset artifacts strip mathematical
+operators (U+2200–22FF) and most symbol blocks, any request whose `scripts`
+include `symbols` or `math` also fetches pinned supplements — Noto Sans Math
+(`5.2.9`, its `latin` artifact is the full font) and Noto Sans Symbols 2's
+`symbols` artifact (`5.2.8`) — and returns them as additional artifacts on the
+same result. `Noto Sans Symbols`, `Noto Sans Symbols 2`, and `Noto Sans Math`
+are also directly resolvable catalog families, so documents authored with those
+faces (Google Docs exports routinely reference `Noto Sans Symbols`) resolve
+without falling back to a Latin text face.
+
+**CJK (Chinese/Japanese/Korean) in Office documents.** The engine fails closed
+(`no font for CJK` / `missing_glyph`) unless a registered face covers the
+document's CJK code points; nothing CJK is bundled or fetched by default. Since
+0.0.12 the registration caps (engine and host, 24 MiB) admit the pan-CJK
+`Noto Sans CJK {SC,TC,JP,KR}` regional OTFs (~16.5 MiB each) that
+`@samarthmn/doc-yantra` already ships under `fonts/` for pdf-core. A host
+provider can therefore supply them for requests whose `scripts` include
+`"cjk"`, choosing the regional variant from the requested family (DocKosha maps
+common faces — SimSun/YaHei → SC, MingLiU/JhengHei → TC, Mincho/Gothic/Meiryo →
+JP, Malgun/Batang → KR — and defaults to SC; the engine's compatible-mode
+substitution ladder applies the same mapping). Every regional OTF covers the
+full pan-CJK repertoire, so the variant only selects Han-unified glyph styling.
+Emitted PDFs stay small because CFF faces embed as used-glyph `CIDFontType0`
+subsets. Known limits: only the Regular weight ships (bold CJK renders
+regular), vertical text (`w:textDirection`) stays outside the envelope, and
+regional styling for Han-unified text follows the declared family, not
+document language tags.
 
 **Stable API surface DocKosha depends on:**
 

@@ -394,7 +394,25 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
         "liberation serif" => &["Tinos"],
         "liberation mono" => &["Cousine"],
         "georgia" => &["Gelasio"],
-        "noto sans symbols" | "noto sans symbols 2" => &["Carlito"],
+        // Symbol families substitute for each other before falling back to a
+        // Latin text face for metrics; glyph coverage for symbol codepoints
+        // comes from whichever registered face covers them (see
+        // `coverage_fallbacks`), so Carlito stays last as the metric anchor.
+        "noto sans symbols" => &["Noto Sans Symbols 2", "Noto Sans Math", "Carlito"],
+        "noto sans symbols 2" => &["Noto Sans Symbols", "Noto Sans Math", "Carlito"],
+        "noto sans math" => &["Noto Sans Symbols 2", "Carlito"],
+        // Common CJK faces have no metric-compatible OFL clone; the pan-CJK
+        // Noto Sans CJK regional faces are the practical substitutes (the
+        // same policy the retired LibreOffice backend applied). Hosts supply
+        // these via a font provider; nothing is bundled.
+        "simsun" | "nsimsun" | "simsun-extb" | "simhei" | "microsoft yahei"
+        | "microsoft yahei ui" | "dengxian" | "kaiti" | "fangsong" => &["Noto Sans CJK SC"],
+        "pmingliu" | "mingliu" | "pmingliu-extb" | "mingliu-extb" | "microsoft jhenghei"
+        | "microsoft jhenghei ui" | "dfkai-sb" => &["Noto Sans CJK TC"],
+        "ms mincho" | "ms pmincho" | "ms gothic" | "ms pgothic" | "ms ui gothic" | "yu gothic"
+        | "yu gothic ui" | "yu mincho" | "meiryo" | "meiryo ui" => &["Noto Sans CJK JP"],
+        "malgun gothic" | "malgun gothic semilight" | "batang" | "batangche" | "gungsuh"
+        | "gulim" | "gulimche" | "dotum" | "dotumche" => &["Noto Sans CJK KR"],
         _ => &[],
     }
 }
@@ -520,8 +538,34 @@ mod tests {
             &["Liberation Mono", "Cousine"]
         );
         assert_eq!(substitution_targets("Georgia"), &["Gelasio"]);
-        assert_eq!(substitution_targets("Noto Sans Symbols"), &["Carlito"]);
+        assert_eq!(
+            substitution_targets("Noto Sans Symbols"),
+            &["Noto Sans Symbols 2", "Noto Sans Math", "Carlito"]
+        );
+        assert_eq!(
+            substitution_targets("Noto Sans Symbols 2"),
+            &["Noto Sans Symbols", "Noto Sans Math", "Carlito"]
+        );
+        assert_eq!(
+            substitution_targets("Noto Sans Math"),
+            &["Noto Sans Symbols 2", "Carlito"]
+        );
         assert!(substitution_targets("Comic Sans MS").is_empty());
+    }
+
+    #[test]
+    fn substitution_map_covers_common_cjk_families() {
+        assert_eq!(substitution_targets("SimSun"), &["Noto Sans CJK SC"]);
+        assert_eq!(substitution_targets("Microsoft YaHei"), &["Noto Sans CJK SC"]);
+        assert_eq!(substitution_targets("PMingLiU"), &["Noto Sans CJK TC"]);
+        assert_eq!(
+            substitution_targets("Microsoft JhengHei"),
+            &["Noto Sans CJK TC"]
+        );
+        assert_eq!(substitution_targets("MS Mincho"), &["Noto Sans CJK JP"]);
+        assert_eq!(substitution_targets("Yu Gothic"), &["Noto Sans CJK JP"]);
+        assert_eq!(substitution_targets("Malgun Gothic"), &["Noto Sans CJK KR"]);
+        assert_eq!(substitution_targets("Batang"), &["Noto Sans CJK KR"]);
     }
 
     #[test]

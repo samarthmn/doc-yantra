@@ -6,8 +6,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use ttf_parser::{Face, Tag, name_id};
 
-/// Default maximum size accepted by validated runtime registration (10 MiB).
-pub const DEFAULT_MAX_FONT_BYTES: usize = 10 * 1024 * 1024;
+/// Default maximum size accepted by validated runtime registration (24 MiB).
+/// Sized so host providers can register the pan-CJK Noto Sans CJK regional
+/// OTFs (~16.5 MiB each) that pdf-core already ships and boot-registers;
+/// emitted PDFs stay small because embedding subsets to used glyphs.
+pub const DEFAULT_MAX_FONT_BYTES: usize = 24 * 1024 * 1024;
 
 /// A requested variable-font axis coordinate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,7 +151,7 @@ pub struct FontIdentity {
     pub coverage_ok: bool,
 }
 
-/// Validates one SFNT/TTC artifact using the default 10 MiB cap.
+/// Validates one SFNT/TTC artifact using the default 24 MiB cap.
 pub fn validate_font(bytes: &[u8], expectation: Option<&FontExpectation>) -> Result<FontIdentity> {
     validate_font_with_limit(bytes, expectation, DEFAULT_MAX_FONT_BYTES)
 }

@@ -241,6 +241,131 @@ describe('FontsourceProvider', () => {
     }), /unsafe values/);
   });
 
+  test('symbol-bearing requests append pinned math and symbols supplements', async () => {
+    const urls = [];
+    const provider = new FontsourceProvider({
+      fetch: async (url) => {
+        urls.push(String(url));
+        return bytesResponse([urls.length, 1, 0, 0]);
+      },
+    });
+    const [result] = await provider.resolve([
+      request({ family: 'Calibri', scripts: ['latin', 'symbols'] }),
+    ], new AbortController().signal);
+
+    assert.equal(result.status, 'found');
+    assert.deepEqual(urls, [
+      'https://cdn.jsdelivr.net/fontsource/fonts/carlito@latest/latin-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/carlito@latest/latin-ext-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/carlito@latest/vietnamese-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-math@5.2.9/latin-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-symbols-2@5.2.8/symbols-400-normal.ttf',
+    ]);
+    assert.deepEqual(result.artifacts.map(({ family }) => family), [
+      'Carlito', 'Carlito', 'Carlito', 'Noto Sans Math', 'Noto Sans Symbols 2',
+    ]);
+    // The `symbols` artifact declares a coverage codepoint proven present in
+    // the published file; `math` supplements ride on `latin` full-font bytes.
+    const symbols2 = result.artifacts.at(-1);
+    assert.deepEqual(symbols2.coverageCodepoints, [0x2022]);
+    assert.equal(symbols2.subset, 'symbols');
+  });
+
+  test('requests without symbol scripts never fetch supplements', async () => {
+    const urls = [];
+    const provider = new FontsourceProvider({
+      fetch: async (url) => {
+        urls.push(String(url));
+        return bytesResponse([urls.length, 1, 0, 0]);
+      },
+    });
+    const [result] = await provider.resolve([
+      request({ family: 'Calibri', scripts: ['latin'] }),
+    ], new AbortController().signal);
+    assert.equal(result.status, 'found');
+    assert.ok(urls.every((url) => url.includes('/carlito@')), urls.join(', '));
+  });
+
+  test('maps the Noto symbol and math families to their own pinned catalog ids', async () => {
+    const provider = new FontsourceProvider();
+    assert.equal(provider.mappedId(request({ family: 'Noto Sans Symbols' })), 'noto-sans-symbols');
+    assert.equal(provider.mappedId(request({ family: 'Noto Sans Symbols 2' })), 'noto-sans-symbols-2');
+    assert.equal(provider.mappedId(request({ family: 'Noto Sans Math' })), 'noto-sans-math');
+
+    const urls = [];
+    const fetching = new FontsourceProvider({
+      fetch: async (url) => {
+        urls.push(String(url));
+        return bytesResponse([urls.length, 1, 0, 0]);
+      },
+    });
+    const [result] = await fetching.resolve([
+      request({ family: 'Noto Sans Symbols', scripts: ['symbols'] }),
+    ], new AbortController().signal);
+    assert.equal(result.status, 'found');
+    // Primary symbols subsets, then the two supplements (primary id skipped).
+    assert.deepEqual(urls, [
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-symbols@5.2.11/latin-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-symbols@5.2.11/symbols-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-math@5.2.9/latin-400-normal.ttf',
+      'https://cdn.jsdelivr.net/fontsource/fonts/noto-sans-symbols-2@5.2.8/symbols-400-normal.ttf',
+    ]);
+  });
+
+  test('unmapped symbol-bearing families resolve to supplements alone', async () => {
+    const urls = [];
+    const provider = new FontsourceProvider({
+      fetch: async (url) => {
+        urls.push(String(url));
+        return bytesResponse([urls.length, 1, 0, 0]);
+      },
+    });
+    const [result] = await provider.resolve([
+      request({ family: 'Wingdings 3', scripts: ['symbols'] }),
+    ], new AbortController().signal);
+    assert.equal(result.status, 'found');
+    assert.deepEqual(result.artifacts.map(({ family }) => family), [
+      'Noto Sans Math', 'Noto Sans Symbols 2',
+    ]);
+
+    const [control] = await provider.resolve([
+      request({ family: 'Wingdings 3', scripts: [] }),
+    ], new AbortController().signal);
+    assert.equal(control.status, 'not_found');
+  });
+
+  test('a 404 on one supplement keeps the primary and remaining artifacts', async () => {
+    let served = 0;
+    const provider = new FontsourceProvider({
+      fetch: async (url) => String(url).includes('noto-sans-symbols-2')
+        ? bytesResponse([], 404)
+        : bytesResponse([(served += 1), 1, 0, 0]),
+    });
+    const [result] = await provider.resolve([
+      request({ family: 'Calibri', scripts: ['latin', 'symbols'] }),
+    ], new AbortController().signal);
+    assert.equal(result.status, 'found');
+    const families = new Set(result.artifacts.map(({ family }) => family));
+    assert.ok(families.has('Carlito'));
+    assert.ok(families.has('Noto Sans Math'));
+    assert.ok(!families.has('Noto Sans Symbols 2'));
+  });
+
+  test('cache keys change when symbol supplements participate', async () => {
+    const provider = new FontsourceProvider();
+    const plain = await provider.cacheKey(request({ family: 'Calibri', scripts: ['latin'] }));
+    const withSymbols = await provider.cacheKey(
+      request({ family: 'Calibri', scripts: ['latin', 'symbols'] }),
+    );
+    assert.notEqual(plain, withSymbols);
+    assert.match(withSymbols, /noto-sans-math@v19@5\.2\.9/);
+    assert.match(withSymbols, /noto-sans-symbols-2@v25@5\.2\.8/);
+    assert.match(
+      await provider.cacheKey(request({ family: 'Wingdings 3', scripts: ['symbols'] })),
+      /^unmapped\|noto-sans-math@/,
+    );
+  });
+
   test('fresh provider reuses a persistent cache for dynamically discovered families offline', async () => {
     const persistentCache = new MemoryFontCache();
     const customRequest = request({ family: 'Custom', scripts: ['latin'] });

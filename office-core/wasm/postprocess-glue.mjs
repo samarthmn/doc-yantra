@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 const MARKER = "DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1";
 const HELPERS = `
 const ${MARKER} = 50 * 1024 * 1024;
-const DOC_YANTRA_OFFICE_FONT_PRECOPY_LIMIT = 10 * 1024 * 1024;
+// Matches the engine's validated-registration cap (24 MiB) so hosts can
+// register the pan-CJK Noto Sans CJK regional OTFs (~16.5 MiB each).
+const DOC_YANTRA_OFFICE_FONT_PRECOPY_LIMIT = 24 * 1024 * 1024;
 
 function dyEnvelopeError(code, message) {
     return new Error(JSON.stringify({ dy: 1, code, message }));

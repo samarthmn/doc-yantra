@@ -275,6 +275,8 @@ pub(crate) fn emit_with_internal_links(
 /// Per-face embedding state.
 struct EmbeddedFont {
     subset: SubsetFont,
+    /// Bare `CFF ` table for `FontFile3` when the face is CFF-flavoured.
+    cff_program: Option<Vec<u8>>,
     cid_widths: BTreeMap<u16, f32>,
     type0: Ref,
     cid: Ref,
@@ -290,6 +292,13 @@ struct EmbeddedFont {
 
 impl EmbeddedFont {
     fn new(subset: SubsetFont, semantic_pairs: &BTreeSet<SemanticKey>) -> Result<EmbeddedFont> {
+        let cff_program = if subset.is_cff {
+            Some(subset.cff_table().ok_or_else(|| {
+                OfficeError::Font("CFF font program has no extractable CFF table".into())
+            })?)
+        } else {
+            None
+        };
         let mut cid_widths: BTreeMap<u16, f32> =
             subset.widths.iter().map(|&(c, w)| (c, w as f32)).collect();
         let mut cid_to_gid: BTreeMap<u16, u16> = subset
@@ -357,6 +366,7 @@ impl EmbeddedFont {
         }
         Ok(EmbeddedFont {
             subset,
+            cff_program,
             cid_widths,
             type0: Ref::new(1),
             cid: Ref::new(1),
@@ -481,30 +491,59 @@ fn collect_semantic_pairs(
 }
 
 fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
-    // Type0.
-    pdf.type0_font(f.type0)
-        .base_font(Name(b"OfficeCoreSubset"))
-        .encoding_predefined(Name(b"Identity-H"))
-        .descendant_font(f.cid)
-        .to_unicode(f.to_unicode_ref);
+    let is_cff = f.subset.is_cff;
 
-    // CIDFontType2.
+    // Type0. CFF programs have no CIDToGIDMap: codes (including semantic CIDs
+    // beyond the glyph range) map to CFF CIDs through an embedded CMap stream
+    // instead of Identity-H.
+    {
+        let mut type0 = pdf.type0_font(f.type0);
+        type0.base_font(Name(b"OfficeCoreSubset"));
+        if is_cff {
+            type0.encoding_cmap(f.mapping);
+        } else {
+            type0.encoding_predefined(Name(b"Identity-H"));
+        }
+        type0.descendant_font(f.cid).to_unicode(f.to_unicode_ref);
+    }
+
+    // CIDFontType2 (TrueType) or CIDFontType0 (CFF).
     {
         let mut cid = pdf.cid_font(f.cid);
-        cid.subtype(CidFontType::Type2)
-            .base_font(Name(b"OfficeCoreSubset"))
-            .system_info(SystemInfo {
-                registry: Str(b"Adobe"),
-                ordering: Str(b"Identity"),
-                supplement: 0,
-            })
-            .font_descriptor(f.descriptor)
-            .cid_to_gid_map_stream(f.mapping);
+        cid.subtype(if is_cff {
+            CidFontType::Type0
+        } else {
+            CidFontType::Type2
+        })
+        .base_font(Name(b"OfficeCoreSubset"))
+        .system_info(SystemInfo {
+            registry: Str(b"Adobe"),
+            ordering: Str(b"Identity"),
+            supplement: 0,
+        })
+        .font_descriptor(f.descriptor);
+        if !is_cff {
+            cid.cid_to_gid_map_stream(f.mapping);
+        }
+        // CIDFontType2 widths are keyed by code (= CID under Identity-H);
+        // CIDFontType0 widths are keyed by the CFF CID the encoding CMap maps
+        // to (= subset gid), where the first mapped code's width wins.
+        let widths_by_cid: BTreeMap<u16, f32> = if is_cff {
+            let mut by_gid = BTreeMap::new();
+            for (code, gid) in &f.cid_to_gid {
+                if let Some(width) = f.cid_widths.get(code) {
+                    by_gid.entry(*gid).or_insert(*width);
+                }
+            }
+            by_gid
+        } else {
+            f.cid_widths.clone()
+        };
         if let (Some(&min), Some(&max)) =
-            (f.cid_widths.keys().next(), f.cid_widths.keys().next_back())
+            (widths_by_cid.keys().next(), widths_by_cid.keys().next_back())
         {
             let widths: Vec<f32> = (min..=max)
-                .map(|c| f.cid_widths.get(&c).copied().unwrap_or(0.0))
+                .map(|c| widths_by_cid.get(&c).copied().unwrap_or(0.0))
                 .collect();
             cid.widths().consecutive(min, widths);
         }
@@ -512,21 +551,32 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
     }
 
     // Descriptor + font file.
-    pdf.font_descriptor(f.descriptor)
-        .name(Name(b"OfficeCoreSubset"))
-        .flags(pdf_writer::types::FontFlags::NON_SYMBOLIC)
-        .bbox(Rect::new(-200.0, -200.0, 1000.0, 900.0))
-        .italic_angle(0.0)
-        .ascent(800.0)
-        .descent(-200.0)
-        .cap_height(700.0)
-        .stem_v(80.0)
-        .font_file2(f.file);
-    pdf.stream(
-        f.file,
-        &miniz_oxide::deflate::compress_to_vec_zlib(&f.subset.data, 6),
-    )
-    .filter(Filter::FlateDecode);
+    {
+        let mut descriptor = pdf.font_descriptor(f.descriptor);
+        descriptor
+            .name(Name(b"OfficeCoreSubset"))
+            .flags(pdf_writer::types::FontFlags::NON_SYMBOLIC)
+            .bbox(Rect::new(-200.0, -200.0, 1000.0, 900.0))
+            .italic_angle(0.0)
+            .ascent(800.0)
+            .descent(-200.0)
+            .cap_height(700.0)
+            .stem_v(80.0);
+        if is_cff {
+            descriptor.font_file3(f.file);
+        } else {
+            descriptor.font_file2(f.file);
+        }
+    }
+    let program: &[u8] = f.cff_program.as_deref().unwrap_or(&f.subset.data);
+    let compressed_program = miniz_oxide::deflate::compress_to_vec_zlib(program, 6);
+    {
+        let mut file = pdf.stream(f.file, &compressed_program);
+        file.filter(Filter::FlateDecode);
+        if is_cff {
+            file.pair(Name(b"Subtype"), Name(b"CIDFontType0C"));
+        }
+    }
 
     // ToUnicode CMap.
     let cmap = build_to_unicode(&f.to_unicode);
@@ -535,7 +585,11 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
         &miniz_oxide::deflate::compress_to_vec_zlib(&cmap, 6),
     )
     .filter(Filter::FlateDecode);
-    let mapping = build_cid_to_gid(&f.cid_to_gid);
+    let mapping = if is_cff {
+        build_cff_encoding(&f.cid_to_gid)
+    } else {
+        build_cid_to_gid(&f.cid_to_gid)
+    };
     pdf.stream(f.mapping, &mapping);
 }
 
@@ -1613,6 +1667,27 @@ fn build_cid_to_gid(mapping: &BTreeMap<u16, u16>) -> Vec<u8> {
         bytes[offset..offset + 2].copy_from_slice(&gid.to_be_bytes());
     }
     bytes
+}
+
+/// Embedded `/Encoding` CMap mapping content codes to CFF CIDs; the same
+/// format pdf-core emits for its CFF embeds.
+fn build_cff_encoding(mapping: &BTreeMap<u16, u16>) -> Vec<u8> {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n\
+         /CMapName /DocYantra-CFF-Encoding def\n/CMapType 1 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    let entries: Vec<(u16, u16)> = mapping.iter().map(|(&code, &cid)| (code, cid)).collect();
+    for chunk in entries.chunks(100) {
+        cmap.push_str(&format!("{} begincidchar\n", chunk.len()));
+        for &(code, cid) in chunk {
+            cmap.push_str(&format!("<{code:04X}> {cid}\n"));
+        }
+        cmap.push_str("endcidchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    cmap.into_bytes()
 }
 
 fn parse_pdf_date(s: &str) -> Option<Date> {

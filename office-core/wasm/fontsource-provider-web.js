@@ -29,6 +29,9 @@ export const DEFAULT_FONTSOURCE_ALIASES = Object.freeze({
   'liberation mono': 'cousine',
   'liberation sans': 'arimo',
   'liberation serif': 'tinos',
+  'noto sans math': 'noto-sans-math',
+  'noto sans symbols': 'noto-sans-symbols',
+  'noto sans symbols 2': 'noto-sans-symbols-2',
   'segoe ui': 'arimo',
   times: 'tinos',
   'times new roman': 'tinos',
@@ -37,12 +40,34 @@ export const DEFAULT_FONTSOURCE_ALIASES = Object.freeze({
   'ubuntu mono': 'ubuntu-mono',
 });
 
+// Families fetched in addition to the mapped family whenever a request's
+// scripts include symbol or math content. Word documents routinely mix
+// mathematical operators (U+2200-22FF) and geometric/miscellaneous symbols
+// into runs styled with plain text faces, and the Google-subset artifacts for
+// those faces strip these blocks. Noto Sans Math's `latin` artifact is the
+// full font (math operators included); Noto Sans Symbols 2's `symbols`
+// artifact carries the geometric/miscellaneous blocks.
+const SYMBOL_SUPPLEMENTS = Object.freeze([
+  Object.freeze({ id: 'noto-sans-math', subsets: Object.freeze(['latin']) }),
+  Object.freeze({ id: 'noto-sans-symbols-2', subsets: Object.freeze(['symbols']) }),
+]);
+
+const SYMBOL_SCRIPTS = new Set(['symbols', 'math']);
+
+function requestHasSymbolScripts(request) {
+  return (request.scripts ?? []).some((script) =>
+    SYMBOL_SCRIPTS.has(String(script).trim().toLocaleLowerCase('en-US')));
+}
+
 export const DEFAULT_FONTSOURCE_CATALOG = Object.freeze({
   arimo: catalog('Arimo', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'hebrew', 'latin', 'latin-ext', 'vietnamese'], [400, 500, 600, 700], 'v36', 'latest'),
   caladea: catalog('Caladea', ['latin', 'latin-ext'], [400, 700], 'v8', 'latest'),
   carlito: catalog('Carlito', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'latin', 'latin-ext', 'vietnamese'], [400, 700], 'v4', 'latest'),
   cousine: catalog('Cousine', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'hebrew', 'latin', 'latin-ext', 'vietnamese'], [400, 700], 'v30', 'latest'),
   gelasio: catalog('Gelasio', ['latin', 'latin-ext', 'vietnamese'], [400, 500, 600, 700], 'v14', '5.2.8'),
+  'noto-sans-math': catalog('Noto Sans Math', ['latin'], [400], 'v19', '5.2.9', 'OFL-1.1', undefined, ['normal']),
+  'noto-sans-symbols': catalog('Noto Sans Symbols', ['latin', 'latin-ext', 'symbols'], [400, 700], 'v47', '5.2.11', 'OFL-1.1', undefined, ['normal']),
+  'noto-sans-symbols-2': catalog('Noto Sans Symbols 2', ['braille', 'latin', 'latin-ext', 'math', 'mayan-numerals', 'symbols'], [400], 'v25', '5.2.8', 'OFL-1.1', undefined, ['normal']),
   tinos: catalog('Tinos', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'hebrew', 'latin', 'latin-ext', 'vietnamese'], [400, 700], 'v26', 'latest'),
   ubuntu: catalog('Ubuntu', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'latin', 'latin-ext'], [300, 400, 500, 700], 'v21', '5.2.8', 'UFL-1.0', '0.83'),
   'ubuntu-mono': catalog('Ubuntu Mono', ['cyrillic', 'cyrillic-ext', 'greek', 'greek-ext', 'latin', 'latin-ext'], [400, 700], 'v19', '5.2.8', 'UFL-1.0', 'Version 0.80'),
@@ -56,12 +81,13 @@ function catalog(
   packageVersion,
   license = 'OFL-1.1',
   expectedVersion,
+  styles = ['italic', 'normal'],
 ) {
   return Object.freeze({
     family,
     subsets: Object.freeze(subsets),
     weights: Object.freeze(weights),
-    styles: Object.freeze(['italic', 'normal']),
+    styles: Object.freeze(styles),
     defSubset: 'latin',
     catalogVersion,
     packageVersion,
@@ -126,6 +152,13 @@ function coverageForSubset(subset) {
   if (subset === 'hebrew') return { scripts: ['hebrew'], codepoints: [] };
   if (subset === 'latin') return { scripts: ['latin'], codepoints: [] };
   if (subset === 'latin-ext') return { scripts: [], codepoints: [0x0100] };
+  // Registration probes every declared codepoint against the artifact's cmap,
+  // so these declare only glyphs proven present in the published Fontsource
+  // artifacts (Noto Sans Symbols' `symbols` artifact lacks U+25CF, the
+  // representative for the `symbols` script — declaring the script instead of
+  // U+2022 would make its registration fail).
+  if (subset === 'math') return { scripts: [], codepoints: [0x00d7] };
+  if (subset === 'symbols') return { scripts: [], codepoints: [0x2022] };
   if (subset === 'vietnamese') return { scripts: [], codepoints: [0x0102] };
   return { scripts: [], codepoints: [] };
 }
@@ -134,6 +167,7 @@ function subsetCoversScript(subset, script) {
   if (script === 'latin') {
     return subset === 'latin' || subset === 'latin-ext' || subset === 'vietnamese';
   }
+  if (script === 'symbols') return subset === 'symbols' || subset === 'math';
   return subset === script || subset.startsWith(`${script}-`);
 }
 
@@ -319,12 +353,22 @@ export class FontsourceProvider {
 
   async cacheKey(request) {
     const id = this.mappedId(request);
-    if (!id) return 'unmapped';
+    const supplementKey = requestHasSymbolScripts(request)
+      ? SYMBOL_SUPPLEMENTS
+        .filter((supplement) => supplement.id !== id)
+        .map((supplement) => {
+          const metadata = this.catalog.get(supplement.id);
+          return `${supplement.id}@${metadata?.catalogVersion ?? 'discovery'}@${metadata?.packageVersion ?? 'latest'}`;
+        })
+        .join('+')
+      : '';
+    if (!id) return supplementKey ? `unmapped|${supplementKey}` : 'unmapped';
     const metadata = this.catalog.get(id);
     const catalogVersion = metadata && !metadata.discovered ? metadata.catalogVersion : 'discovery';
     const packageVersion = metadata && !metadata.discovered ? metadata.packageVersion : 'latest';
     return [id, catalogVersion, packageVersion,
-      request.weight, request.italic ? 'italic' : 'normal', [...request.scripts].sort().join(',')].join('|');
+      request.weight, request.italic ? 'italic' : 'normal', [...request.scripts].sort().join(','),
+      supplementKey].join('|');
   }
 
   async descriptorFor(request, signal) {
@@ -335,6 +379,21 @@ export class FontsourceProvider {
     const requestedStyle = request.italic ? 'italic' : 'normal';
     const style = metadata.styles.includes(requestedStyle) ? requestedStyle : metadata.styles[0];
     return { id, metadata, weight, style, subsets: subsetsFor(request, metadata) };
+  }
+
+  async supplementDescriptorsFor(request, primaryId, signal) {
+    if (!requestHasSymbolScripts(request)) return [];
+    const descriptors = [];
+    for (const supplement of SYMBOL_SUPPLEMENTS) {
+      if (supplement.id === primaryId) continue;
+      const metadata = await this.metadataFor(supplement.id, signal);
+      const weight = nearest(metadata.weights, request.weight);
+      const requestedStyle = request.italic ? 'italic' : 'normal';
+      const style = metadata.styles.includes(requestedStyle) ? requestedStyle : metadata.styles[0];
+      const subsets = supplement.subsets.filter((subset) => metadata.subsets.includes(subset));
+      if (subsets.length > 0) descriptors.push({ id: supplement.id, metadata, weight, style, subsets });
+    }
+    return descriptors;
   }
 
   async artifact(descriptor, subset, bytes, source) {
@@ -384,11 +443,26 @@ export class FontsourceProvider {
     return boundedMap(requests, this.concurrency, async (request) => {
       try {
         const descriptor = await this.descriptorFor(request, signal);
-        if (!descriptor) return { status: 'not_found', request };
         const artifacts = [];
-        for (const subset of descriptor.subsets) {
-          artifacts.push(await this.fetchArtifact(descriptor, subset, signal));
+        if (descriptor) {
+          for (const subset of descriptor.subsets) {
+            artifacts.push(await this.fetchArtifact(descriptor, subset, signal));
+          }
         }
+        for (const supplement of await this.supplementDescriptorsFor(request, descriptor?.id, signal)) {
+          for (const subset of supplement.subsets) {
+            try {
+              artifacts.push(await this.fetchArtifact(supplement, subset, signal));
+            } catch (error) {
+              // A 404 on a pinned supplement artifact is deterministic; the
+              // engine's glyph-coverage gate still fails closed downstream if
+              // the missing supplement was actually needed. Anything else is
+              // retryable and must surface as a temporary failure.
+              if (!(error instanceof HttpStatusError && error.status === 404)) throw error;
+            }
+          }
+        }
+        if (artifacts.length === 0) return { status: 'not_found', request };
         return { status: 'found', request, artifact: artifacts[0], artifacts };
       } catch (error) {
         if (signal.aborted) throw signal.reason ?? error;
