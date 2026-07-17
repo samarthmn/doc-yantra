@@ -48,6 +48,19 @@ impl Face {
     pub fn parsed(&self) -> Option<ttf_parser::Face<'_>> {
         ttf_parser::Face::parse(&self.data, self.index).ok()
     }
+
+    /// Metrics for layout line boxes. Pan-CJK substitutes present the
+    /// legacy CJK line convention so substituted documents keep Word's
+    /// pagination (see [`super::matching::LEGACY_CJK_LINE_METRICS_EM`]).
+    pub fn line_metrics(&self) -> Option<super::FaceMetrics<'_>> {
+        let metrics = self.parsed().map(super::FaceMetrics::new)?;
+        Some(if super::matching::pan_cjk_face(&self.family_name) {
+            let (ascent, descent, line_gap) = super::matching::LEGACY_CJK_LINE_METRICS_EM;
+            metrics.with_line_metrics_em(ascent, descent, line_gap)
+        } else {
+            metrics
+        })
+    }
 }
 
 /// A collection of faces with resolution (see [`super::matching`]).

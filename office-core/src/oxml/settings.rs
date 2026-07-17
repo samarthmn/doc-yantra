@@ -15,6 +15,9 @@ pub struct Settings {
     pub auto_hyphenation: bool,
     /// Compatibility mode (`w:compatSetting` `compatibilityMode`; default 15).
     pub compat_mode: u8,
+    /// `w:themeFontLang/@w:eastAsia`: selects the theme's East Asian script
+    /// face (see [`super::theme::Theme::east_asia_lang`]).
+    pub theme_font_lang_east_asia: Option<String>,
     /// Visible settings deliberately kept fail-closed.
     pub visible_unsupported: Vec<String>,
 }
@@ -26,6 +29,7 @@ impl Default for Settings {
             even_and_odd_headers: false,
             auto_hyphenation: false,
             compat_mode: 15,
+            theme_font_lang_east_asia: None,
             visible_unsupported: Vec::new(),
         }
     }
@@ -41,10 +45,9 @@ impl Settings {
         for c in children(root) {
             if c.tag_name().namespace() == Some(M) && c.tag_name().name() == "mathPr" {
                 for property in children(c) {
-                    let supported_default_font = property.tag_name().namespace() == Some(M)
-                        && property.tag_name().name() == "mathFont"
-                        && attr(property, M, "val").is_none_or(|font| font == "Cambria Math");
-                    if !supported_default_font {
+                    let accepted = property.tag_name().namespace() == Some(M)
+                        && math_preference_is_renderable(property);
+                    if !accepted {
                         settings
                             .visible_unsupported
                             .push(format!("m:mathPr/m:{}", property.tag_name().name()));
@@ -59,6 +62,10 @@ impl Settings {
                     }
                 }
                 "evenAndOddHeaders" => settings.even_and_odd_headers = toggle(c),
+                "themeFontLang" => {
+                    settings.theme_font_lang_east_asia =
+                        attr(c, W, "eastAsia").map(str::to_string)
+                }
                 "autoHyphenation" => settings.auto_hyphenation = toggle(c),
                 "compat" => {
                     for cs in children(c) {
@@ -78,5 +85,33 @@ impl Settings {
             }
         }
         Ok(settings)
+    }
+}
+
+/// Whether one `m:mathPr` preference leaves the supported equation
+/// rendering unchanged. Word stamps its defaults into every document that
+/// contains math, so the defaults must stay in envelope; values that would
+/// change output we cannot produce stay fail-closed.
+fn math_preference_is_renderable(property: super::Node) -> bool {
+    let value = attr(property, M, "val");
+    match property.tag_name().name() {
+        "mathFont" => value.is_none_or(|font| font == "Cambria Math"),
+        // Equations lay out as unbroken boxes, so preferences that only
+        // select where an over-wide equation would break cannot change the
+        // rendered output.
+        "brkBin" | "brkBinSub" | "wrapIndent" => true,
+        "smallFrac" => matches!(value, Some("0" | "false" | "off")),
+        "dispDef" => value.is_none_or(|toggle| matches!(toggle, "1" | "true" | "on")),
+        "lMargin" | "rMargin" => value == Some("0"),
+        // `centerGroup` and `center` both match the centered display
+        // default; left/right defaults would move every equation.
+        "defJc" => matches!(value, Some("center" | "centerGroup")),
+        // Limits always render under/over. For integrals Word's `subSup`
+        // default is the frozen baseline divergence; `undOvr` matches the
+        // rendering exactly. A `subSup` n-ary default would move Σ limits
+        // beyond that baseline, so it stays out of envelope.
+        "intLim" => matches!(value, Some("subSup" | "undOvr")),
+        "naryLim" => value == Some("undOvr"),
+        _ => false,
     }
 }

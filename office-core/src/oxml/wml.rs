@@ -1630,14 +1630,13 @@ impl WmlParser {
             }
             out.push(BlockContent::Paragraph(paragraph));
         } else if is(node, M, "oMathPara") {
+            let math = super::omml::MathContent::parse(node, true);
             out.push(BlockContent::Paragraph(Paragraph {
                 props: ParaProps {
-                    alignment: Some(Jc::Center),
+                    alignment: Some(math_paragraph_alignment(&math)),
                     ..ParaProps::default()
                 },
-                runs: vec![InlineContent::Math(super::omml::MathContent::parse(
-                    node, true,
-                ))],
+                runs: vec![InlineContent::Math(math)],
                 sect_break: None,
             }));
         } else if is(node, W, "tbl") {
@@ -2274,6 +2273,17 @@ impl FieldBuild {
             content: self.content,
             starved: terminal && !self.any_content,
         }
+    }
+}
+
+/// Effective alignment for a display math paragraph: `m:jc` when authored,
+/// Word's centered `centerGroup` default otherwise.
+pub(crate) fn math_paragraph_alignment(math: &super::omml::MathContent) -> Jc {
+    use super::omml::MathJustification;
+    match math.justification {
+        Some(MathJustification::Left) => Jc::Start,
+        Some(MathJustification::Right) => Jc::End,
+        Some(MathJustification::Center | MathJustification::CenterGroup) | None => Jc::Center,
     }
 }
 

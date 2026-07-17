@@ -2465,3 +2465,192 @@ fn complex_docx_matches_word_export_page_and_image_geometry() {
         "front-of-text image must paint above every page-body glyph"
     );
 }
+
+#[test]
+fn fixture_omml_word_equation_boilerplate_properties_are_accepted() {
+    // The exact construct mix Word authors for the binomial theorem: math
+    // paragraph justification, empty ctrlPr boilerplate on every properties
+    // element, a grown n-ary operator, and a no-bar (binomial) fraction.
+    let body = r#"<w:p><m:oMathPara><m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr><m:oMath><m:sSup><m:sSupPr><m:ctrlPr/></m:sSupPr><m:e><m:d><m:dPr><m:ctrlPr/></m:dPr><m:e><m:r><m:t>x+a</m:t></m:r></m:e></m:d></m:e><m:sup><m:r><m:t>n</m:t></m:r></m:sup></m:sSup><m:r><m:t>=</m:t></m:r><m:nary><m:naryPr><m:chr m:val="∑"/><m:grow m:val="1"/><m:ctrlPr/></m:naryPr><m:sub><m:r><m:t>k=0</m:t></m:r></m:sub><m:sup><m:r><m:t>n</m:t></m:r></m:sup><m:e><m:d><m:dPr><m:ctrlPr/></m:dPr><m:e><m:f><m:fPr><m:type m:val="noBar"/><m:ctrlPr/></m:fPr><m:num><m:r><m:t>n</m:t></m:r></m:num><m:den><m:r><m:t>k</m:t></m:r></m:den></m:f></m:e></m:d><m:sSup><m:sSupPr><m:ctrlPr/></m:sSupPr><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>k</m:t></m:r></m:sup></m:sSup><m:sSup><m:sSupPr><m:ctrlPr/></m:sSupPr><m:e><m:r><m:t>a</m:t></m:r></m:e><m:sup><m:r><m:t>n-k</m:t></m:r></m:sup></m:sSup></m:e></m:nary></m:oMath></m:oMathPara></w:p>"#;
+    let bytes = minimal_docx(body);
+    assert_profile_convert_agree(&bytes);
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let all_text = laid.pages.iter().map(page_text).collect::<String>();
+    for expected in ["x+a", "=", "∑", "k=0", "n-k"] {
+        assert!(
+            all_text.contains(expected),
+            "missing {expected:?} in {all_text:?}"
+        );
+    }
+}
+
+#[test]
+fn fixture_omml_nobar_fraction_suppresses_the_rule_but_keeps_the_stack() {
+    let count_lines = |bytes: &[u8]| {
+        let doc = WordDoc::open(bytes, &ConvertOptions::default()).unwrap();
+        let laid = layout_docx(&doc).unwrap().0;
+        laid.pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .filter(|positioned| matches!(positioned.item, Item::Line { .. }))
+            .count()
+    };
+    let barred = minimal_docx(
+        r#"<w:p><m:oMath><m:f><m:num><m:r><m:t>n</m:t></m:r></m:num><m:den><m:r><m:t>k</m:t></m:r></m:den></m:f></m:oMath></w:p>"#,
+    );
+    let binomial = minimal_docx(
+        r#"<w:p><m:oMath><m:f><m:fPr><m:type m:val="noBar"/><m:ctrlPr/></m:fPr><m:num><m:r><m:t>n</m:t></m:r></m:num><m:den><m:r><m:t>k</m:t></m:r></m:den></m:f></m:oMath></w:p>"#,
+    );
+    assert_eq!(count_lines(&barred), 1, "plain fraction draws its rule");
+    assert_eq!(count_lines(&binomial), 0, "noBar fraction must not draw a rule");
+    let doc = WordDoc::open(&binomial, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let text = laid.pages.iter().map(page_text).collect::<String>();
+    assert!(text.contains('n') && text.contains('k'), "{text:?}");
+}
+
+#[test]
+fn fixture_omml_display_justification_positions_the_equation() {
+    let integral_x = |body: &str| {
+        let bytes = minimal_docx(body);
+        assert_profile_convert_agree(&bytes);
+        let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let laid = layout_docx(&doc).unwrap().0;
+        laid.pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .find_map(|positioned| {
+                matches!(&positioned.item, Item::Glyphs(run) if run.glyphs.iter().any(|glyph| glyph.ch == '∫'))
+                    .then_some(positioned.x_pt)
+            })
+            .expect("display integral")
+    };
+    let equation = r#"<m:oMath><m:nary><m:naryPr><m:chr m:val="∫"/></m:naryPr><m:sub><m:r><m:t>0</m:t></m:r></m:sub><m:sup><m:r><m:t>1</m:t></m:r></m:sup><m:e><m:r><m:t>x</m:t></m:r></m:e></m:nary></m:oMath>"#;
+    let jc = |value: &str| {
+        format!(
+            "<m:oMathPara><m:oMathParaPr><m:jc m:val=\"{value}\"/></m:oMathParaPr>{equation}</m:oMathPara>"
+        )
+    };
+
+    // Block-level math paragraphs honor m:jc (default stays centered).
+    let left_x = integral_x(&jc("left"));
+    let right_x = integral_x(&jc("right"));
+    let center_x = integral_x(&jc("centerGroup"));
+    assert!(left_x < 150.0, "left-justified equation at x={left_x}");
+    assert!(right_x > 420.0, "right-justified equation at x={right_x}");
+    assert!(
+        (200.0..420.0).contains(&center_x),
+        "centerGroup equation at x={center_x}"
+    );
+
+    // A display equation wrapped in its own w:p honors m:jc the same way,
+    // even when the paragraph style says otherwise.
+    let wrapped = format!(
+        "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr>{}</w:p>",
+        jc("left")
+    );
+    let wrapped_left_x = integral_x(&wrapped);
+    assert!(
+        wrapped_left_x < 150.0,
+        "w:p-wrapped left-justified equation at x={wrapped_left_x}"
+    );
+}
+
+#[test]
+fn fixture_omml_unrecognized_equation_properties_remain_fail_closed() {
+    for (body, detail) in [
+        (
+            r#"<m:oMathPara><m:oMathParaPr><m:jc m:val="diagonal"/></m:oMathParaPr><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>"#,
+            "oMathParaPr",
+        ),
+        (
+            r#"<m:oMathPara><m:oMathParaPr><m:mysteryPr/></m:oMathParaPr><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>"#,
+            "oMathParaPr",
+        ),
+        (
+            r#"<w:p><m:oMath><m:f><m:fPr><m:type m:val="lin"/></m:fPr><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath></w:p>"#,
+            "fraction type lin",
+        ),
+        (
+            r#"<w:p><m:oMath><m:nary><m:naryPr><m:limLoc m:val="subSup"/></m:naryPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:nary></m:oMath></w:p>"#,
+            "n-ary operator properties",
+        ),
+        (
+            r#"<w:p><m:oMath><m:d><m:dPr><m:sepChr m:val="|"/></m:dPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d></m:oMath></w:p>"#,
+            "delimiter properties",
+        ),
+    ] {
+        let bytes = minimal_docx(body);
+        let prof = profile(&bytes, OfficeFormat::Docx).unwrap();
+        assert!(!prof.supported, "{detail}: unexpectedly supported");
+        assert!(
+            prof.reasons.iter().any(|reason| {
+                reason.code == UnsupportedCode::Equation && reason.detail.contains(detail)
+            }),
+            "{detail}: {:?}",
+            prof.reasons
+        );
+        assert!(matches!(
+            convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()),
+            Err(office_core::OfficeError::Unsupported {
+                code: UnsupportedCode::Equation,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn fixture_word_default_math_preferences_stay_in_envelope() {
+    let empty_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    let body = r#"<w:p><m:oMath><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath></w:p>"#;
+    let settings = |math_prefs: &str| {
+        format!(
+            r#"<?xml version="1.0"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:mathPr>{math_prefs}</m:mathPr></w:settings>"#
+        )
+    };
+
+    // The full block Word stamps into every fresh document with an equation.
+    let word_defaults = settings(
+        r#"<m:mathFont m:val="Cambria Math"/><m:brkBin m:val="before"/><m:brkBinSub m:val="--"/><m:smallFrac m:val="0"/><m:dispDef/><m:lMargin m:val="0"/><m:rMargin m:val="0"/><m:defJc m:val="centerGroup"/><m:wrapIndent m:val="1440"/><m:intLim m:val="subSup"/><m:naryLim m:val="undOvr"/>"#,
+    );
+    let bytes = package_with_parts(
+        body,
+        empty_rels,
+        vec![("word/settings.xml", word_defaults.into_bytes())],
+    );
+    assert_profile_convert_agree(&bytes);
+
+    // Preferences that would visibly move output we cannot produce stay out
+    // of envelope when the document actually contains math.
+    for non_default in [
+        r#"<m:naryLim m:val="subSup"/>"#,
+        r#"<m:smallFrac m:val="1"/>"#,
+        r#"<m:defJc m:val="left"/>"#,
+        r#"<m:lMargin m:val="720"/>"#,
+        r#"<m:mathFont m:val="XITS Math"/>"#,
+    ] {
+        let bytes = package_with_parts(
+            body,
+            empty_rels,
+            vec![("word/settings.xml", settings(non_default).into_bytes())],
+        );
+        let prof = profile(&bytes, OfficeFormat::Docx).unwrap();
+        assert!(!prof.supported, "{non_default}: unexpectedly supported");
+        assert!(
+            prof.reasons.iter().any(|reason| {
+                reason.code == UnsupportedCode::Equation && reason.detail.contains("m:mathPr")
+            }),
+            "{non_default}: {:?}",
+            prof.reasons
+        );
+        assert!(matches!(
+            convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default()),
+            Err(office_core::OfficeError::Unsupported {
+                code: UnsupportedCode::Equation,
+                ..
+            })
+        ));
+    }
+}

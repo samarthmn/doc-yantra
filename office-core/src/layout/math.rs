@@ -23,19 +23,37 @@ pub struct EquationBox {
 
 /// Lays out an equation using the document font database and fallback pipeline.
 pub fn layout_equation(doc: &WordDoc, math: &MathContent, size: f64) -> Result<EquationBox> {
-    layout_node(doc, &math.expression, size, false)
+    let context = MathContext {
+        display: math.display,
+    };
+    layout_node(doc, &math.expression, size, false, context)
 }
 
-fn layout_node(doc: &WordDoc, node: &MathNode, size: f64, upright: bool) -> Result<EquationBox> {
+/// Layout context threaded through the expression tree.
+#[derive(Clone, Copy)]
+struct MathContext {
+    /// Display equations draw n-ary operators at Word's large display
+    /// variant size; inline math keeps the compact text-style operator.
+    display: bool,
+}
+
+fn layout_node(
+    doc: &WordDoc,
+    node: &MathNode,
+    size: f64,
+    upright: bool,
+    context: MathContext,
+) -> Result<EquationBox> {
     match node {
-        MathNode::Sequence(nodes) => sequence(doc, nodes, size, upright),
+        MathNode::Sequence(nodes) => sequence(doc, nodes, size, upright, context),
         MathNode::Run(text) => text_box(doc, text, size, upright),
         MathNode::Fraction {
             numerator,
             denominator,
+            bar,
         } => {
-            let numerator = layout_node(doc, numerator, size * 0.76, false)?;
-            let denominator = layout_node(doc, denominator, size * 0.76, false)?;
+            let numerator = layout_node(doc, numerator, size * 0.76, false, context)?;
+            let denominator = layout_node(doc, denominator, size * 0.76, false, context)?;
             let width = numerator.width.max(denominator.width) + 4.0;
             let line_y = numerator.height + 1.5;
             let denominator_y = line_y + 2.5;
@@ -46,15 +64,17 @@ fn layout_node(doc: &WordDoc, node: &MathNode, size: f64, upright: bool) -> Resu
                 (width - numerator.width) / 2.0,
                 0.0,
             );
-            items.push(LineItem {
-                x_pt: 0.5,
-                y_pt: line_y,
-                item: Item::Line {
-                    dx_pt: width - 1.0,
-                    dy_pt: 0.0,
-                    stroke: black_stroke(0.7),
-                },
-            });
+            if *bar {
+                items.push(LineItem {
+                    x_pt: 0.5,
+                    y_pt: line_y,
+                    item: Item::Line {
+                        dx_pt: width - 1.0,
+                        dy_pt: 0.0,
+                        stroke: black_stroke(0.7),
+                    },
+                });
+            }
             append(
                 &mut items,
                 denominator.items,
@@ -73,14 +93,14 @@ fn layout_node(doc: &WordDoc, node: &MathNode, size: f64, upright: bool) -> Resu
             subscript,
             superscript,
         } => {
-            let base = layout_node(doc, base, size, false)?;
+            let base = layout_node(doc, base, size, false, context)?;
             let sub = subscript
                 .as_deref()
-                .map(|node| layout_node(doc, node, size * 0.65, false))
+                .map(|node| layout_node(doc, node, size * 0.65, false, context))
                 .transpose()?;
             let sup = superscript
                 .as_deref()
-                .map(|node| layout_node(doc, node, size * 0.65, false))
+                .map(|node| layout_node(doc, node, size * 0.65, false, context))
                 .transpose()?;
             let sup_height = sup.as_ref().map_or(0.0, |value| value.height * 0.8);
             let base_y = sup_height;
@@ -111,11 +131,11 @@ fn layout_node(doc: &WordDoc, node: &MathNode, size: f64, upright: bool) -> Resu
             })
         }
         MathNode::Radical { degree, radicand } => {
-            let radicand = layout_node(doc, radicand, size, false)?;
+            let radicand = layout_node(doc, radicand, size, false, context)?;
             let radical = text_box(doc, "√", size * 1.25, true)?;
             let degree = degree
                 .as_deref()
-                .map(|node| layout_node(doc, node, size * 0.5, false))
+                .map(|node| layout_node(doc, node, size * 0.5, false, context))
                 .transpose()?;
             let degree_width = degree.as_ref().map_or(0.0, |value| value.width * 0.75);
             let radical_x = degree_width;
@@ -160,16 +180,20 @@ fn layout_node(doc: &WordDoc, node: &MathNode, size: f64, upright: bool) -> Resu
             upper,
             operand,
         } => {
-            let operator = text_box(doc, &operator.to_string(), size * 1.35, true)?;
+            // Word draws display-style n-ary operators with the large glyph
+            // variant (~2x base, calibrated against Word CJK ground truths);
+            // inline math keeps the compact text-style operator.
+            let operator_scale = if context.display { 2.0 } else { 1.35 };
+            let operator = text_box(doc, &operator.to_string(), size * operator_scale, true)?;
             let lower = lower
                 .as_deref()
-                .map(|node| layout_node(doc, node, size * 0.58, false))
+                .map(|node| layout_node(doc, node, size * 0.58, false, context))
                 .transpose()?;
             let upper = upper
                 .as_deref()
-                .map(|node| layout_node(doc, node, size * 0.58, false))
+                .map(|node| layout_node(doc, node, size * 0.58, false, context))
                 .transpose()?;
-            let operand = layout_node(doc, operand, size, false)?;
+            let operand = layout_node(doc, operand, size, false, context)?;
             let upper_h = upper.as_ref().map_or(0.0, |value| value.height);
             let operator_y = upper_h;
             let baseline = operator_y + operator.baseline;
@@ -214,15 +238,15 @@ fn layout_node(doc: &WordDoc, node: &MathNode, size: f64, upright: bool) -> Resu
             })
         }
         MathNode::Delimiter { open, close, body } => {
-            let body = layout_node(doc, body, size, false)?;
+            let body = layout_node(doc, body, size, false, context)?;
             let delimiter_size = size.max((body.height * 0.9).min(size * 4.0));
             let open = text_box(doc, open, delimiter_size, true)?;
             let close = text_box(doc, close, delimiter_size, true)?;
             combine(vec![open, body, close])
         }
         MathNode::Function { name, argument } => {
-            let name = layout_node(doc, name, size, true)?;
-            let argument = layout_node(doc, argument, size, false)?;
+            let name = layout_node(doc, name, size, true, context)?;
+            let argument = layout_node(doc, argument, size, false, context)?;
             combine(vec![name, spacer(2.0, size), argument])
         }
         MathNode::Unsupported(detail) => Err(crate::OfficeError::unsupported(
@@ -232,10 +256,16 @@ fn layout_node(doc: &WordDoc, node: &MathNode, size: f64, upright: bool) -> Resu
     }
 }
 
-fn sequence(doc: &WordDoc, nodes: &[MathNode], size: f64, upright: bool) -> Result<EquationBox> {
+fn sequence(
+    doc: &WordDoc,
+    nodes: &[MathNode],
+    size: f64,
+    upright: bool,
+    context: MathContext,
+) -> Result<EquationBox> {
     let boxes = nodes
         .iter()
-        .map(|node| layout_node(doc, node, size, upright))
+        .map(|node| layout_node(doc, node, size, upright, context))
         .collect::<Result<Vec<_>>>()?;
     combine(boxes)
 }

@@ -20,6 +20,7 @@ export const DEFAULT_FONTSOURCE_ALIASES = Object.freeze({
   calibri: 'carlito',
   'calibri light': 'carlito',
   cambria: 'caladea',
+  'cambria math': 'caladea',
   carlito: 'carlito',
   cousine: 'cousine',
   'courier new': 'cousine',

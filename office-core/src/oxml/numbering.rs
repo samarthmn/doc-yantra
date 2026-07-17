@@ -15,6 +15,8 @@ pub enum NumFmt {
     Decimal,
     /// `01, 02, …` (single leading zero).
     DecimalZero,
+    /// Zero-padded decimal from a `w14` custom format (`0001, 0002, …`).
+    DecimalPadded(usize),
     /// A bullet — the label is the `lvlText` literal.
     Bullet,
     /// `a, b, …, z, aa, …`
@@ -221,10 +223,55 @@ fn parse_level(lvl: Node) -> LevelDef {
                 }
             }
             "isLgl" => def.legal = super::toggle(c),
+            // Word ≥2010 stores extended formats as `mc:Choice Requires=
+            // "w14"` with a plain-decimal `mc:Fallback`. Real Word renders
+            // the Choice, so honor the custom formats we can reproduce and
+            // fail closed (via `NumFmt::Other`) on the ones we cannot.
+            "AlternateContent" => {
+                if let Some(fmt) = alternate_num_fmt(c) {
+                    def.num_fmt = fmt;
+                }
+            }
             _ => {}
         }
     }
     def
+}
+
+fn alternate_num_fmt(node: Node) -> Option<NumFmt> {
+    for choice in children(node).filter(|c| c.tag_name().name() == "Choice") {
+        let Some(num_fmt) = child(choice, W, "numFmt") else {
+            continue;
+        };
+        return Some(match attr(num_fmt, W, "val") {
+            Some("custom") => {
+                let format = attr(num_fmt, W, "format").unwrap_or_default();
+                custom_num_fmt(format)
+            }
+            Some(value) => NumFmt::parse(value),
+            None => NumFmt::Decimal,
+        });
+    }
+    children(node)
+        .find(|c| c.tag_name().name() == "Fallback")
+        .and_then(|fallback| child(fallback, W, "numFmt"))
+        .and_then(|num_fmt| attr(num_fmt, W, "val"))
+        .map(NumFmt::parse)
+}
+
+/// Maps a `w14` custom format string to a supported format. The zero-padded
+/// decimal family (`"0001, 0002, 0003, ..."`) is the only one reproduced;
+/// everything else carries the raw format and fails closed if used.
+fn custom_num_fmt(format: &str) -> NumFmt {
+    let first = format.split(',').next().unwrap_or_default().trim();
+    if first.len() > 1
+        && first.ends_with('1')
+        && first[..first.len() - 1].bytes().all(|byte| byte == b'0')
+    {
+        NumFmt::DecimalPadded(first.len())
+    } else {
+        NumFmt::Other(format!("custom:{format}"))
+    }
 }
 
 fn parse_level_indent(ppr: Node) -> Indent {
@@ -272,6 +319,11 @@ pub fn format_number(fmt: &NumFmt, n: i64) -> Result<String> {
         NumFmt::Decimal => Ok(n.to_string()),
         NumFmt::DecimalZero => Ok(if (0..10).contains(&n) {
             format!("0{n}")
+        } else {
+            n.to_string()
+        }),
+        NumFmt::DecimalPadded(width) => Ok(if n >= 0 {
+            format!("{n:0width$}", width = *width)
         } else {
             n.to_string()
         }),

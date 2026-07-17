@@ -691,6 +691,10 @@ struct WorkPage {
     note_refs: Vec<(crate::oxml::wml::NoteKind, i64)>,
     float_bands: Vec<ResolvedPageBand>,
     float_carriers: Vec<FloatCarrier>,
+    /// The page exists because of an explicit page break. Word merges such a
+    /// page with a directly following next-page section transition when
+    /// nothing visible was placed on it.
+    from_explicit_break: bool,
 }
 
 #[derive(Clone)]
@@ -1063,6 +1067,7 @@ fn build_units(
                     };
                     let unit = Unit {
                         height: row_layout.height_pt,
+
                         gap_before: if first_row { table_gap } else { 0.0 },
                         float_leading: 0.0,
                         items: row_layout.items,
@@ -1436,6 +1441,7 @@ fn push_frame_unit(
     let group = next_group();
     units.push(Unit {
         height: exclusion_height,
+
         gap_before: (*prev_after).max(layout.space_before_pt),
         float_leading: layout.float_leading_pt,
         items,
@@ -1535,10 +1541,20 @@ fn paginate(
         if run_index == 0 {
             y = geo.content_top_pt;
         } else if section_run.sect.sect_type != SectType::Continuous {
-            if !work_page_is_empty(&page) {
-                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
-            } else {
+            let collapses_into_break_page = page.from_explicit_break
+                && !work_page_has_visible_content(&page);
+            if work_page_is_empty(&page) || collapses_into_break_page {
+                // Word treats an explicit page break directly followed by a
+                // section break as one transition: a page holding only
+                // invisible paragraph marks (the break paragraph and the
+                // empty section-mark paragraph) is reused by the next
+                // section rather than kept as a blank page. A blank page
+                // that is a section's entire content is preserved.
+                let bookmarks = std::mem::take(&mut page.bookmarks);
                 page = new_page(geo, run_index);
+                page.bookmarks = bookmarks;
+            } else {
+                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
             }
             let next_page_number = pages.len() + 1;
             if parity_blank_needed(next_page_number, section_run.sect.sect_type) {
@@ -1626,6 +1642,7 @@ fn paginate(
                     .filter(|unit| unit.items.is_empty())
                     .map_or(0.0, |unit| unit.height);
                 pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+                page.from_explicit_break = true;
                 y = geo.content_top_pt + carried_break_line;
                 band_top = y;
                 band_leading = if carried_break_line > 0.0 {
@@ -2466,6 +2483,7 @@ fn new_page(geo: &PageGeometry, governing_run: usize) -> WorkPage {
         note_refs: Vec::new(),
         float_bands: Vec::new(),
         float_carriers: Vec::new(),
+        from_explicit_break: false,
     }
 }
 
@@ -2477,6 +2495,18 @@ fn work_page_is_empty(page: &WorkPage) -> bool {
         && page.page_underlays.is_empty()
         && page.page_overlays.is_empty()
         && page.unit_ys.is_empty()
+}
+
+/// Whether anything on the page paints. Placed-but-invisible units (empty
+/// paragraph marks) do not count, so a section transition can collapse a
+/// page that exists only because of the marks preceding the break.
+fn work_page_has_visible_content(page: &WorkPage) -> bool {
+    !(page.page.items.is_empty()
+        && page.table_verticals.is_empty()
+        && page.underlays.is_empty()
+        && page.overlays.is_empty()
+        && page.page_underlays.is_empty()
+        && page.page_overlays.is_empty())
 }
 
 fn finish_work_page(mut work: WorkPage) -> Page {
@@ -3248,6 +3278,7 @@ mod tests {
     fn table_unit(table_id: usize, group: usize, is_last: bool) -> Unit {
         Unit {
             height: 10.0,
+
             gap_before: 0.0,
             float_leading: 0.0,
             items: Vec::new(),
@@ -3388,6 +3419,7 @@ mod tests {
     fn repeated_table_header_clone_does_not_repeat_logical_bookmarks_or_notes() {
         let unit = Unit {
             height: 12.0,
+
             gap_before: 0.0,
             float_leading: 0.0,
             items: Vec::new(),
@@ -3425,6 +3457,7 @@ mod tests {
             note_refs: Vec::new(),
             float_bands: Vec::new(),
             float_carriers: Vec::new(),
+            from_explicit_break: false,
         };
 
         place_logical_unit_metadata(&mut page, &unit, 4, 100.0);

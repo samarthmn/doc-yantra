@@ -125,6 +125,9 @@ pub struct ProbeReport {
     pub truth_borders: usize,
     pub ours_text: usize,
     pub truth_text: usize,
+    /// Raw text origins on both sides, for calibration diagnostics.
+    pub ours_text_origins: Vec<TextOrigin>,
+    pub truth_text_origins: Vec<TextOrigin>,
     pub matches: Vec<MatchRecord>,
     pub clusters: Vec<DeltaCluster>,
     pub unmatched: UnmatchedReport,
@@ -414,10 +417,11 @@ pub fn compare_page(ours: &[u8], truth: &[u8], page: u32) -> Result<ProbeReport>
     );
     ours.borders = ours_borders;
     truth.borders = truth_borders;
-    // PDF producers commonly round A4's fractional point dimensions to two
-    // nearby decimal representations. This tolerance is far below the probe's
-    // geometry matching thresholds but avoids rejecting equivalent page boxes.
-    const PAGE_BOX_TOLERANCE_PT: f64 = 0.05;
+    // PDF producers commonly round A4's fractional point dimensions to
+    // nearby representations (Word exports 595.25pt for a 11907-twip
+    // 595.35pt section). This tolerance is far below the probe's geometry
+    // matching thresholds but avoids rejecting equivalent page boxes.
+    const PAGE_BOX_TOLERANCE_PT: f64 = 0.15;
     if (ours.width - truth.width).abs() > PAGE_BOX_TOLERANCE_PT
         || (ours.height - truth.height).abs() > PAGE_BOX_TOLERANCE_PT
     {
@@ -491,6 +495,8 @@ pub fn compare_page(ours: &[u8], truth: &[u8], page: u32) -> Result<ProbeReport>
         truth_borders: truth.borders.len(),
         ours_text: ours.text.len(),
         truth_text: truth.text.len(),
+        ours_text_origins: ours.text.clone(),
+        truth_text_origins: truth.text.clone(),
         matches,
         clusters,
         unmatched: UnmatchedReport {

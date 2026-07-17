@@ -8,7 +8,6 @@ use super::numbering_layout::{self, PlacedLabel};
 use super::{
     Decor, GlyphRun, ImageId, Item, LinkTarget, PlacedGlyph, SemanticCluster, SemanticRun, Stroke,
 };
-use crate::fonts::metrics::FaceMetrics;
 use crate::fonts::{FaceId, FontDb, FontSlot, matching};
 use crate::oxml::numbering::LabelJustification;
 use crate::oxml::numbering::LevelSuffix;
@@ -438,6 +437,67 @@ impl Atom {
                 }
             )
     }
+
+    fn glyph_char(&self) -> Option<char> {
+        match self {
+            Atom::Glyph { ch, .. } => Some(*ch),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a line may break between `current` and `next`, per Word's East
+/// Asian defaults: ideographs, kana, and hangul break anywhere except where
+/// kinsoku forbids it (no closing punctuation at a line start, no opening
+/// bracket at a line end).
+fn allows_line_break_between(current: &Atom, next: Option<&Atom>) -> bool {
+    if next
+        .and_then(Atom::glyph_char)
+        .is_some_and(forbids_line_start)
+    {
+        return false;
+    }
+    if current.allows_line_break_after() {
+        return true;
+    }
+    current
+        .glyph_char()
+        .is_some_and(|ch| cjk_breaks_after(ch) && !forbids_line_end(ch))
+}
+
+/// East Asian characters Word wraps without inter-word spaces.
+fn cjk_breaks_after(ch: char) -> bool {
+    matches!(u32::from(ch),
+        0x3000..=0x303F      // CJK symbols and punctuation
+        | 0x3040..=0x30FF    // hiragana, katakana
+        | 0x31F0..=0x31FF    // katakana phonetic extensions
+        | 0x3400..=0x9FFF    // CJK ideographs
+        | 0xAC00..=0xD7AF    // hangul syllables
+        | 0xF900..=0xFAFF    // CJK compatibility ideographs
+        | 0xFF00..=0xFFEF    // full-width forms
+    )
+}
+
+/// Kinsoku 行頭禁則: characters that must not start a line. Restricted to
+/// East Asian punctuation so Latin wrapping keeps its calibrated behavior.
+fn forbids_line_start(ch: char) -> bool {
+    matches!(
+        ch,
+        '、' | '。' | '，' | '．' | '：' | '；' | '！' | '？' | '％'
+            | '）' | '］' | '｝' | '〉' | '》' | '」' | '』' | '】' | '〕' | '〗' | '〙' | '〛'
+            | '々' | '〜' | 'ー' | '・' | '゛' | '゜' | 'ゝ' | 'ゞ' | 'ヽ' | 'ヾ'
+            | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ'
+            | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ' | 'ヵ' | 'ヶ'
+            | '｡' | '｣' | '､' | '･' | 'ｰ' | '～' | '‰' | '℃'
+    )
+}
+
+/// Kinsoku 行末禁則: opening punctuation that must not end a line.
+fn forbids_line_end(ch: char) -> bool {
+    matches!(
+        ch,
+        '（' | '［' | '｛' | '〈' | '《' | '「' | '『' | '【' | '〔' | '〖' | '〘' | '〚' | '｢' | '￥' | '＄'
+    )
 }
 
 /// Lays out `para` into lines within `avail_width_pt`.
@@ -574,13 +634,16 @@ fn layout_paragraph_with_wrap_context(
         None => numbering_layout::resolve_label(doc, warnings, &eff_para, para)?,
     };
 
-    // List levels contribute indentation when the paragraph specifies none.
+    // Word resolves list indentation as direct pPr > numbering level >
+    // style chain: a style's inherited indent (e.g. ListParagraph's 720)
+    // must not shadow the numbering definition the paragraph references.
     let label_left = label.as_ref().and_then(|l| l.left_pt);
     let label_hanging = label.as_ref().and_then(|l| l.hanging_pt);
-    let left = eff_para
-        .indent
+    let direct_indent = &para.props.indent;
+    let left = direct_indent
         .left_pt
         .or(label_left)
+        .or(eff_para.indent.left_pt)
         .unwrap_or(0.0)
         .max(0.0);
     let right_indent = eff_para.indent.right_pt.unwrap_or(0.0).max(0.0);
@@ -590,8 +653,23 @@ fn layout_paragraph_with_wrap_context(
         .as_ref()
         .filter(|border| !matches!(border.val.as_str(), "nil" | "none"));
     let right = right_indent;
-    let hanging = eff_para.indent.hanging_pt.or(label_hanging).unwrap_or(0.0);
-    let first_line = eff_para.indent.first_line_pt.unwrap_or(0.0);
+    // `firstLine`/`hanging` share one logical slot, so the pair resolves
+    // from a single source at each precedence step.
+    let (first_line, hanging) = if direct_indent.first_line_pt.is_some()
+        || direct_indent.hanging_pt.is_some()
+    {
+        (
+            direct_indent.first_line_pt.unwrap_or(0.0),
+            direct_indent.hanging_pt.unwrap_or(0.0),
+        )
+    } else if let Some(label_hanging) = label_hanging {
+        (0.0, label_hanging)
+    } else {
+        (
+            eff_para.indent.first_line_pt.unwrap_or(0.0),
+            eff_para.indent.hanging_pt.unwrap_or(0.0),
+        )
+    };
     let first_offset = if let Some(label) = label.as_ref() {
         let label_width: f64 = label
             .runs
@@ -634,9 +712,11 @@ fn layout_paragraph_with_wrap_context(
         .collect();
 
     let rtl = eff_para.bidi == Some(true);
-    let alignment = eff_para
-        .alignment
-        .unwrap_or(if rtl { Jc::End } else { Jc::Start });
+    let alignment = display_math_alignment(para).unwrap_or_else(|| {
+        eff_para
+            .alignment
+            .unwrap_or(if rtl { Jc::End } else { Jc::Start })
+    });
     let line_spacing = eff_para.spacing.line;
     let default_tab = doc.settings.default_tab_stop_pt;
     let mut tab_stops = eff_para.tabs.clone();
@@ -1469,10 +1549,9 @@ fn flatten_run(
     let Some(font_face) = doc.fonts.face(face) else {
         return Ok(());
     };
-    let Some(parsed) = font_face.parsed() else {
+    let Some(metrics) = font_face.line_metrics() else {
         return Ok(());
     };
-    let metrics = FaceMetrics::new(parsed);
 
     let base_size = eff.size_pt.unwrap_or(DEFAULT_SIZE_PT);
     let (size, rise) = match eff.vert_align {
@@ -1765,6 +1844,29 @@ fn flatten_run(
         }
     }
     Ok(())
+}
+
+/// The `m:jc` override for a paragraph that is a display equation: Word
+/// positions such equations by the math-paragraph justification, not the
+/// paragraph's own alignment. Only applies when the equation (plus
+/// bookmarks) is the paragraph's entire inline content, so mixed text
+/// keeps its authored paragraph alignment.
+fn display_math_alignment(para: &Paragraph) -> Option<Jc> {
+    let mut authored = None;
+    for inline in &para.runs {
+        match inline {
+            InlineContent::Math(math) => {
+                if math.display && math.justification.is_some() {
+                    authored.get_or_insert(crate::oxml::wml::math_paragraph_alignment(math));
+                } else {
+                    return None;
+                }
+            }
+            InlineContent::Bookmark(_) => {}
+            _ => return None,
+        }
+    }
+    authored
 }
 
 fn push_math_atom(
@@ -2158,10 +2260,15 @@ fn italic(props: &RunProps) -> bool {
 }
 
 fn fallback_style(fonts: &FontDb, face: FaceId, base: &RunStyle) -> Rc<RunStyle> {
+    // A coverage fallback supplies ink, not line geometry: Word never falls
+    // back (it has the real fonts), so the primary face keeps governing the
+    // line box. Pan-CJK faces are the exception — East Asian text reaching
+    // them is a whole-script substitution and takes the legacy CJK line
+    // convention (`useFELayout` growth), not the Latin primary's metrics.
     let metrics = fonts
         .face(face)
-        .and_then(|font| font.parsed())
-        .map(FaceMetrics::new);
+        .filter(|font| matching::pan_cjk_face(&font.family_name))
+        .and_then(|font| font.line_metrics());
     Rc::new(RunStyle {
         face,
         size_pt: base.size_pt,
@@ -2254,7 +2361,7 @@ fn break_lines(
         let adv = atoms[i].advance();
         let (avail, _) = metrics_of(lines.len());
         let is_space = atoms[i].is_space();
-        let allows_break_after = atoms[i].allows_line_break_after();
+        let allows_break_after = allows_line_break_between(&atoms[i], atoms.get(i + 1));
 
         if width_used + adv > avail && !current.is_empty() && !is_space {
             if let Some(bp) = last_break.filter(|&bp| bp < current.len()) {
@@ -2948,9 +3055,9 @@ fn para_mark_height(doc: &WordDoc, para: &Paragraph, use_mark_rpr: bool) -> f64 
     // Use the resolved face's metrics when available.
     let family = matching::wml_run_family(&eff.fonts, FontSlot::Ascii, &doc.theme);
     if let Some(face) = matching::resolve(&doc.fonts, &family, 400, false).face
-        && let Some(parsed) = doc.fonts.face(face).and_then(|f| f.parsed())
+        && let Some(metrics) = doc.fonts.face(face).and_then(|f| f.line_metrics())
     {
-        return FaceMetrics::new(parsed).line_height_pt(size);
+        return metrics.line_height_pt(size);
     }
     size * 1.2
 }

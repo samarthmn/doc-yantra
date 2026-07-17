@@ -838,7 +838,8 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
     let numbering =
         optional_part(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
     let settings = optional_part(&pkg, "word/settings.xml", Settings::parse)?.unwrap_or_default();
-    let theme = find_theme(&pkg)?;
+    let mut theme = find_theme(&pkg)?;
+    theme.east_asia_lang = settings.theme_font_lang_east_asia.clone();
     let font_table = optional_part(&pkg, "word/fontTable.xml", FontTable::parse)?;
     let diagrams = DiagramStore::load(&pkg)?;
 

@@ -60,7 +60,9 @@ impl WordDoc {
         let styles = optional(&pkg, "word/styles.xml", StyleResolver::parse)?.unwrap_or_default();
         let numbering = optional(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
         let settings = optional(&pkg, "word/settings.xml", Settings::parse)?.unwrap_or_default();
-        let theme = optional(&pkg, "word/theme/theme1.xml", Theme::parse)?.unwrap_or_default();
+        let mut theme =
+            optional(&pkg, "word/theme/theme1.xml", Theme::parse)?.unwrap_or_default();
+        theme.east_asia_lang = settings.theme_font_lang_east_asia.clone();
         let font_table = optional(&pkg, "word/fontTable.xml", FontTable::parse)?;
 
         let mut fonts = FontDb::with_sources(&opts.font_dirs, opts.include_system_fonts);

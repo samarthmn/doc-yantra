@@ -22,6 +22,13 @@ pub struct Theme {
     pub major_complex_script: Option<String>,
     /// The minor complex-script typeface (`+mn-cs`).
     pub minor_complex_script: Option<String>,
+    /// Script-specific major faces (`a:font script="Jpan" …`), in document order.
+    pub major_script_fonts: Vec<(String, String)>,
+    /// Script-specific minor faces, in document order.
+    pub minor_script_fonts: Vec<(String, String)>,
+    /// `w:themeFontLang/@w:eastAsia` from settings — selects which script
+    /// font an East Asian theme reference resolves to (Word behavior).
+    pub east_asia_lang: Option<String>,
 }
 
 impl Theme {
@@ -50,6 +57,8 @@ impl Theme {
             theme.minor_east_asia = script_typeface(font_scheme, "minorFont", "ea");
             theme.major_complex_script = script_typeface(font_scheme, "majorFont", "cs");
             theme.minor_complex_script = script_typeface(font_scheme, "minorFont", "cs");
+            theme.major_script_fonts = script_font_list(font_scheme, "majorFont");
+            theme.minor_script_fonts = script_font_list(font_scheme, "minorFont");
         }
         Ok(theme)
     }
@@ -77,12 +86,54 @@ impl Theme {
         match reference {
             "+mj-lt" | "majorAscii" | "majorHAnsi" => self.major_latin.clone(),
             "+mn-lt" | "minorAscii" | "minorHAnsi" => self.minor_latin.clone(),
-            "+mj-ea" | "majorEastAsia" => self.major_east_asia.clone(),
-            "+mn-ea" | "minorEastAsia" => self.minor_east_asia.clone(),
+            "+mj-ea" | "majorEastAsia" => self
+                .major_east_asia
+                .clone()
+                .or_else(|| self.script_east_asia(&self.major_script_fonts)),
+            "+mn-ea" | "minorEastAsia" => self
+                .minor_east_asia
+                .clone()
+                .or_else(|| self.script_east_asia(&self.minor_script_fonts)),
             "+mj-cs" | "majorBidi" => self.major_complex_script.clone(),
             "+mn-cs" | "minorBidi" => self.minor_complex_script.clone(),
             _ => None,
         }
+    }
+
+    /// Word themes commonly leave `a:ea` empty and carry the East Asian
+    /// faces as per-script `a:font` overrides. The settings' theme font
+    /// language picks the script, exactly as Word resolves the reference;
+    /// without one, the first declared script face keeps this deterministic.
+    fn script_east_asia(&self, fonts: &[(String, String)]) -> Option<String> {
+        let by_tag = |tag: &str| {
+            fonts
+                .iter()
+                .find(|(script, _)| script == tag)
+                .map(|(_, typeface)| typeface.clone())
+        };
+        self.east_asia_lang
+            .as_deref()
+            .and_then(east_asia_script_tag)
+            .and_then(by_tag)
+            .or_else(|| fonts.first().map(|(_, typeface)| typeface.clone()))
+    }
+}
+
+/// Maps a `themeFontLang` East Asian BCP-47 tag to the theme script key.
+fn east_asia_script_tag(lang: &str) -> Option<&'static str> {
+    let lang = lang.to_ascii_lowercase();
+    if lang.starts_with("ja") {
+        Some("Jpan")
+    } else if lang.starts_with("ko") {
+        Some("Kore")
+    } else if lang.starts_with("zh") {
+        let traditional = ["zh-tw", "zh-hk", "zh-mo"]
+            .iter()
+            .any(|tag| lang.starts_with(tag))
+            || lang.contains("hant");
+        Some(if traditional { "Hant" } else { "Hans" })
+    } else {
+        None
     }
 }
 
@@ -126,6 +177,22 @@ fn script_typeface(font_scheme: Node, bucket: &str, script: &str) -> Option<Stri
         .and_then(|b| child(b, A, script))
         .and_then(|l| attr(l, A, "typeface").map(str::to_string))
         .filter(|s| !s.is_empty())
+}
+
+/// Collects the bucket's `a:font script="…" typeface="…"` overrides.
+fn script_font_list(font_scheme: Node, bucket: &str) -> Vec<(String, String)> {
+    child(font_scheme, A, bucket)
+        .map(|bucket| {
+            children(bucket)
+                .filter(|node| super::is(*node, A, "font"))
+                .filter_map(|node| {
+                    let script = attr(node, A, "script")?;
+                    let typeface = attr(node, A, "typeface").filter(|value| !value.is_empty())?;
+                    Some((script.to_string(), typeface.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A base color reference for [`resolve_color`].

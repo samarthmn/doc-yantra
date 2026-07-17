@@ -14,6 +14,33 @@ use std::time::Duration;
 const CDN_BASE: &str = "https://cdn.jsdelivr.net/fontsource/fonts/";
 const MAX_FONT_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Repo-committed pan-CJK faces, hash-pinned like `fonts.lock` artifacts.
+/// These are the exact OTFs hosts register in production (shipped by
+/// `@samarthmn/doc-yantra` for pdf-core), so corpus runs exercise the same
+/// bytes without any CDN catalog entry.
+const PAN_CJK_FONTS: &[(&str, &str, &str)] = &[
+    (
+        "Noto Sans CJK SC",
+        "NotoSansCJKsc-Regular.otf",
+        "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+    ),
+    (
+        "Noto Sans CJK TC",
+        "NotoSansCJKtc-Regular.otf",
+        "dce08bd4fd91aa8aa76ed8fea4b694c2dfb8550f67871e326843212ddbeb88b4",
+    ),
+    (
+        "Noto Sans CJK JP",
+        "NotoSansCJKjp-Regular.otf",
+        "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5",
+    ),
+    (
+        "Noto Sans CJK KR",
+        "NotoSansCJKkr-Regular.otf",
+        "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a",
+    ),
+];
+
 const ALIASES: &[(&str, &str)] = &[
     ("arial", "arimo"),
     ("arimo", "arimo"),
@@ -21,6 +48,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("calibri", "carlito"),
     ("calibri light", "carlito"),
     ("cambria", "caladea"),
+    ("cambria math", "caladea"),
     ("carlito", "carlito"),
     ("cousine", "cousine"),
     ("courier", "cousine"),
@@ -207,8 +235,77 @@ pub(crate) fn resolve_for_case(
         |url| fetcher.fetch(url),
     )?;
     resolved.families.extend(satisfied_families);
+    attach_pan_cjk_faces(case_name, &requests, &mut resolved)?;
     resolved.demanded_families = resolved.families.clone();
     Ok(resolved)
+}
+
+/// Provisions the repo-committed pan-CJK OTFs for every request whose
+/// substitution target is a Noto Sans CJK face, mirroring what production
+/// hosts register through the font provider.
+fn attach_pan_cjk_faces(
+    case_name: &str,
+    requests: &[FontRequest],
+    resolved: &mut ResolvedFonts,
+) -> Result<()> {
+    let mut targets = BTreeSet::new();
+    for request in requests {
+        if let Some(target) = pan_cjk_request_target(request) {
+            targets.insert(target);
+        }
+    }
+    for target in targets {
+        let (family, file, pinned) = PAN_CJK_FONTS
+            .iter()
+            .find(|(family, _, _)| *family == target)
+            .with_context(|| {
+                format!("case {case_name} needs {target} but no pan-CJK OTF is committed for it")
+            })?;
+        if resolved
+            .options
+            .font_hash_pins
+            .iter()
+            .any(|hash| hash.eq_ignore_ascii_case(pinned))
+        {
+            resolved.families.insert((*family).to_string());
+            continue;
+        }
+        let path = pan_cjk_dir().join(file);
+        let bytes = fs::read(&path)
+            .with_context(|| format!("read committed pan-CJK font {}", path.display()))?;
+        let actual = sha256_hex(&bytes);
+        if actual != *pinned {
+            anyhow::bail!(
+                "committed pan-CJK font {} hash mismatch: expected {pinned}, found {actual}; update PAN_CJK_FONTS together with the font",
+                path.display()
+            );
+        }
+        let expectation = FontExpectation {
+            family: (*family).to_string(),
+            weight: 400,
+            italic: false,
+            stretch: 5,
+            sha256: Some((*pinned).to_string()),
+            ..FontExpectation::default()
+        };
+        office_core::fonts::validate_font(&bytes, Some(&expectation))
+            .with_context(|| format!("validate committed pan-CJK font {}", path.display()))?;
+        resolved.options.font_bytes.push(bytes);
+        resolved.options.font_hash_pins.push((*pinned).to_string());
+        resolved.families.insert((*family).to_string());
+    }
+    Ok(())
+}
+
+fn pan_cjk_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-core/wasm/fonts")
+}
+
+/// The pan-CJK target for a request, honoring font-table alternates.
+fn pan_cjk_request_target(request: &FontRequest) -> Option<&'static str> {
+    std::iter::once(request.family.as_str())
+        .chain(request.alt_families.iter().map(String::as_str))
+        .find_map(office_core::fonts::pan_cjk_substitution_target)
 }
 
 pub(crate) fn refresh_lock(sources: &[(String, Vec<u8>)]) -> Result<usize> {
@@ -454,6 +551,12 @@ fn alias_map() -> BTreeMap<String, String> {
 }
 
 fn mapped_id(request: &FontRequest) -> Option<&'static str> {
+    // Pan-CJK families never map to CDN artifacts: they resolve to the
+    // repo-committed OTFs in `attach_pan_cjk_faces`, and the class fallback
+    // must not shadow them with a Latin-only face.
+    if pan_cjk_request_target(request).is_some() {
+        return None;
+    }
     std::iter::once(request.family.as_str())
         .chain(request.alt_families.iter().map(String::as_str))
         .find_map(|family| {
@@ -767,6 +870,45 @@ mod tests {
             resolution_mode: ResolutionMode::Compatible,
             ..ConvertOptions::default()
         }
+    }
+
+    #[test]
+    fn pan_cjk_families_bypass_the_cdn_catalog() {
+        let mut simsun = request();
+        simsun.family = "SimSun".into();
+        simsun.family_class = Some("roman".into());
+        assert_eq!(mapped_id(&simsun), None);
+
+        let mut alt = request();
+        alt.family = "Unknown Grid".into();
+        alt.alt_families = vec!["MS Mincho".into()];
+        alt.panose = None;
+        assert_eq!(pan_cjk_request_target(&alt), Some("Noto Sans CJK JP"));
+    }
+
+    #[test]
+    fn pan_cjk_faces_resolve_offline_from_the_committed_otfs() {
+        let mut batang = request();
+        batang.family = "Batang".into();
+        let mut resolved = ResolvedFonts {
+            options: base_options(),
+            families: BTreeSet::new(),
+            demanded_families: BTreeSet::new(),
+        };
+        attach_pan_cjk_faces("fixture", &[batang], &mut resolved)
+            .expect("provision committed pan-CJK face");
+        assert!(resolved.families.contains("Noto Sans CJK KR"));
+        assert_eq!(resolved.options.font_bytes.len(), 1);
+        assert_eq!(
+            resolved.options.font_hash_pins,
+            vec![
+                "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a".to_string()
+            ]
+        );
+        assert_eq!(
+            sha256_hex(&resolved.options.font_bytes[0]),
+            resolved.options.font_hash_pins[0]
+        );
     }
 
     #[test]

@@ -165,7 +165,11 @@ pub(crate) fn emit_with_internal_links(
 
     // 3. Fonts.
     for face_id in &face_order {
-        write_font(&mut pdf, subsets.get(face_id).unwrap());
+        let family = fonts
+            .face(*face_id)
+            .map(|face| face.family_name.as_str())
+            .unwrap_or_default();
+        write_font(&mut pdf, subsets.get(face_id).unwrap(), family);
     }
 
     // 4. Images.
@@ -490,7 +494,7 @@ fn collect_semantic_pairs(
     Ok(())
 }
 
-fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
+fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) {
     let is_cff = f.subset.is_cff;
 
     // Type0. CFF programs have no CIDToGIDMap: codes (including semantic CIDs
@@ -563,6 +567,13 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont) {
             .cap_height(700.0)
             .stem_v(80.0);
         if is_cff {
+            // A bare CFF program carries no SFNT name table, so the
+            // descriptor's FontFamily is the only channel inspectors have
+            // for the face identity. The TrueType path stays byte-identical
+            // (frozen goldens).
+            if !family.is_empty() {
+                descriptor.family(Str(family.as_bytes()));
+            }
             descriptor.font_file3(f.file);
         } else {
             descriptor.font_file2(f.file);

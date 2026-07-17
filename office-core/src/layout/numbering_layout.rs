@@ -5,7 +5,6 @@
 use super::GlyphRun;
 use super::assemble::WordDoc;
 use crate::Result;
-use crate::fonts::metrics::FaceMetrics;
 use crate::fonts::{FontSlot, matching};
 use crate::oxml::numbering::{LabelJustification, LevelDef, LevelSuffix, NumFmt, format_number};
 use crate::oxml::wml::{NumRef, ParaProps, Paragraph};
@@ -213,19 +212,20 @@ pub fn build_label(
     if runs.is_empty() {
         return Ok(None);
     }
-    let (line_height_pt, ascent_pt) = runs
-        .iter()
-        .filter_map(|run| doc.fonts.face(run.face).and_then(|font| font.parsed()))
-        .map(|font| {
-            let metrics = FaceMetrics::new(font);
+    // The label's line box follows the resolved label font. A coverage
+    // fallback that painted a bullet glyph supplies ink only — its own
+    // (often much taller) metrics must not grow the list item's line.
+    let (line_height_pt, ascent_pt) = doc
+        .fonts
+        .face(face)
+        .and_then(|font| font.line_metrics())
+        .map(|metrics| {
             (
                 metrics.line_height_pt(size),
                 metrics.line_box_ascent_pt(size),
             )
         })
-        .fold((0.0_f64, 0.0_f64), |(height, ascent), current| {
-            (height.max(current.0), ascent.max(current.1))
-        });
+        .unwrap_or((size * 1.2, size));
 
     Ok(Some(PlacedLabel {
         runs,

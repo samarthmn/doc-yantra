@@ -18,8 +18,9 @@ pub mod subset;
 
 pub use db::{Face, FaceId, FontDb};
 pub use matching::{
-    Resolved, map_symbol_char, resolve, resolve_exact, resolve_exact_or_substitute_with_stretch,
-    resolve_exact_with_stretch, resolve_with_stretch, wml_run_family,
+    Resolved, map_symbol_char, pan_cjk_substitution_target, resolve, resolve_exact,
+    resolve_exact_or_substitute_with_stretch, resolve_exact_with_stretch, resolve_with_stretch,
+    wml_run_family,
 };
 pub use metrics::{FaceMetrics, GlyphId};
 pub use registration::{

@@ -232,8 +232,6 @@ pub fn coverage_fallbacks(db: &FontDb, primary: FaceId, weight: u16, italic: boo
             1
         } else if face.embedded {
             2
-        } else if family.starts_with("noto") {
-            3
         } else if matches!(
             family.as_str(),
             "arimo"
@@ -245,6 +243,12 @@ pub fn coverage_fallbacks(db: &FontDb, primary: FaceId, weight: u16, italic: boo
                 | "liberation mono"
                 | "tinos"
         ) {
+            // Word draws a glyph from the requested font whenever that font
+            // covers it, so the metric-compatible substitute outranks the
+            // Noto coverage faces; Noto (CJK, Math, Symbols) fills only the
+            // glyphs the text faces genuinely lack.
+            3
+        } else if family.starts_with("noto") {
             4
         } else {
             5
@@ -386,7 +390,10 @@ fn family_key(name: &str) -> String {
 fn substitution_targets(family: &str) -> &'static [&'static str] {
     match family_key(family).as_str() {
         "calibri" | "calibri light" => &["Carlito"],
-        "cambria" => &["Caladea"],
+        // Cambria Math shares Cambria's letterform metrics; Caladea is the
+        // metric-compatible clone for both. Operator coverage still comes
+        // from the symbol/math coverage fallbacks.
+        "cambria" | "cambria math" => &["Caladea"],
         "arial" | "helvetica" | "segoe ui" => &["Liberation Sans", "Arimo"],
         "times new roman" | "times" => &["Liberation Serif", "Tinos"],
         "courier new" | "courier" => &["Liberation Mono", "Cousine"],
@@ -406,16 +413,61 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
         // same policy the retired LibreOffice backend applied). Hosts supply
         // these via a font provider; nothing is bundled.
         "simsun" | "nsimsun" | "simsun-extb" | "simhei" | "microsoft yahei"
-        | "microsoft yahei ui" | "dengxian" | "kaiti" | "fangsong" => &["Noto Sans CJK SC"],
+        | "microsoft yahei ui" | "dengxian" | "kaiti" | "fangsong" | "宋体" | "新宋体"
+        | "黑体" | "微软雅黑" | "楷体" | "仿宋" | "等线" => &["Noto Sans CJK SC"],
         "pmingliu" | "mingliu" | "pmingliu-extb" | "mingliu-extb" | "microsoft jhenghei"
-        | "microsoft jhenghei ui" | "dfkai-sb" => &["Noto Sans CJK TC"],
+        | "microsoft jhenghei ui" | "dfkai-sb" | "新細明體" | "細明體" | "微軟正黑體"
+        | "標楷體" => &["Noto Sans CJK TC"],
         "ms mincho" | "ms pmincho" | "ms gothic" | "ms pgothic" | "ms ui gothic" | "yu gothic"
-        | "yu gothic ui" | "yu mincho" | "meiryo" | "meiryo ui" => &["Noto Sans CJK JP"],
+        | "yu gothic ui" | "yu mincho" | "meiryo" | "meiryo ui" | "ms 明朝" | "ms ｐ明朝"
+        | "ms ゴシック" | "ms ｐゴシック" | "ＭＳ 明朝" | "ＭＳ Ｐ明朝" | "ＭＳ ゴシック"
+        | "ＭＳ Ｐゴシック" | "游ゴシック" | "游明朝" | "メイリオ" => &["Noto Sans CJK JP"],
         "malgun gothic" | "malgun gothic semilight" | "batang" | "batangche" | "gungsuh"
-        | "gulim" | "gulimche" | "dotum" | "dotumche" => &["Noto Sans CJK KR"],
+        | "gulim" | "gulimche" | "dotum" | "dotumche" | "맑은 고딕" | "바탕" | "바탕체"
+        | "돋움" | "돋움체" | "굴림" | "굴림체" | "궁서" => &["Noto Sans CJK KR"],
         _ => &[],
     }
 }
+
+/// The pan-CJK Noto face a family substitutes to, if any. These faces have
+/// no CDN catalog artifacts: hosts and the fidelity harness provision the
+/// repo-shipped OTFs (`pdf-core/wasm/fonts/NotoSansCJK*.otf`) instead, so
+/// providers need to recognize the mapping without duplicating the table.
+pub fn pan_cjk_substitution_target(family: &str) -> Option<&'static str> {
+    const PAN_CJK: [&str; 4] = [
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK KR",
+    ];
+    let key = family_key(family);
+    PAN_CJK
+        .iter()
+        .copied()
+        .find(|target| family_key(target) == key)
+        .or_else(|| {
+            substitution_targets(family)
+                .iter()
+                .copied()
+                .find(|target| PAN_CJK.contains(target))
+        })
+}
+
+/// Whether a family is one of the pan-CJK Noto substitution targets.
+pub fn pan_cjk_face(family: &str) -> bool {
+    family_key(family).starts_with("noto sans cjk")
+}
+
+/// Line metrics (ascent, descent, line gap in em) presented for pan-CJK
+/// faces. The legacy CJK families they replace (SimSun, MS Mincho, Batang,
+/// MingLiU, …) design to a 1.0em body that Word grows to a ~1.30em line
+/// with the growth centered around the glyph box (baseline at
+/// `winAscent + gap/2` from the line top — calibrated against Word-exported
+/// CJK ground truths, 2026-07-17). Noto Sans CJK's own 1.48em win metrics
+/// would reflow every substituted document, so rendering through a pan-CJK
+/// face keeps the legacy convention: the lower half of the growth is folded
+/// into the descent so `ascent + gap` stays the baseline offset.
+pub const LEGACY_CJK_LINE_METRICS_EM: (f64, f64, f64) = (0.859375, 0.290625, 0.15);
 
 /// The family-class fallback for an unknown family, by name heuristic.
 fn fallback_class(family: &str) -> &'static str {
@@ -566,6 +618,28 @@ mod tests {
         assert_eq!(substitution_targets("Yu Gothic"), &["Noto Sans CJK JP"]);
         assert_eq!(substitution_targets("Malgun Gothic"), &["Noto Sans CJK KR"]);
         assert_eq!(substitution_targets("Batang"), &["Noto Sans CJK KR"]);
+    }
+
+    #[test]
+    fn pan_cjk_targets_are_exposed_for_providers() {
+        assert_eq!(
+            pan_cjk_substitution_target("SimSun"),
+            Some("Noto Sans CJK SC")
+        );
+        assert_eq!(
+            pan_cjk_substitution_target("MS Mincho"),
+            Some("Noto Sans CJK JP")
+        );
+        assert_eq!(
+            pan_cjk_substitution_target("batang"),
+            Some("Noto Sans CJK KR")
+        );
+        assert_eq!(
+            pan_cjk_substitution_target("noto sans cjk tc"),
+            Some("Noto Sans CJK TC")
+        );
+        assert_eq!(pan_cjk_substitution_target("Calibri"), None);
+        assert_eq!(pan_cjk_substitution_target("Noto Sans Math"), None);
     }
 
     #[test]

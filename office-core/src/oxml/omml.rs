@@ -11,6 +11,34 @@ pub struct MathContent {
     pub expression: MathNode,
     /// Whether Word requested display layout.
     pub display: bool,
+    /// `m:oMathParaPr/m:jc` display justification (absent = Word's
+    /// centered `centerGroup` default).
+    pub justification: Option<MathJustification>,
+}
+
+/// Display-equation justification values from `m:jc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathJustification {
+    /// Flush with the column's left edge.
+    Left,
+    /// Flush with the column's right edge.
+    Right,
+    /// Each equation centered individually.
+    Center,
+    /// Equations centered as a group (Word default).
+    CenterGroup,
+}
+
+impl MathJustification {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "center" => Some(Self::Center),
+            "centerGroup" => Some(Self::CenterGroup),
+            _ => None,
+        }
+    }
 }
 
 /// Supported OMML expression tree.
@@ -26,6 +54,8 @@ pub enum MathNode {
         numerator: Box<MathNode>,
         /// Denominator.
         denominator: Box<MathNode>,
+        /// Whether the fraction rule is drawn (`m:type` bar vs noBar).
+        bar: bool,
     },
     /// Base with optional lower and upper scripts.
     Script {
@@ -77,9 +107,14 @@ pub enum MathNode {
 impl MathContent {
     /// Parses `m:oMath` or `m:oMathPara`.
     pub fn parse(node: Node, display: bool) -> Self {
+        let justification = child_m(node, "oMathParaPr")
+            .and_then(|properties| child_m(properties, "jc"))
+            .and_then(|jc| attr(jc, M, "val"))
+            .and_then(MathJustification::parse);
         MathContent {
             expression: parse_node(node, 0),
             display,
+            justification,
         }
     }
 
@@ -110,6 +145,7 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
                 || children(node).any(|child| {
                     child.tag_name().namespace() != Some(M)
                         && child.tag_name().name().ends_with("Pr")
+                        && !benign_math_run_props(child)
                 })
             {
                 return MathNode::Unsupported("OMML run formatting".to_string());
@@ -122,22 +158,32 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             )
         }
         "f" => {
+            let mut bar = true;
             if let Some(properties) = child_m(node, "fPr") {
                 for property in children(properties) {
-                    if !is(property, M, "type")
-                        || attr(property, M, "val").unwrap_or("bar") != "bar"
-                    {
-                        return MathNode::Unsupported("non-bar fraction properties".to_string());
+                    if is(property, M, "ctrlPr") {
+                        continue;
+                    }
+                    if !is(property, M, "type") {
+                        return MathNode::Unsupported("fraction properties".to_string());
+                    }
+                    match attr(property, M, "val").unwrap_or("bar") {
+                        "bar" => bar = true,
+                        "noBar" => bar = false,
+                        other => {
+                            return MathNode::Unsupported(format!("fraction type {other}"));
+                        }
                     }
                 }
             }
             MathNode::Fraction {
                 numerator: boxed_child(node, "num", depth),
                 denominator: boxed_child(node, "den", depth),
+                bar,
             }
         }
         "sSup" => {
-            if property_has_children(node, "sSupPr") {
+            if properties_beyond_ctrl(node, "sSupPr") {
                 return MathNode::Unsupported("superscript properties".to_string());
             }
             MathNode::Script {
@@ -147,7 +193,7 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             }
         }
         "sSub" => {
-            if property_has_children(node, "sSubPr") {
+            if properties_beyond_ctrl(node, "sSubPr") {
                 return MathNode::Unsupported("subscript properties".to_string());
             }
             MathNode::Script {
@@ -157,7 +203,7 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             }
         }
         "sSubSup" => {
-            if property_has_children(node, "sSubSupPr") {
+            if properties_beyond_ctrl(node, "sSubSupPr") {
                 return MathNode::Unsupported("subscript/superscript properties".to_string());
             }
             MathNode::Script {
@@ -167,7 +213,7 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             }
         }
         "rad" => {
-            if property_has_children(node, "radPr") {
+            if properties_beyond_ctrl(node, "radPr") {
                 return MathNode::Unsupported("radical properties".to_string());
             }
             MathNode::Radical {
@@ -178,8 +224,15 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
         }
         "nary" => {
             let properties = child_m(node, "naryPr");
+            // `m:grow` only scales the operator glyph, which the layout
+            // already sizes; `m:ctrlPr` styles control glyphs we draw with
+            // the math face. Both are Word boilerplate, not structure.
             if properties.is_some_and(|properties| {
-                children(properties).any(|property| !is(property, M, "chr"))
+                children(properties).any(|property| {
+                    !(is(property, M, "chr")
+                        || is(property, M, "grow")
+                        || is(property, M, "ctrlPr"))
+                })
             }) {
                 return MathNode::Unsupported("n-ary operator properties".to_string());
             }
@@ -205,8 +258,9 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             }
             let properties = child_m(node, "dPr");
             if properties.is_some_and(|properties| {
-                children(properties)
-                    .any(|property| !matches!(property.tag_name().name(), "begChr" | "endChr"))
+                children(properties).any(|property| {
+                    !matches!(property.tag_name().name(), "begChr" | "endChr" | "ctrlPr")
+                })
             }) {
                 return MathNode::Unsupported("delimiter properties".to_string());
             }
@@ -224,7 +278,7 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             }
         }
         "func" => {
-            if property_has_children(node, "funcPr") {
+            if properties_beyond_ctrl(node, "funcPr") {
                 return MathNode::Unsupported("function properties".to_string());
             }
             MathNode::Function {
@@ -236,7 +290,25 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             sequence(node, depth)
         }
         "t" => MathNode::Sequence(Vec::new()),
-        other if other.ends_with("Pr") || other == "ctrlPr" => {
+        // Control-character run properties style glyphs the layout draws
+        // itself (bars, delimiters, operators); the content never changes
+        // equation structure or text.
+        "ctrlPr" => MathNode::Sequence(Vec::new()),
+        "oMathParaPr" => {
+            // Justification is consumed by `MathContent::parse`; anything
+            // else in the math-paragraph properties stays out of envelope.
+            if children(node).all(|property| {
+                is(property, M, "jc")
+                    && attr(property, M, "val").is_some_and(|value| {
+                        MathJustification::parse(value).is_some()
+                    })
+            }) {
+                MathNode::Sequence(Vec::new())
+            } else {
+                MathNode::Unsupported("OMML oMathParaPr".to_string())
+            }
+        }
+        other if other.ends_with("Pr") => {
             if has_element_children(node) {
                 MathNode::Unsupported(format!("OMML {other}"))
             } else {
@@ -265,8 +337,19 @@ fn has_element_children(node: Node) -> bool {
     children(node).next().is_some()
 }
 
-fn property_has_children(node: Node, name: &str) -> bool {
-    child_m(node, name).is_some_and(has_element_children)
+/// Word stamps `w:rPr` hint boilerplate into math runs. Font hints and
+/// proofing metadata never change the engine-styled math rendering; any
+/// other run formatting stays out of envelope.
+fn benign_math_run_props(props: Node) -> bool {
+    children(props).all(|child| {
+        matches!(child.tag_name().name(), "rFonts" | "lang" | "noProof")
+    })
+}
+
+fn properties_beyond_ctrl(node: Node, name: &str) -> bool {
+    child_m(node, name).is_some_and(|properties| {
+        children(properties).any(|property| !is(property, M, "ctrlPr"))
+    })
 }
 
 fn boxed_child(node: Node, name: &str, depth: usize) -> Box<MathNode> {
@@ -287,6 +370,7 @@ fn unsupported(node: &MathNode) -> Option<&str> {
         MathNode::Fraction {
             numerator,
             denominator,
+            ..
         } => unsupported(numerator).or_else(|| unsupported(denominator)),
         MathNode::Script {
             base,
@@ -324,6 +408,7 @@ fn source_text(node: &MathNode) -> String {
         MathNode::Fraction {
             numerator,
             denominator,
+            ..
         } => {
             format!("{}/{}", source_text(numerator), source_text(denominator))
         }

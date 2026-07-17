@@ -46,6 +46,16 @@ impl<'a> FaceMetrics<'a> {
         &self.face
     }
 
+    /// Replaces the line-box metrics with explicit em-unit values, keeping
+    /// every glyph metric. Used to present metric-compatible line heights
+    /// for substituted faces whose own metrics would reflow the document.
+    pub fn with_line_metrics_em(mut self, ascent: f64, descent: f64, line_gap: f64) -> Self {
+        self.ascent = ascent * self.units_per_em;
+        self.descent = descent * self.units_per_em;
+        self.line_gap = line_gap * self.units_per_em;
+        self
+    }
+
     /// Font design units per em.
     pub fn units_per_em(&self) -> f64 {
         self.units_per_em
