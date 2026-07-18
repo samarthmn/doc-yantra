@@ -638,14 +638,23 @@ fn layout_paragraph_with_wrap_context(
         None => numbering_layout::resolve_label(doc, warnings, &eff_para, para)?,
     };
 
-    // Word resolves list indentation as direct pPr > numbering level >
-    // style chain: a style's inherited indent (e.g. ListParagraph's 720)
-    // must not shadow the numbering definition the paragraph references.
+    // Word resolves list indentation as direct pPr > the named style's own
+    // indent > numbering level > inherited style chain: an indent declared
+    // on the paragraph's style itself outranks the list level (chinese
+    // claims ground truth), while one merely inherited through basedOn
+    // (e.g. ListParagraph's 720) must not shadow the numbering definition.
+    let own_style_indent = para
+        .props
+        .style_id
+        .as_deref()
+        .and_then(|id| doc.styles.get(id))
+        .map(|style| &style.ppr.indent);
     let label_left = label.as_ref().and_then(|l| l.left_pt);
     let label_hanging = label.as_ref().and_then(|l| l.hanging_pt);
     let direct_indent = &para.props.indent;
     let left = direct_indent
         .left_pt
+        .or(own_style_indent.and_then(|indent| indent.left_pt))
         .or(label_left)
         .or(eff_para.indent.left_pt)
         .unwrap_or(0.0)
@@ -659,12 +668,19 @@ fn layout_paragraph_with_wrap_context(
     let right = right_indent;
     // `firstLine`/`hanging` share one logical slot, so the pair resolves
     // from a single source at each precedence step.
+    let own_style_pair = own_style_indent
+        .filter(|indent| indent.first_line_pt.is_some() || indent.hanging_pt.is_some());
     let (first_line, hanging) = if direct_indent.first_line_pt.is_some()
         || direct_indent.hanging_pt.is_some()
     {
         (
             direct_indent.first_line_pt.unwrap_or(0.0),
             direct_indent.hanging_pt.unwrap_or(0.0),
+        )
+    } else if let Some(own) = own_style_pair {
+        (
+            own.first_line_pt.unwrap_or(0.0),
+            own.hanging_pt.unwrap_or(0.0),
         )
     } else if let Some(label_hanging) = label_hanging {
         (0.0, label_hanging)
@@ -1620,6 +1636,16 @@ fn flatten_run(
         };
     let allow_direct_text = matches!(base_direction, text_core::Direction::Ltr);
     let fallback_ids = matching::coverage_fallbacks(&doc.fonts, face, weight(&eff), italic(&eff));
+    let requested_family = matching::wml_run_family(
+        &eff.fonts,
+        if eff.rtl == Some(true) {
+            FontSlot::Cs
+        } else {
+            FontSlot::Ascii
+        },
+        &doc.theme,
+    );
+    let halfwidth_ascii = matching::halfwidth_ascii_legacy_family(&requested_family);
     for content in &run.content {
         match content {
             RunContent::Text(t) => shape_text(
@@ -1631,6 +1657,7 @@ fn flatten_run(
                 kern,
                 allow_direct_text,
                 base_direction,
+                halfwidth_ascii,
                 &style,
                 atoms,
             )?,
@@ -1642,6 +1669,7 @@ fn flatten_run(
                 kern,
                 allow_direct_text,
                 base_direction,
+                halfwidth_ascii,
                 &style,
             )?),
             RunContent::Break(k) => atoms.push(Atom::Break(*k)),
@@ -1656,6 +1684,7 @@ fn flatten_run(
                         kern,
                         allow_direct_text,
                         base_direction,
+                        halfwidth_ascii,
                         &style,
                         atoms,
                     )?;
@@ -1848,6 +1877,7 @@ fn flatten_run(
                     kern,
                     allow_direct_text,
                     base_direction,
+                    halfwidth_ascii,
                     &Rc::new(note_style),
                     atoms,
                 )?;
@@ -2143,6 +2173,7 @@ fn shape_text(
     kern: bool,
     allow_direct_text: bool,
     base_direction: text_core::Direction,
+    halfwidth_ascii: bool,
     style: &Rc<RunStyle>,
     atoms: &mut Vec<Atom>,
 ) -> Result<()> {
@@ -2158,11 +2189,21 @@ fn shape_text(
         .iter()
         .map(|face_id| fallback_style(fonts, *face_id, style))
         .collect();
-    let mapped = crate::text::semantic::map_shaped_run_clusters_with_direct(
+    let mut mapped = crate::text::semantic::map_shaped_run_clusters_with_direct(
         text,
         &shaped,
         allow_direct_text,
     );
+    // Word's fixed-pitch legacy CJK faces advance every printable ASCII
+    // glyph exactly half an em; keep that metric under the pan-CJK
+    // substitution so Latin fragments and AutoFit tables match Word.
+    if halfwidth_ascii {
+        for visible in &mut mapped.visible {
+            if matches!(visible.ch, ' '..='~') {
+                visible.advance_pt = size * 0.5 + char_spacing;
+            }
+        }
+    }
     let semantic_style = styles
         .get(mapped.owner_face_index)
         .cloned()
@@ -2213,6 +2254,10 @@ fn shape_text(
     clippy::too_many_arguments,
     reason = "tab leader candidates use the surrounding run's complete shaping context"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "leader shaping mirrors resolved Word run properties"
+)]
 fn tab_atom(
     fonts: &FontDb,
     face_ids: &[FaceId],
@@ -2221,6 +2266,7 @@ fn tab_atom(
     kern: bool,
     allow_direct_text: bool,
     base_direction: text_core::Direction,
+    halfwidth_ascii: bool,
     style: &Rc<RunStyle>,
 ) -> Result<Atom> {
     let mut leaders = Vec::new();
@@ -2239,6 +2285,7 @@ fn tab_atom(
             kern,
             allow_direct_text,
             base_direction,
+            halfwidth_ascii,
             style,
             &mut shaped,
         )?;

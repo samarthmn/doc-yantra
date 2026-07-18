@@ -244,7 +244,24 @@ pub fn build_label(
         if !matching::pan_cjk_face(&font.family_name) {
             continue;
         }
-        if let Some(metrics) = font.line_metrics() {
+        // Hangul label glyphs reach the pan-CJK face through Word's
+        // font-linking fallback to a Korean face, whose measured line
+        // geometry is the classic 0.86/0.14 body with a 0.38em hhea gap
+        // reserved above the ascent (calibrated against the Korean claims
+        // ground truth). Other pan-CJK label glyphs keep the face's legacy
+        // line convention.
+        let hangul = run.glyphs.iter().any(|glyph| {
+            matches!(u32::from(glyph.ch),
+                0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF)
+        });
+        let metrics = if hangul {
+            font.parsed()
+                .map(crate::fonts::FaceMetrics::new)
+                .map(|metrics| metrics.with_line_metrics_em(0.859375, 0.140625, 0.38))
+        } else {
+            font.line_metrics()
+        };
+        if let Some(metrics) = metrics {
             line_height_pt = line_height_pt.max(metrics.line_height_pt(size));
             ascent_pt = ascent_pt.max(metrics.line_box_ascent_pt(size));
         }

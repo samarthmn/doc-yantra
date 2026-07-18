@@ -458,6 +458,36 @@ pub fn pan_cjk_face(family: &str) -> bool {
     family_key(family).starts_with("noto sans cjk")
 }
 
+/// Legacy fixed-pitch CJK families whose ASCII glyphs advance exactly half
+/// an em in Word (SimSun, MingLiU, MS Mincho/Gothic, and the Korean -che
+/// faces). Substituted rendering must keep those advances or every Latin
+/// fragment — and any AutoFit table measured from it — drifts wide. The
+/// proportional variants (MS P*, PMingLiU, Batang, Gulim, Dotum) keep their
+/// substitute's own Latin advances.
+pub fn halfwidth_ascii_legacy_family(family: &str) -> bool {
+    matches!(
+        family_key(family).as_str(),
+        "simsun"
+            | "nsimsun"
+            | "simsun-extb"
+            | "simhei"
+            | "kaiti"
+            | "fangsong"
+            | "mingliu"
+            | "mingliu-extb"
+            | "ms mincho"
+            | "ms gothic"
+            | "ms 明朝"
+            | "ms ゴシック"
+            | "ＭＳ 明朝"
+            | "ＭＳ ゴシック"
+            | "batangche"
+            | "gulimche"
+            | "dotumche"
+            | "gungsuhche"
+    )
+}
+
 /// Line metrics (ascent, descent, line gap in em) presented for a pan-CJK
 /// face. The legacy CJK families they replace (SimSun, MS Mincho, Batang,
 /// MingLiU, …) design to a 1.0em body that Word grows with the growth
