@@ -144,16 +144,24 @@ pub(crate) fn layout_table_with_width(
     let start_offset = if table.props.floating.is_some() {
         0.0
     } else {
-        // A non-negative `tblInd` locates the leading cell content edge, so the
+        // A positive `tblInd` locates the leading cell content edge, so the
         // grid begins one leading margin earlier. Google Docs exports an
         // explicit negative `tblInd` to locate the grid edge itself; subtracting
-        // the margin again would double that authored outdent. With no `tblInd`,
-        // the grid stays at the paragraph edge.
+        // the margin again would double that authored outdent. A zero indent
+        // (Word's TableNormal default) depends on the document's
+        // compatibility mode: Word 2013+ (mode 15) aligns the grid edge at
+        // the paragraph margin, while legacy modes keep the historical
+        // content-edge placement one cell margin to the left — both measured
+        // against Word-exported ground truths (chinese/japanese vs complex).
         table.props.indent_pt.map_or(0.0, |indent| {
             if indent < 0.0 {
                 indent
-            } else {
+            } else if indent > 0.0 {
                 indent - leading_cell_margin
+            } else if doc.settings.compat_mode >= 15 {
+                0.0
+            } else {
+                -leading_cell_margin
             }
         })
     };

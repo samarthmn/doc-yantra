@@ -183,7 +183,7 @@ fn layout_node(
             // Word draws display-style n-ary operators with the large glyph
             // variant (~2x base, calibrated against Word CJK ground truths);
             // inline math keeps the compact text-style operator.
-            let operator_scale = if context.display { 2.0 } else { 1.35 };
+            let operator_scale = if context.display { 1.75 } else { 1.35 };
             let operator = text_box(doc, &operator.to_string(), size * operator_scale, true)?;
             let lower = lower
                 .as_deref()

@@ -458,16 +458,25 @@ pub fn pan_cjk_face(family: &str) -> bool {
     family_key(family).starts_with("noto sans cjk")
 }
 
-/// Line metrics (ascent, descent, line gap in em) presented for pan-CJK
-/// faces. The legacy CJK families they replace (SimSun, MS Mincho, Batang,
-/// MingLiU, …) design to a 1.0em body that Word grows to a ~1.30em line
-/// with the growth centered around the glyph box (baseline at
-/// `winAscent + gap/2` from the line top — calibrated against Word-exported
-/// CJK ground truths, 2026-07-17). Noto Sans CJK's own 1.48em win metrics
-/// would reflow every substituted document, so rendering through a pan-CJK
-/// face keeps the legacy convention: the lower half of the growth is folded
-/// into the descent so `ascent + gap` stays the baseline offset.
-pub const LEGACY_CJK_LINE_METRICS_EM: (f64, f64, f64) = (0.859375, 0.290625, 0.15);
+/// Line metrics (ascent, descent, line gap in em) presented for a pan-CJK
+/// face. The legacy CJK families they replace (SimSun, MS Mincho, Batang,
+/// MingLiU, …) design to a 1.0em body that Word grows with the growth
+/// centered around the glyph box (baseline at `winAscent + gap/2` from the
+/// line top — calibrated against Word-exported CJK ground truths,
+/// 2026-07-17). Noto Sans CJK's own 1.48em win metrics would reflow every
+/// substituted document, so rendering through a pan-CJK face keeps the
+/// legacy convention: the below-baseline half of the growth is folded into
+/// the descent so `ascent + gap` stays the baseline offset. The MingLiU
+/// lineage behind the TC target carries a larger hhea gap than the
+/// SimSun-class 1.30em faces, measured as a ~1.316em line with a lower
+/// baseline share.
+pub fn legacy_cjk_line_metrics_em(family: &str) -> (f64, f64, f64) {
+    if family_key(family) == "noto sans cjk tc" {
+        (0.859375, 0.215, 0.2412)
+    } else {
+        (0.859375, 0.290625, 0.15)
+    }
+}
 
 /// The family-class fallback for an unknown family, by name heuristic.
 fn fallback_class(family: &str) -> &'static str {

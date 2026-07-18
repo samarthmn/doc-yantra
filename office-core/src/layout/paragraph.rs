@@ -283,6 +283,10 @@ pub struct Line {
     pub page_break_after: bool,
     /// A `w:br type="column"` follows this line.
     pub column_break_after: bool,
+    /// Auto line-spacing growth below the natural text box. Word paginates
+    /// on the ink bottom, letting this trailing leading overflow the
+    /// content bottom for the last line of a page.
+    pub bottom_slack_pt: f64,
 }
 
 /// An item within a [`Line`], positioned relative to the line's top-left.
@@ -686,8 +690,18 @@ fn layout_paragraph_with_wrap_context(
         let text_x = match label.suffix {
             // Word's default numbering suffix tabs to the level's text
             // position (`w:ind/@w:left`). The hanging area positions only the
-            // label and must not pull item text back over it.
-            LevelSuffix::Tab => left,
+            // label and must not pull item text back over it — and a label
+            // wider than the hanging area pushes the text on to the next
+            // default tab stop instead of being overprinted.
+            LevelSuffix::Tab => {
+                let label_end = label_x + label_width;
+                if label_end > left + 0.01 {
+                    let interval = doc.settings.default_tab_stop_pt.max(0.01);
+                    (label_end / interval).floor() * interval + interval
+                } else {
+                    left
+                }
+            }
             LevelSuffix::Nothing => label_x + label_width,
             LevelSuffix::Space => label_x + label_width + label.suffix_space_advance_pt,
         };
@@ -986,14 +1000,16 @@ fn layout_paragraph_with_wrap_context(
 
     if lines.is_empty() {
         let h = para_mark_height(doc, para, true);
+        let height_pt = apply_line_spacing(line_spacing, h);
         lines.push(Line {
-            height_pt: apply_line_spacing(line_spacing, h),
+            height_pt,
             items: Vec::new(),
             anchored_items: Vec::new(),
             bookmarks: Vec::new(),
             internal_links: Vec::new(),
             page_break_after: false,
             column_break_after: false,
+            bottom_slack_pt: line_spacing_bottom_slack(line_spacing, height_pt, h),
         });
     }
 
@@ -2575,9 +2591,20 @@ fn place_line(
         text_natural_h = DEFAULT_SIZE_PT * 1.2;
     }
     natural_h = natural_h.max(ascent + descent);
+    let has_inline_object = indices
+        .iter()
+        .any(|&k| matches!(atoms[k], Atom::Image { .. } | Atom::Composite { anchor: None, .. }));
     let height = match line_spacing {
-        Some(LineSpacing::Auto(_)) => {
-            natural_h.max(apply_line_spacing(line_spacing, text_natural_h))
+        Some(LineSpacing::Auto(multiplier)) => {
+            // Word grows an inline-object line by the surplus leading of one
+            // text line — the object itself is never multiplied (calibrated
+            // against the CJK ground truths' inline equation images).
+            let object_growth = if has_inline_object && multiplier > 1.0 {
+                (multiplier - 1.0) * text_natural_h
+            } else {
+                0.0
+            };
+            (natural_h + object_growth).max(apply_line_spacing(line_spacing, text_natural_h))
         }
         _ => apply_line_spacing(line_spacing, natural_h),
     };
@@ -2954,7 +2981,22 @@ fn place_line(
         internal_links,
         page_break_after,
         column_break_after,
+        bottom_slack_pt: line_spacing_bottom_slack(line_spacing, height, natural_h),
     })
+}
+
+/// The auto-growth below a line's natural text box. Word paginates on the
+/// ink bottom, letting this leading overflow the content bottom; fixed and
+/// at-least line rules keep their full box.
+pub(crate) fn line_spacing_bottom_slack(
+    spacing: Option<LineSpacing>,
+    line_height_pt: f64,
+    natural_height_pt: f64,
+) -> f64 {
+    match spacing {
+        Some(LineSpacing::Auto(_)) => (line_height_pt - natural_height_pt).max(0.0),
+        _ => 0.0,
+    }
 }
 
 fn visual_run_order(atoms: &[Atom], indices: &[usize], rtl: bool) -> Vec<usize> {

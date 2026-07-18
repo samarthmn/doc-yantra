@@ -51,11 +51,12 @@ impl Face {
 
     /// Metrics for layout line boxes. Pan-CJK substitutes present the
     /// legacy CJK line convention so substituted documents keep Word's
-    /// pagination (see [`super::matching::LEGACY_CJK_LINE_METRICS_EM`]).
+    /// pagination (see [`super::matching::legacy_cjk_line_metrics_em`]).
     pub fn line_metrics(&self) -> Option<super::FaceMetrics<'_>> {
         let metrics = self.parsed().map(super::FaceMetrics::new)?;
         Some(if super::matching::pan_cjk_face(&self.family_name) {
-            let (ascent, descent, line_gap) = super::matching::LEGACY_CJK_LINE_METRICS_EM;
+            let (ascent, descent, line_gap) =
+                super::matching::legacy_cjk_line_metrics_em(&self.family_name);
             metrics.with_line_metrics_em(ascent, descent, line_gap)
         } else {
             metrics

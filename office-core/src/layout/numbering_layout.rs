@@ -108,7 +108,15 @@ pub fn build_label(
     level: &LevelDef,
 ) -> Result<Option<PlacedLabel>> {
     // Effective run props: level rPr overlaid on the paragraph's run defaults.
-    let eff = doc.styles.run_props(&para.props, &level.rpr);
+    // Word formats a list label from the numbering level's run properties
+    // merged over the paragraph mark's (`pPr/rPr`) — a mark-level size or
+    // font reaches the label even though it never styles the item text.
+    let mark = doc
+        .styles
+        .para_props(&para.props)
+        .mark_rpr
+        .unwrap_or_default();
+    let eff = doc.styles.run_props(&para.props, &level.rpr.merge_over(&mark));
     let size = eff.size_pt.unwrap_or(11.0);
     let color = Rgba::opaque(Rgb::new(0, 0, 0));
     let family = matching::wml_run_family(&eff.fonts, FontSlot::Ascii, &doc.theme);
@@ -214,8 +222,11 @@ pub fn build_label(
     }
     // The label's line box follows the resolved label font. A coverage
     // fallback that painted a bullet glyph supplies ink only — its own
-    // (often much taller) metrics must not grow the list item's line.
-    let (line_height_pt, ascent_pt) = doc
+    // (often much taller) metrics must not grow the list item's line. The
+    // pan-CJK faces are the exception: East Asian label text is a
+    // whole-script substitution and takes the legacy CJK line convention,
+    // exactly as it would in Word with the real face installed.
+    let (mut line_height_pt, mut ascent_pt) = doc
         .fonts
         .face(face)
         .and_then(|font| font.line_metrics())
@@ -226,6 +237,18 @@ pub fn build_label(
             )
         })
         .unwrap_or((size * 1.2, size));
+    for run in &runs {
+        let Some(font) = doc.fonts.face(run.face) else {
+            continue;
+        };
+        if !matching::pan_cjk_face(&font.family_name) {
+            continue;
+        }
+        if let Some(metrics) = font.line_metrics() {
+            line_height_pt = line_height_pt.max(metrics.line_height_pt(size));
+            ascent_pt = ascent_pt.max(metrics.line_box_ascent_pt(size));
+        }
+    }
 
     Ok(Some(PlacedLabel {
         runs,

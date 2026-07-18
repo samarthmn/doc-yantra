@@ -37,6 +37,8 @@ const NOTE_SEPARATOR_GAP_PT: f64 = 8.0;
 /// A single flow unit (one paragraph line or one table row).
 struct Unit {
     height: f64,
+    /// Auto line-spacing growth below the ink (see `Line::bottom_slack_pt`).
+    bottom_slack_pt: f64,
     /// Authored paragraph spacing, suppressed at a fresh page/column top.
     gap_before: f64,
     /// Float clearance that remains active even at a fresh page/column top.
@@ -1015,6 +1017,7 @@ fn build_units(
                         } else {
                             floating.y_pt + row_y + floating.wrap_padding_pt
                         },
+                        bottom_slack_pt: 0.0,
                         gap_before: table_gap,
                         float_leading: 0.0,
                         items,
@@ -1067,6 +1070,7 @@ fn build_units(
                     };
                     let unit = Unit {
                         height: row_layout.height_pt,
+                        bottom_slack_pt: 0.0,
 
                         gap_before: if first_row { table_gap } else { 0.0 },
                         float_leading: 0.0,
@@ -1154,6 +1158,7 @@ fn blocks_contain_anchors(blocks: &[BlockContent]) -> bool {
 fn clone_unit(u: &Unit) -> Unit {
     Unit {
         height: u.height,
+        bottom_slack_pt: u.bottom_slack_pt,
         gap_before: u.gap_before,
         float_leading: u.float_leading,
         items: u.items.iter().map(clone_line_item).collect(),
@@ -1271,6 +1276,7 @@ fn push_paragraph_units(
         column_brk = line.column_break_after;
         units.push(Unit {
             height: line.height_pt,
+            bottom_slack_pt: line.bottom_slack_pt,
             gap_before: if i == 0 { gap } else { 0.0 },
             float_leading: if i == 0 { layout.float_leading_pt } else { 0.0 },
             items: line.items,
@@ -1441,6 +1447,7 @@ fn push_frame_unit(
     let group = next_group();
     units.push(Unit {
         height: exclusion_height,
+        bottom_slack_pt: 0.0,
 
         gap_before: (*prev_after).max(layout.space_before_pt),
         float_leading: layout.float_leading_pt,
@@ -1632,7 +1639,12 @@ fn paginate(
                 probe_y += unit.table_trailing_pt;
             }
             let break_before = units[first_unit_index].break_before;
-            let fits = probe_y <= content_bottom + 0.01;
+            // Word paginates on the ink bottom: the auto line-spacing growth
+            // below the group's final line may overflow the content bottom.
+            let bottom_slack = unit_run
+                .last()
+                .map_or(0.0, |index| units[*index].bottom_slack_pt);
+            let fits = probe_y - bottom_slack <= content_bottom + 0.01;
             let mut advanced = false;
 
             if break_before && !work_page_is_empty(&page) {
@@ -3278,6 +3290,7 @@ mod tests {
     fn table_unit(table_id: usize, group: usize, is_last: bool) -> Unit {
         Unit {
             height: 10.0,
+            bottom_slack_pt: 0.0,
 
             gap_before: 0.0,
             float_leading: 0.0,
@@ -3419,6 +3432,7 @@ mod tests {
     fn repeated_table_header_clone_does_not_repeat_logical_bookmarks_or_notes() {
         let unit = Unit {
             height: 12.0,
+            bottom_slack_pt: 0.0,
 
             gap_before: 0.0,
             float_leading: 0.0,
