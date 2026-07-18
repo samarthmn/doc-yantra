@@ -382,7 +382,8 @@ fn push_style_warning(
 }
 
 /// Normalizes a family name for case-insensitive comparison.
-fn family_key(name: &str) -> String {
+/// Normalizes a family name for case- and spacing-insensitive matching.
+pub fn family_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
@@ -409,22 +410,62 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
         "noto sans symbols 2" => &["Noto Sans Symbols", "Noto Sans Math", "Carlito"],
         "noto sans math" => &["Noto Sans Symbols 2", "Carlito"],
         // Common CJK faces have no metric-compatible OFL clone; the pan-CJK
-        // Noto Sans CJK regional faces are the practical substitutes (the
-        // same policy the retired LibreOffice backend applied). Hosts supply
-        // these via a font provider; nothing is bundled.
-        "simsun" | "nsimsun" | "simsun-extb" | "simhei" | "microsoft yahei"
-        | "microsoft yahei ui" | "dengxian" | "kaiti" | "fangsong" | "宋体" | "新宋体"
-        | "黑体" | "微软雅黑" | "楷体" | "仿宋" | "等线" => &["Noto Sans CJK SC"],
-        "pmingliu" | "mingliu" | "pmingliu-extb" | "mingliu-extb" | "microsoft jhenghei"
-        | "microsoft jhenghei ui" | "dfkai-sb" | "新細明體" | "細明體" | "微軟正黑體"
-        | "標楷體" => &["Noto Sans CJK TC"],
-        "ms mincho" | "ms pmincho" | "ms gothic" | "ms pgothic" | "ms ui gothic" | "yu gothic"
-        | "yu gothic ui" | "yu mincho" | "meiryo" | "meiryo ui" | "ms 明朝" | "ms ｐ明朝"
-        | "ms ゴシック" | "ms ｐゴシック" | "ＭＳ 明朝" | "ＭＳ Ｐ明朝" | "ＭＳ ゴシック"
-        | "ＭＳ Ｐゴシック" | "游ゴシック" | "游明朝" | "メイリオ" => &["Noto Sans CJK JP"],
-        "malgun gothic" | "malgun gothic semilight" | "batang" | "batangche" | "gungsuh"
-        | "gulim" | "gulimche" | "dotum" | "dotumche" | "맑은 고딕" | "바탕" | "바탕체"
-        | "돋움" | "돋움체" | "굴림" | "굴림체" | "궁서" => &["Noto Sans CJK KR"],
+        // Noto regional faces are the practical substitutes (the same policy
+        // the retired LibreOffice backend applied). Hosts supply these via a
+        // font provider; nothing is bundled. Serif legacy families (SimSun,
+        // MingLiU, Mincho, Batang, and the Kai/FangSong brush faces) prefer
+        // the Noto Serif CJK face and fall back to the Sans face when only
+        // that is registered, so Sans-only hosts keep converting.
+        // Localized names alias the classic Windows face first (registered by
+        // hosts with the real fonts, e.g. the fidelity harness on a machine
+        // with Office), then the free substitution chain.
+        "simsun" | "宋体" => &["SimSun", "FandolSong", "Noto Serif CJK SC", "Noto Sans CJK SC"],
+        "nsimsun" | "simsun-extb" | "新宋体" => {
+            &["NSimSun", "SimSun", "FandolSong", "Noto Serif CJK SC", "Noto Sans CJK SC"]
+        }
+        "kaiti" | "楷体" => &["KaiTi", "Noto Serif CJK SC", "Noto Sans CJK SC"],
+        "fangsong" | "仿宋" => &["FangSong", "Noto Serif CJK SC", "Noto Sans CJK SC"],
+        "simhei" | "黑体" => &["SimHei", "Noto Sans CJK SC"],
+        "microsoft yahei" | "microsoft yahei ui" | "微软雅黑" => {
+            &["Microsoft YaHei", "Noto Sans CJK SC"]
+        }
+        "dengxian" | "等线" => &["DengXian", "Noto Sans CJK SC"],
+        "mingliu" | "mingliu-extb" | "細明體" => {
+            &["MingLiU", "細明體", "Noto Serif CJK TC", "Noto Sans CJK TC"]
+        }
+        "pmingliu" | "pmingliu-extb" | "新細明體" => {
+            &["PMingLiU", "新細明體", "MingLiU", "細明體", "Noto Serif CJK TC", "Noto Sans CJK TC"]
+        }
+        "dfkai-sb" | "標楷體" => &["DFKai-SB", "Noto Serif CJK TC", "Noto Sans CJK TC"],
+        "microsoft jhenghei" | "microsoft jhenghei ui" | "微軟正黑體" => {
+            &["Microsoft JhengHei", "Noto Sans CJK TC"]
+        }
+        "ms mincho" | "ms 明朝" | "ＭＳ 明朝" => {
+            &["MS Mincho", "Noto Serif CJK JP", "Noto Sans CJK JP"]
+        }
+        "ms pmincho" | "ms ｐ明朝" | "ＭＳ Ｐ明朝" => {
+            &["MS PMincho", "MS Mincho", "Noto Serif CJK JP", "Noto Sans CJK JP"]
+        }
+        "yu mincho" | "游明朝" => &["Yu Mincho", "Noto Serif CJK JP", "Noto Sans CJK JP"],
+        "ms gothic" | "ms ui gothic" | "ms ゴシック" | "ＭＳ ゴシック" => {
+            &["MS Gothic", "IPAexGothic", "Noto Sans CJK JP"]
+        }
+        "ms pgothic" | "ms ｐゴシック" | "ＭＳ Ｐゴシック" => {
+            &["MS PGothic", "MS Gothic", "IPAexGothic", "Noto Sans CJK JP"]
+        }
+        "yu gothic" | "yu gothic ui" | "meiryo" | "meiryo ui" | "游ゴシック" | "メイリオ" => {
+            &["Noto Sans CJK JP"]
+        }
+        "batang" | "바탕" => &["Batang", "Noto Serif CJK KR", "Noto Sans CJK KR"],
+        "batangche" | "바탕체" => &["BatangChe", "Batang", "Noto Serif CJK KR", "Noto Sans CJK KR"],
+        "gungsuh" | "궁서" => &["Gungsuh", "Batang", "Noto Serif CJK KR", "Noto Sans CJK KR"],
+        "gulim" | "굴림" => &["Gulim", "Noto Sans CJK KR"],
+        "gulimche" | "굴림체" => &["GulimChe", "Gulim", "Noto Sans CJK KR"],
+        "dotum" | "돋움" => &["Dotum", "Gulim", "Noto Sans CJK KR"],
+        "dotumche" | "돋움체" => &["DotumChe", "Dotum", "Noto Sans CJK KR"],
+        "malgun gothic" | "malgun gothic semilight" | "맑은 고딕" => {
+            &["Malgun Gothic", "Noto Sans CJK KR"]
+        }
         _ => &[],
     }
 }
@@ -434,11 +475,17 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
 /// repo-shipped OTFs (`pdf-core/wasm/fonts/NotoSansCJK*.otf`) instead, so
 /// providers need to recognize the mapping without duplicating the table.
 pub fn pan_cjk_substitution_target(family: &str) -> Option<&'static str> {
-    const PAN_CJK: [&str; 4] = [
+    const PAN_CJK: [&str; 10] = [
         "Noto Sans CJK SC",
         "Noto Sans CJK TC",
         "Noto Sans CJK JP",
         "Noto Sans CJK KR",
+        "Noto Serif CJK SC",
+        "Noto Serif CJK TC",
+        "Noto Serif CJK JP",
+        "Noto Serif CJK KR",
+        "IPAexGothic",
+        "FandolSong",
     ];
     let key = family_key(family);
     PAN_CJK
@@ -453,9 +500,14 @@ pub fn pan_cjk_substitution_target(family: &str) -> Option<&'static str> {
         })
 }
 
-/// Whether a family is one of the pan-CJK Noto substitution targets.
+/// Whether a family is one of the pan-CJK substitution targets (the Noto
+/// CJK faces plus the metric-compatible legacy clones like IPAexGothic).
 pub fn pan_cjk_face(family: &str) -> bool {
-    family_key(family).starts_with("noto sans cjk")
+    let key = family_key(family);
+    key.starts_with("noto sans cjk")
+        || key.starts_with("noto serif cjk")
+        || key == "ipaexgothic"
+        || key == "fandolsong"
 }
 
 /// Legacy fixed-pitch CJK families whose ASCII glyphs advance exactly half
@@ -488,6 +540,58 @@ pub fn halfwidth_ascii_legacy_family(family: &str) -> bool {
     )
 }
 
+/// The classic Windows East Asian faces whose line boxes Word builds with
+/// the hhea line gap centered around the em square (baseline at
+/// `winAscent + lineGap/2` from the line top). Applies when the real font
+/// is registered; substituted rendering models the same convention through
+/// [`legacy_cjk_line_metrics_em`].
+pub fn legacy_cjk_centered_family(family: &str) -> bool {
+    matches!(
+        family_key(family).as_str(),
+        "simsun"
+            | "nsimsun"
+            | "simsun-extb"
+            | "simhei"
+            | "kaiti"
+            | "fangsong"
+            | "mingliu"
+            | "pmingliu"
+            | "mingliu-extb"
+            | "pmingliu-extb"
+            | "dfkai-sb"
+            | "ms mincho"
+            | "ms pmincho"
+            | "ms gothic"
+            | "ms pgothic"
+            | "ms ui gothic"
+            | "batang"
+            | "batangche"
+            | "gungsuh"
+            | "gungsuhche"
+            | "gulim"
+            | "gulimche"
+            | "dotum"
+            | "dotumche"
+    )
+}
+
+/// The legacy East Asian class of a family (real face or substitute), used
+/// to apply Word's measured per-size line-box splits.
+pub fn legacy_cjk_class(family: &str) -> Option<crate::fonts::LegacyCjkClass> {
+    use crate::fonts::LegacyCjkClass::*;
+    Some(match family_key(family).as_str() {
+        "simsun" | "nsimsun" | "simsun-extb" | "fandolsong" | "noto sans cjk sc"
+        | "noto serif cjk sc" => Sc,
+        "mingliu" | "pmingliu" | "mingliu-extb" | "pmingliu-extb" | "細明體" | "新細明體"
+        | "noto sans cjk tc" | "noto serif cjk tc" => Tc,
+        "ms gothic" | "ms pgothic" | "ms ui gothic" | "ms mincho" | "ms pmincho"
+        | "ipaexgothic" | "noto sans cjk jp" | "noto serif cjk jp" => Jp,
+        "batang" | "batangche" | "gungsuh" | "gungsuhche" | "noto sans cjk kr"
+        | "noto serif cjk kr" => Kr,
+        _ => return None,
+    })
+}
+
 /// Line metrics (ascent, descent, line gap in em) presented for a pan-CJK
 /// face. The legacy CJK families they replace (SimSun, MS Mincho, Batang,
 /// MingLiU, …) design to a 1.0em body that Word grows with the growth
@@ -501,11 +605,12 @@ pub fn halfwidth_ascii_legacy_family(family: &str) -> bool {
 /// SimSun-class 1.30em faces, measured as a ~1.316em line with a lower
 /// baseline share.
 pub fn legacy_cjk_line_metrics_em(family: &str) -> (f64, f64, f64) {
-    if family_key(family) == "noto sans cjk tc" {
-        (0.859375, 0.215, 0.2412)
-    } else {
-        (0.859375, 0.290625, 0.15)
-    }
+    matches!(
+        family_key(family).as_str(),
+        "noto sans cjk tc" | "noto serif cjk tc"
+    )
+    .then_some((0.859375, 0.215, 0.2412))
+    .unwrap_or((0.859375, 0.290625, 0.15))
 }
 
 /// The family-class fallback for an unknown family, by name heuristic.
@@ -646,36 +751,66 @@ mod tests {
 
     #[test]
     fn substitution_map_covers_common_cjk_families() {
-        assert_eq!(substitution_targets("SimSun"), &["Noto Sans CJK SC"]);
-        assert_eq!(substitution_targets("Microsoft YaHei"), &["Noto Sans CJK SC"]);
-        assert_eq!(substitution_targets("PMingLiU"), &["Noto Sans CJK TC"]);
+        assert_eq!(
+            substitution_targets("SimSun"),
+            &["SimSun", "FandolSong", "Noto Serif CJK SC", "Noto Sans CJK SC"]
+        );
+        assert_eq!(
+            substitution_targets("Microsoft YaHei"),
+            &["Microsoft YaHei", "Noto Sans CJK SC"]
+        );
+        assert_eq!(
+            substitution_targets("PMingLiU"),
+            &[
+                "PMingLiU",
+                "新細明體",
+                "MingLiU",
+                "細明體",
+                "Noto Serif CJK TC",
+                "Noto Sans CJK TC"
+            ]
+        );
         assert_eq!(
             substitution_targets("Microsoft JhengHei"),
-            &["Noto Sans CJK TC"]
+            &["Microsoft JhengHei", "Noto Sans CJK TC"]
         );
-        assert_eq!(substitution_targets("MS Mincho"), &["Noto Sans CJK JP"]);
+        assert_eq!(
+            substitution_targets("MS Mincho"),
+            &["MS Mincho", "Noto Serif CJK JP", "Noto Sans CJK JP"]
+        );
         assert_eq!(substitution_targets("Yu Gothic"), &["Noto Sans CJK JP"]);
-        assert_eq!(substitution_targets("Malgun Gothic"), &["Noto Sans CJK KR"]);
-        assert_eq!(substitution_targets("Batang"), &["Noto Sans CJK KR"]);
+        assert_eq!(
+            substitution_targets("Malgun Gothic"),
+            &["Malgun Gothic", "Noto Sans CJK KR"]
+        );
+        assert_eq!(
+            substitution_targets("Batang"),
+            &["Batang", "Noto Serif CJK KR", "Noto Sans CJK KR"]
+        );
     }
 
     #[test]
     fn pan_cjk_targets_are_exposed_for_providers() {
-        assert_eq!(
-            pan_cjk_substitution_target("SimSun"),
-            Some("Noto Sans CJK SC")
-        );
+        assert_eq!(pan_cjk_substitution_target("SimSun"), Some("FandolSong"));
         assert_eq!(
             pan_cjk_substitution_target("MS Mincho"),
-            Some("Noto Sans CJK JP")
+            Some("Noto Serif CJK JP")
+        );
+        assert_eq!(
+            pan_cjk_substitution_target("MS Gothic"),
+            Some("IPAexGothic")
         );
         assert_eq!(
             pan_cjk_substitution_target("batang"),
-            Some("Noto Sans CJK KR")
+            Some("Noto Serif CJK KR")
         );
         assert_eq!(
             pan_cjk_substitution_target("noto sans cjk tc"),
             Some("Noto Sans CJK TC")
+        );
+        assert_eq!(
+            pan_cjk_substitution_target("Noto Serif CJK KR"),
+            Some("Noto Serif CJK KR")
         );
         assert_eq!(pan_cjk_substitution_target("Calibri"), None);
         assert_eq!(pan_cjk_substitution_target("Noto Sans Math"), None);

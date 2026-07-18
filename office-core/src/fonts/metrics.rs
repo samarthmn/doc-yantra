@@ -15,6 +15,50 @@ pub struct FaceMetrics<'a> {
     descent: f64,
     /// Line gap in font units.
     line_gap: f64,
+    /// Legacy East Asian class whose per-size line box splits Word measures
+    /// from the classic Windows fonts' bitmap-strike metrics (extracted from
+    /// the ground-truth PDF text matrices; see `size_split`).
+    legacy_class: Option<LegacyCjkClass>,
+}
+
+/// The classic Windows East Asian font classes with size-dependent line
+/// metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyCjkClass {
+    /// SimSun lineage (and its substitutes).
+    Sc,
+    /// MingLiU lineage.
+    Tc,
+    /// MS Gothic / MS Mincho lineage.
+    Jp,
+    /// Batang lineage.
+    Kr,
+}
+
+/// Measured `(ascent_em, descent_em)` line-box split for a legacy class at a
+/// size band, from exact Word PDF baselines (2026-07-18). `None` keeps the
+/// class's flat legacy constants.
+fn legacy_size_split(class: LegacyCjkClass, size_pt: f64) -> Option<(f64, f64)> {
+    use LegacyCjkClass::*;
+    let band = if size_pt < 11.75 {
+        0
+    } else if size_pt < 13.0 {
+        1
+    } else if size_pt < 15.0 {
+        2
+    } else {
+        3
+    };
+    // Equivalents of the calibrated jp/sc grid shifts (best measured state);
+    // refine per class with A/B-verified exact-baseline values only.
+    match (class, band) {
+        (Sc, 0 | 1) => Some((1.00583, 0.28587)),
+        (Sc, 2) => Some((1.005, 0.3283)),
+        (Sc, 3) => Some((1.020, 0.2821)),
+        (Jp, 2 | 3) => Some((1.029375, 0.270625)),
+        (Kr, 0) => Some((0.9609, 0.339075)),
+        _ => None,
+    }
 }
 
 impl<'a> FaceMetrics<'a> {
@@ -38,7 +82,14 @@ impl<'a> FaceMetrics<'a> {
             ascent,
             descent,
             line_gap,
+            legacy_class: None,
         }
+    }
+
+    /// Tags the face with a legacy East Asian class (see `legacy_size_split`).
+    pub fn with_legacy_class(mut self, class: LegacyCjkClass) -> Self {
+        self.legacy_class = Some(class);
+        self
     }
 
     /// The underlying parsed face.
@@ -53,6 +104,18 @@ impl<'a> FaceMetrics<'a> {
         self.ascent = ascent * self.units_per_em;
         self.descent = descent * self.units_per_em;
         self.line_gap = line_gap * self.units_per_em;
+        self
+    }
+
+    /// Re-splits the face's own line gap evenly around the em box, matching
+    /// how Word centers the classic Windows East Asian faces (SimSun,
+    /// MS Gothic, Batang, MingLiU…): the baseline sits at
+    /// `winAscent + lineGap/2` from the line top instead of below the whole
+    /// gap. Total line height is unchanged.
+    pub fn with_centered_line_gap(mut self) -> Self {
+        let half = self.line_gap / 2.0;
+        self.descent += half;
+        self.line_gap = half;
         self
     }
 
@@ -83,11 +146,23 @@ impl<'a> FaceMetrics<'a> {
     /// Baseline offset inside a Word line box. Word places the hhea line gap
     /// above the glyph ascent rather than leaving it below the descent.
     pub fn line_box_ascent_pt(&self, size_pt: f64) -> f64 {
+        if let Some((asc, _)) = self
+            .legacy_class
+            .and_then(|class| legacy_size_split(class, size_pt))
+        {
+            return asc * size_pt;
+        }
         self.scale(self.ascent + self.line_gap, size_pt)
     }
 
     /// Natural line height in points: `(ascent + descent + gap) / upem * size`.
     pub fn line_height_pt(&self, size_pt: f64) -> f64 {
+        if let Some((asc, desc)) = self
+            .legacy_class
+            .and_then(|class| legacy_size_split(class, size_pt))
+        {
+            return (asc + desc) * size_pt;
+        }
         self.scale(self.ascent + self.descent + self.line_gap, size_pt)
     }
 

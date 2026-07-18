@@ -18,11 +18,11 @@ pub mod subset;
 
 pub use db::{Face, FaceId, FontDb};
 pub use matching::{
-    Resolved, map_symbol_char, pan_cjk_substitution_target, resolve, resolve_exact,
+    Resolved, family_key, map_symbol_char, pan_cjk_substitution_target, resolve, resolve_exact,
     resolve_exact_or_substitute_with_stretch, resolve_exact_with_stretch, resolve_with_stretch,
     wml_run_family,
 };
-pub use metrics::{FaceMetrics, GlyphId};
+pub use metrics::{FaceMetrics, GlyphId, LegacyCjkClass};
 pub use registration::{
     EmbeddingPermission, FontExpectation, FontIdentity, VariationCoordinate, validate_font,
     validate_font_with_limit,

@@ -52,17 +52,31 @@ fn layout_node(
             denominator,
             bar,
         } => {
-            let numerator = layout_node(doc, numerator, size * 0.76, false, context)?;
-            let denominator = layout_node(doc, denominator, size * 0.76, false, context)?;
+            // OpenType MATH fraction geometry: display style keeps full-size
+            // components with the display shift constants; inline scales to
+            // script size with the text-style shifts (Cambria Math values).
+            let comp_scale = if context.display { 1.0 } else { 0.73 };
+            let (num_shift_em, den_shift_em) = if context.display {
+                (0.7568, 0.6689)
+            } else {
+                (0.5859, 0.5029)
+            };
+            let numerator = layout_node(doc, numerator, size * comp_scale, false, context)?;
+            let denominator = layout_node(doc, denominator, size * comp_scale, false, context)?;
             let width = numerator.width.max(denominator.width) + 4.0;
-            let line_y = numerator.height + 1.5;
-            let denominator_y = line_y + 2.5;
+            let axis = 0.2856 * size;
+            // Box baseline sits at the fraction's outer baseline; numerator
+            // baseline is `num_shift` above it, denominator `den_shift` below.
+            let ascent = (num_shift_em * size + numerator.baseline).max(axis + 1.0);
+            let line_y = ascent - axis;
+            let denominator_y = ascent + den_shift_em * size - denominator.baseline;
+            let numerator_y = (ascent - num_shift_em * size - numerator.baseline).max(0.0);
             let mut items = Vec::new();
             append(
                 &mut items,
                 numerator.items,
                 (width - numerator.width) / 2.0,
-                0.0,
+                numerator_y,
             );
             if *bar {
                 items.push(LineItem {
@@ -71,7 +85,7 @@ fn layout_node(
                     item: Item::Line {
                         dx_pt: width - 1.0,
                         dy_pt: 0.0,
-                        stroke: black_stroke(0.7),
+                        stroke: black_stroke(0.0649 * size),
                     },
                 });
             }
@@ -83,8 +97,8 @@ fn layout_node(
             );
             Ok(EquationBox {
                 width,
-                height: denominator_y + denominator.height,
-                baseline: line_y + 1.0,
+                height: (denominator_y + denominator.height).max(ascent + 1.0),
+                baseline: ascent,
                 items,
             })
         }
@@ -93,18 +107,33 @@ fn layout_node(
             subscript,
             superscript,
         } => {
+            // OpenType MATH geometry (Cambria Math constants): scripts at
+            // ScriptPercentScaleDown, superscript baseline raised by
+            // SuperscriptShiftUp, subscript dropped by SubscriptShiftDown.
+            const SCRIPT_SCALE: f64 = 0.73;
+            const SUP_SHIFT_UP_EM: f64 = 0.3662;
+            const SUB_SHIFT_DOWN_EM: f64 = 0.2041;
+            const SPACE_AFTER_SCRIPT_EM: f64 = 0.0415;
             let base = layout_node(doc, base, size, false, context)?;
             let sub = subscript
                 .as_deref()
-                .map(|node| layout_node(doc, node, size * 0.65, false, context))
+                .map(|node| layout_node(doc, node, size * SCRIPT_SCALE, false, context))
                 .transpose()?;
             let sup = superscript
                 .as_deref()
-                .map(|node| layout_node(doc, node, size * 0.65, false, context))
+                .map(|node| layout_node(doc, node, size * SCRIPT_SCALE, false, context))
                 .transpose()?;
-            let sup_height = sup.as_ref().map_or(0.0, |value| value.height * 0.8);
-            let base_y = sup_height;
-            let script_x = base.width + 0.8;
+            // Ascent of the box above the base baseline.
+            let sup_rise = sup
+                .as_ref()
+                .map_or(0.0, |s| SUP_SHIFT_UP_EM * size + s.baseline);
+            let ascent = base.baseline.max(sup_rise);
+            let base_y = ascent - base.baseline;
+            let sub_drop = sub.as_ref().map_or(0.0, |s| {
+                SUB_SHIFT_DOWN_EM * size + (s.height - s.baseline)
+            });
+            let descent = (base.height - base.baseline).max(sub_drop);
+            let script_x = base.width + 0.4;
             let script_width = sub
                 .as_ref()
                 .map_or(0.0, |value| value.width)
@@ -112,21 +141,18 @@ fn layout_node(
             let mut items = Vec::new();
             append(&mut items, base.items, 0.0, base_y);
             if let Some(sup) = sup {
-                append(&mut items, sup.items, script_x, 0.0);
+                let sup_baseline_y = ascent - SUP_SHIFT_UP_EM * size;
+                append(&mut items, sup.items, script_x, sup_baseline_y - sup.baseline);
             }
             if let Some(sub) = sub {
-                append(
-                    &mut items,
-                    sub.items,
-                    script_x,
-                    base_y + base.baseline + 1.0,
-                );
+                let sub_baseline_y = ascent + SUB_SHIFT_DOWN_EM * size;
+                append(&mut items, sub.items, script_x, sub_baseline_y - sub.baseline);
             }
-            let height = items_height(&items).max(base_y + base.height);
+            let height = items_height(&items).max(ascent + descent);
             Ok(EquationBox {
-                width: base.width + 0.8 + script_width,
+                width: base.width + 0.4 + script_width + SPACE_AFTER_SCRIPT_EM * size,
                 height,
-                baseline: base_y + base.baseline,
+                baseline: ascent,
                 items,
             })
         }
@@ -290,12 +316,58 @@ fn combine(boxes: Vec<EquationBox>) -> Result<EquationBox> {
     })
 }
 
+/// Maps a letter to its Mathematical Italic alphanumeric codepoint (the
+/// glyphs Word uses for default math-style letters). `h` is the Planck
+/// exception (U+1D455 is unassigned).
+fn math_italic_char(c: char) -> Option<char> {
+    let cp = match c {
+        'h' => 0x210E,
+        'a'..='z' => 0x1D44E + (c as u32 - 'a' as u32),
+        'A'..='Z' => 0x1D434 + (c as u32 - 'A' as u32),
+        _ => return None,
+    };
+    char::from_u32(cp)
+}
+
 fn text_box(doc: &WordDoc, text: &str, size: f64, upright: bool) -> Result<EquationBox> {
     if text.is_empty() {
         return Ok(spacer(0.0, size));
     }
-    let italic = !upright && text.chars().any(char::is_alphabetic);
-    let resolved = matching::resolve(&doc.fonts, "Cambria Math", 400, italic);
+    let wants_italic = !upright && text.chars().any(char::is_alphabetic);
+    // Word draws default math-italic letters with the math face's own
+    // Mathematical Alphanumeric glyphs (Cambria Math ships no italic
+    // variant). Map letters the upright face covers; when the resolved
+    // face has no math alphabet (e.g. the Caladea substitute), fall back
+    // to the italic-styled face with plain letters.
+    let mut resolved = matching::resolve(&doc.fonts, "Cambria Math", 400, false);
+    let mut italic = false;
+    let mut owned;
+    let mut text = text;
+    if wants_italic {
+        let mapped = resolved
+            .face
+            .and_then(|id| doc.fonts.face(id))
+            .and_then(|face| face.parsed())
+            .map(|parsed| {
+                text.chars()
+                    .map(|c| {
+                        math_italic_char(c)
+                            .filter(|mc| parsed.glyph_index(*mc).is_some())
+                            .unwrap_or(c)
+                    })
+                    .collect::<String>()
+            });
+        match mapped {
+            Some(m) if m != text => {
+                owned = m;
+                text = &owned;
+            }
+            _ => {
+                resolved = matching::resolve(&doc.fonts, "Cambria Math", 400, true);
+                italic = true;
+            }
+        }
+    }
     let face = resolved.face.ok_or_else(|| {
         crate::OfficeError::unsupported(
             crate::UnsupportedCode::MissingGlyph,

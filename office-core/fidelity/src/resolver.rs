@@ -41,6 +41,129 @@ const PAN_CJK_FONTS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Serif pan-CJK faces, fetched from the pinned `Serif2.003` release tag and
+/// verified against these hashes before use. They exist only for corpus
+/// fidelity — production hosts register the Sans faces and the engine falls
+/// back to them — so they are cached under `fonts-cache/` instead of being
+/// committed (~24 MiB each).
+const PAN_CJK_SERIF_FONTS: &[(&str, &str, &str)] = &[
+    (
+        "Noto Serif CJK SC",
+        "SimplifiedChinese/NotoSerifCJKsc-Regular.otf",
+        "2a2eae2628df83556c54018c41e20fa532c1b862c5256ae8b3f23feb918d12ca",
+    ),
+    (
+        "Noto Serif CJK TC",
+        "TraditionalChinese/NotoSerifCJKtc-Regular.otf",
+        "234301038e76e7c35c43113785024700c4e4fe7bdce1d1fbbc42fca7e6683798",
+    ),
+    (
+        "Noto Serif CJK JP",
+        "Japanese/NotoSerifCJKjp-Regular.otf",
+        "d9854c7a8ef170b5a7932558856fd64eb8de0b007cd823fed6f9f514ad2803d3",
+    ),
+    (
+        "Noto Serif CJK KR",
+        "Korean/NotoSerifCJKkr-Regular.otf",
+        "77b4b741f864d27f15e90f275b17106dde90b2ad28f82bab72dc95805db5fb42",
+    ),
+];
+
+/// Metric-compatible legacy clones fetched individually (not from the Noto
+/// serif tree). IPAexGothic mirrors MS Gothic's design — the face the CJK
+/// ground truths actually embed — where Noto Sans CJK JP only matches its
+/// class.
+const LEGACY_CJK_CLONES: &[(&str, &str, &str)] = &[
+    (
+        "IPAexGothic",
+        "cache-only",
+        "3b9955a5e437ffb24c41548e79296fa724822da21ee75dc1b94f6ccdb8f400dd",
+    ),
+    (
+        "FandolSong",
+        "cache-only",
+        "a3820003227d4abe31fe28b493200d94a849ccfd078b50a019264f70353020b0",
+    ),
+];
+
+const PAN_CJK_SERIF_BASE: &str =
+    "https://raw.githubusercontent.com/notofonts/noto-cjk/Serif2.003/Serif/OTF/";
+const MAX_PAN_CJK_FONT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Word for Mac's bundled legacy East Asian fonts — the exact faces the CJK
+/// ground truths were rendered with. Loaded straight from the local Office
+/// installation when present (never fetched, never committed); without
+/// Office the substitution chain (FandolSong, IPAexGothic, Noto CJK) takes
+/// over. Each `.ttc` registers every face it contains.
+const LOCAL_LEGACY_FONT_DIR: &str = "/Applications/Microsoft Word.app/Contents/Resources/DFonts";
+const LOCAL_LEGACY_FONTS: &[(&[&str], &[&str])] = &[
+    (&["Simsun.ttc"], &["SimSun", "NSimSun", "宋体", "新宋体"]),
+    (
+        &["msmincho.ttc"],
+        &["MS Mincho", "MS PMincho", "ＭＳ 明朝", "ＭＳ Ｐ明朝"],
+    ),
+    (
+        &["msgothic.ttc"],
+        &[
+            "MS Gothic",
+            "MS PGothic",
+            "MS UI Gothic",
+            "ＭＳ ゴシック",
+            "ＭＳ Ｐゴシック",
+        ],
+    ),
+    (&["mingliu.ttc"], &["MingLiU", "PMingLiU", "細明體", "新細明體"]),
+    (
+        &["batang.ttc"],
+        &[
+            "Batang",
+            "BatangChe",
+            "Gungsuh",
+            "GungsuhChe",
+            "바탕",
+            "바탕체",
+            "궁서",
+        ],
+    ),
+    (
+        &["gulim.ttc"],
+        &[
+            "Gulim", "GulimChe", "Dotum", "DotumChe", "굴림", "굴림체", "돋움", "돋움체",
+        ],
+    ),
+    (
+        &["Cambria.ttc", "Cambriab.ttf", "Cambriai.ttf", "Cambriaz.ttf"],
+        &["Cambria", "Cambria Math"],
+    ),
+    (
+        &["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"],
+        &["Arial"],
+    ),
+    (
+        &[
+            "Calibri.ttf",
+            "Calibrib.ttf",
+            "Calibrii.ttf",
+            "calibril.ttf",
+            "calibrili.ttf",
+            "Calibriz.ttf",
+        ],
+        &["Calibri", "Calibri Light"],
+    ),
+    (&["Century.ttf"], &["Century"]),
+    (
+        &["malgun.ttf", "malgunbd.ttf", "malgunsl.ttf"],
+        &["Malgun Gothic", "Malgun Gothic Semilight", "맑은 고딕"],
+    ),
+    (
+        &["times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf"],
+        &["Times New Roman"],
+    ),
+    (&["SimHei.ttf"], &["SimHei", "黑体"]),
+    (&["Kaiti.ttf"], &["KaiTi", "楷体"]),
+    (&["Fangsong.ttf"], &["FangSong", "仿宋"]),
+];
+
 const ALIASES: &[(&str, &str)] = &[
     ("arial", "arimo"),
     ("arimo", "arimo"),
@@ -235,9 +358,62 @@ pub(crate) fn resolve_for_case(
         |url| fetcher.fetch(url),
     )?;
     resolved.families.extend(satisfied_families);
-    attach_pan_cjk_faces(case_name, &requests, &mut resolved)?;
+    attach_local_legacy_faces(&requests, &mut resolved)?;
+    attach_pan_cjk_faces(case_name, &requests, &mut resolved, &fetcher)?;
     resolved.demanded_families = resolved.families.clone();
     Ok(resolved)
+}
+
+/// Registers the machine's real legacy East Asian fonts for every request
+/// they satisfy. The pan-CJK substitutes still attach afterwards: exact
+/// family resolution prefers the real face, while the Noto faces stay
+/// registered as the wide-coverage fallback net.
+fn attach_local_legacy_faces(
+    requests: &[FontRequest],
+    resolved: &mut ResolvedFonts,
+) -> Result<()> {
+    let dir = Path::new(LOCAL_LEGACY_FONT_DIR);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut loaded_files: BTreeSet<&str> = BTreeSet::new();
+    for request in requests {
+        for name in std::iter::once(request.family.as_str())
+            .chain(request.alt_families.iter().map(String::as_str))
+        {
+            let key = office_core::fonts::family_key(name);
+            let Some((files, families)) = LOCAL_LEGACY_FONTS.iter().find(|(_, families)| {
+                families
+                    .iter()
+                    .any(|family| office_core::fonts::family_key(family) == key)
+            }) else {
+                continue;
+            };
+            let mut any = false;
+            for file in *files {
+                let path = dir.join(file);
+                if !path.is_file() || !loaded_files.insert(file) {
+                    any = any || path.is_file();
+                    continue;
+                }
+                let bytes = fs::read(&path)
+                    .with_context(|| format!("read local legacy font {}", path.display()))?;
+                office_core::fonts::validate_font(&bytes, None)
+                    .with_context(|| format!("validate local legacy font {}", path.display()))?;
+                let pin = sha256_hex(&bytes);
+                resolved.options.font_bytes.push(bytes);
+                resolved.options.font_hash_pins.push(pin);
+                any = true;
+            }
+            if any {
+                for family in families.iter().filter(|family| family.is_ascii()) {
+                    resolved.families.insert((*family).to_string());
+                }
+            }
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Provisions the repo-committed pan-CJK OTFs for every request whose
@@ -247,6 +423,7 @@ fn attach_pan_cjk_faces(
     case_name: &str,
     requests: &[FontRequest],
     resolved: &mut ResolvedFonts,
+    fetcher: &HttpFetcher,
 ) -> Result<()> {
     let mut targets = BTreeSet::new();
     for request in requests {
@@ -255,31 +432,62 @@ fn attach_pan_cjk_faces(
         }
     }
     for target in targets {
-        let (family, file, pinned) = PAN_CJK_FONTS
+        let (family, bytes, pinned) = if let Some((family, file, pinned)) = PAN_CJK_FONTS
             .iter()
             .find(|(family, _, _)| *family == target)
-            .with_context(|| {
-                format!("case {case_name} needs {target} but no pan-CJK OTF is committed for it")
-            })?;
-        if resolved
-            .options
-            .font_hash_pins
-            .iter()
-            .any(|hash| hash.eq_ignore_ascii_case(pinned))
         {
-            resolved.families.insert((*family).to_string());
-            continue;
-        }
-        let path = pan_cjk_dir().join(file);
-        let bytes = fs::read(&path)
-            .with_context(|| format!("read committed pan-CJK font {}", path.display()))?;
-        let actual = sha256_hex(&bytes);
-        if actual != *pinned {
+            if pin_already_attached(resolved, pinned) {
+                resolved.families.insert((*family).to_string());
+                continue;
+            }
+            let path = pan_cjk_dir().join(file);
+            let bytes = fs::read(&path)
+                .with_context(|| format!("read committed pan-CJK font {}", path.display()))?;
+            let actual = sha256_hex(&bytes);
+            if actual != *pinned {
+                anyhow::bail!(
+                    "committed pan-CJK font {} hash mismatch: expected {pinned}, found {actual}; update PAN_CJK_FONTS together with the font",
+                    path.display()
+                );
+            }
+            (family, bytes, pinned)
+        } else if let Some((family, file, pinned)) = PAN_CJK_SERIF_FONTS
+            .iter()
+            .find(|(family, _, _)| *family == target)
+        {
+            if pin_already_attached(resolved, pinned) {
+                resolved.families.insert((*family).to_string());
+                continue;
+            }
+            let bytes = fetch_pinned_serif_face(fetcher, file, pinned)?;
+            (family, bytes, pinned)
+        } else if let Some((family, _, pinned)) = LEGACY_CJK_CLONES
+            .iter()
+            .find(|(family, _, _)| *family == target)
+        {
+            if pin_already_attached(resolved, pinned) {
+                resolved.families.insert((*family).to_string());
+                continue;
+            }
+            let cache_path = cache_dir().join(format!("{pinned}.ttf"));
+            let bytes = fs::read(&cache_path).with_context(|| {
+                format!(
+                    "legacy CJK clone {family} must be seeded at {} (hash {pinned})",
+                    cache_path.display()
+                )
+            })?;
+            let actual = sha256_hex(&bytes);
+            if actual != *pinned {
+                anyhow::bail!(
+                    "legacy CJK clone {family} cache hash mismatch: expected {pinned}, found {actual}"
+                );
+            }
+            (family, bytes, pinned)
+        } else {
             anyhow::bail!(
-                "committed pan-CJK font {} hash mismatch: expected {pinned}, found {actual}; update PAN_CJK_FONTS together with the font",
-                path.display()
+                "case {case_name} needs {target} but no pan-CJK OTF is provisioned for it"
             );
-        }
+        };
         let expectation = FontExpectation {
             family: (*family).to_string(),
             weight: 400,
@@ -289,12 +497,48 @@ fn attach_pan_cjk_faces(
             ..FontExpectation::default()
         };
         office_core::fonts::validate_font(&bytes, Some(&expectation))
-            .with_context(|| format!("validate committed pan-CJK font {}", path.display()))?;
+            .with_context(|| format!("validate pan-CJK font {family}"))?;
         resolved.options.font_bytes.push(bytes);
         resolved.options.font_hash_pins.push((*pinned).to_string());
         resolved.families.insert((*family).to_string());
     }
     Ok(())
+}
+
+fn pin_already_attached(resolved: &ResolvedFonts, pinned: &str) -> bool {
+    resolved
+        .options
+        .font_hash_pins
+        .iter()
+        .any(|hash| hash.eq_ignore_ascii_case(pinned))
+}
+
+/// Returns a serif pan-CJK OTF from `fonts-cache/`, fetching it from the
+/// pinned notofonts release on first use. The cache key is the pinned hash,
+/// so a stale or tampered cache entry re-fetches instead of failing the run.
+fn fetch_pinned_serif_face(fetcher: &HttpFetcher, file: &str, pinned: &str) -> Result<Vec<u8>> {
+    let cache_dir = cache_dir();
+    let cache_path = cache_dir.join(format!("{pinned}.ttf"));
+    if let Ok(bytes) = fs::read(&cache_path)
+        && sha256_hex(&bytes) == pinned
+    {
+        return Ok(bytes);
+    }
+    let url = format!("{PAN_CJK_SERIF_BASE}{file}");
+    let bytes = fetcher
+        .fetch_with_limit(&url, MAX_PAN_CJK_FONT_BYTES)
+        .with_context(|| format!("fetch serif pan-CJK font {url}"))?;
+    let actual = sha256_hex(&bytes);
+    if actual != pinned {
+        anyhow::bail!(
+            "serif pan-CJK font {url} hash mismatch: expected {pinned}, found {actual}; update PAN_CJK_SERIF_FONTS together with the pinned tag"
+        );
+    }
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("create fidelity font cache {}", cache_dir.display()))?;
+    fs::write(&cache_path, &bytes)
+        .with_context(|| format!("seed fidelity cache for {url}"))?;
+    Ok(bytes)
 }
 
 fn pan_cjk_dir() -> std::path::PathBuf {
@@ -396,6 +640,10 @@ impl HttpFetcher {
     }
 
     fn fetch(&self, url: &str) -> Result<Vec<u8>> {
+        self.fetch_with_limit(url, MAX_FONT_BYTES)
+    }
+
+    fn fetch_with_limit(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
         if !url.starts_with("https://") {
             anyhow::bail!("fidelity font URL must use HTTPS: {url}");
         }
@@ -408,18 +656,18 @@ impl HttpFetcher {
             .with_context(|| format!("GET {url}"))?;
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_FONT_BYTES)
+            .is_some_and(|length| length > limit)
         {
-            anyhow::bail!("font response exceeds {MAX_FONT_BYTES} bytes: {url}");
+            anyhow::bail!("font response exceeds {limit} bytes: {url}");
         }
         let mut bytes = Vec::new();
         response
             .by_ref()
-            .take(MAX_FONT_BYTES + 1)
+            .take(limit + 1)
             .read_to_end(&mut bytes)
             .with_context(|| format!("read {url}"))?;
-        if bytes.len() as u64 > MAX_FONT_BYTES {
-            anyhow::bail!("font response exceeds {MAX_FONT_BYTES} bytes: {url}");
+        if bytes.len() as u64 > limit {
+            anyhow::bail!("font response exceeds {limit} bytes: {url}");
         }
         Ok(bytes)
     }

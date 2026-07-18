@@ -53,8 +53,19 @@ impl Face {
     /// legacy CJK line convention so substituted documents keep Word's
     /// pagination (see [`super::matching::legacy_cjk_line_metrics_em`]).
     pub fn line_metrics(&self) -> Option<super::FaceMetrics<'_>> {
-        let metrics = self.parsed().map(super::FaceMetrics::new)?;
+        let mut metrics = self.parsed().map(super::FaceMetrics::new)?;
+        if let Some(class) = super::matching::legacy_cjk_class(&self.family_name) {
+            metrics = metrics.with_legacy_class(class);
+        }
         Some(if super::matching::pan_cjk_face(&self.family_name) {
+            let (ascent, descent, line_gap) =
+                super::matching::legacy_cjk_line_metrics_em(&self.family_name);
+            metrics.with_line_metrics_em(ascent, descent, line_gap)
+        } else if super::matching::legacy_cjk_centered_family(&self.family_name) {
+            // Word sizes classic East Asian faces by its fixed 1.3em FE line
+            // factor (growth centered on the 1.0em win body), not by the
+            // font's own hhea gap — Batang carries a ~0.42em gap that Word
+            // visibly does not honor. Same convention as the substitutes.
             let (ascent, descent, line_gap) =
                 super::matching::legacy_cjk_line_metrics_em(&self.family_name);
             metrics.with_line_metrics_em(ascent, descent, line_gap)

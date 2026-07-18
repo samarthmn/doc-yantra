@@ -1902,7 +1902,10 @@ fn display_math_alignment(para: &Paragraph) -> Option<Jc> {
     for inline in &para.runs {
         match inline {
             InlineContent::Math(math) => {
-                if math.display && math.justification.is_some() {
+                if math.display {
+                    // An absent m:jc means Word's centerGroup default, so the
+                    // equation centers even though the paragraph itself does
+                    // not (`math_paragraph_alignment` maps None to center).
                     authored.get_or_insert(crate::oxml::wml::math_paragraph_alignment(math));
                 } else {
                     return None;

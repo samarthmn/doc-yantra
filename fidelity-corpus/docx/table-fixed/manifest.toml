@@ -1,7 +1,7 @@
 title = "Fixed-layout table with borders"
 tier = "core"
 ssim_threshold = 0.95
-expected_fonts = ["Carlito"]
+expected_fonts = ["Calibri"]
 max_page_count_delta = 0
 word_version = "Microsoft Word 2021"
 ground_truth_exported_at = "2026-07-09"
