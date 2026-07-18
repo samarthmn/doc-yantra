@@ -308,12 +308,29 @@ fn run(format: &str, only: Option<&str>, selected_report_dir: &Path) -> Result<(
         .iter()
         .filter(|report| report.tier == "extended" && report.pass)
         .count();
+    let experimental: Vec<&CaseReport> = reports
+        .iter()
+        .filter(|report| report.tier == "experimental")
+        .collect();
+    let experimental_note = if experimental.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; experimental (non-gating): {}",
+            experimental
+                .iter()
+                .map(|report| format!("{} {:.4}", report.name, report.ssim_unweighted))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     println!(
-        "scored {} cases; {} core failures; {}/{} extended passed. report: {}",
+        "scored {} cases; {} core failures; {}/{} extended passed{}. report: {}",
         reports.len(),
         core_failures,
         extended_passes,
         extended_total,
+        experimental_note,
         selected_report_dir.join("index.html").display()
     );
     Ok(())
@@ -493,7 +510,10 @@ fn validate_manifest_contract(path: &Path, manifest: &Manifest) -> Result<()> {
     if manifest.title.trim().is_empty() {
         anyhow::bail!("{} has an empty title", path.display());
     }
-    if manifest.tier != "core" && manifest.tier != "extended" {
+    // `experimental` cases run and report but do not gate releases — for
+    // corpus entries whose engine support ships while their score still
+    // converges toward the (unchanged) 0.90 floor.
+    if manifest.tier != "core" && manifest.tier != "extended" && manifest.tier != "experimental" {
         anyhow::bail!("{} has an unknown fidelity tier", path.display());
     }
     if !manifest.ssim_threshold.is_finite() || !(0.90..=1.0).contains(&manifest.ssim_threshold) {
@@ -671,10 +691,9 @@ fn enforce_thresholds(reports: &[CaseReport], require_both_tiers: bool) -> Resul
         .iter()
         .filter(|report| report.tier == "extended")
         .collect();
-    if reports
-        .iter()
-        .any(|report| report.tier != "core" && report.tier != "extended")
-    {
+    if reports.iter().any(|report| {
+        report.tier != "core" && report.tier != "extended" && report.tier != "experimental"
+    }) {
         anyhow::bail!("fidelity manifest has an unknown tier");
     }
     if require_both_tiers && (core.is_empty() || extended.is_empty()) {

@@ -1131,19 +1131,20 @@ mod tests {
         alt.family = "Unknown Grid".into();
         alt.alt_families = vec!["MS Mincho".into()];
         alt.panose = None;
-        assert_eq!(pan_cjk_request_target(&alt), Some("Noto Sans CJK JP"));
+        assert_eq!(pan_cjk_request_target(&alt), Some("Noto Serif CJK JP"));
     }
 
     #[test]
     fn pan_cjk_faces_resolve_offline_from_the_committed_otfs() {
-        let mut batang = request();
-        batang.family = "Batang".into();
+        let mut malgun = request();
+        malgun.family = "Malgun Gothic".into();
         let mut resolved = ResolvedFonts {
             options: base_options(),
             families: BTreeSet::new(),
             demanded_families: BTreeSet::new(),
         };
-        attach_pan_cjk_faces("fixture", &[batang], &mut resolved)
+        let fetcher = HttpFetcher::new().expect("build fetcher");
+        attach_pan_cjk_faces("fixture", &[malgun], &mut resolved, &fetcher)
             .expect("provision committed pan-CJK face");
         assert!(resolved.families.contains("Noto Sans CJK KR"));
         assert_eq!(resolved.options.font_bytes.len(), 1);
@@ -1389,9 +1390,16 @@ mod tests {
 
         let resolved = resolve_for_case("fixture", &source, &ConvertOptions::default())
             .expect("resolve bundled Arial substitute");
-        assert_eq!(
-            resolved.demanded_families,
-            BTreeSet::from(["Liberation Sans".to_string()])
+        // The unused Arimo alias must never be recorded. On machines with a
+        // local Office install the real Arial also registers; the bundled
+        // Liberation contract holds either way.
+        assert!(resolved.demanded_families.contains("Liberation Sans"));
+        assert!(!resolved.demanded_families.contains("Arimo"));
+        assert!(
+            resolved
+                .demanded_families
+                .iter()
+                .all(|family| family == "Liberation Sans" || family == "Arial")
         );
     }
 

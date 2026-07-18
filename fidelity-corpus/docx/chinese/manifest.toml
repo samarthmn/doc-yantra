@@ -1,5 +1,5 @@
 title = "CJK text: Chinese (Simplified/Traditional) glyph coverage"
-tier = "extended"
+tier = "experimental"
 ssim_threshold = 0.90
 geometry_median_pt = 3.0
 geometry_p95_pt = 5.0

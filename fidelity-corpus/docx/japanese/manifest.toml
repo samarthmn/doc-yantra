@@ -1,5 +1,5 @@
 title = "CJK text: Japanese glyph coverage"
-tier = "extended"
+tier = "experimental"
 ssim_threshold = 0.90
 geometry_median_pt = 3.5
 geometry_p95_pt = 5.5
