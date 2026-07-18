@@ -15,6 +15,10 @@ pub struct Settings {
     pub auto_hyphenation: bool,
     /// Compatibility mode (`w:compatSetting` `compatibilityMode`; default 15).
     pub compat_mode: u8,
+    /// Whether the file carries Word's revision-save-id table (`w:rsids`) —
+    /// a reliable marker that Word itself authored/saved the document, and
+    /// therefore that AutoFit results were written back into `tblGrid`.
+    pub word_authored: bool,
     /// `w:themeFontLang/@w:eastAsia`: selects the theme's East Asian script
     /// face (see [`super::theme::Theme::east_asia_lang`]).
     pub theme_font_lang_east_asia: Option<String>,
@@ -29,6 +33,7 @@ impl Default for Settings {
             even_and_odd_headers: false,
             auto_hyphenation: false,
             compat_mode: 15,
+            word_authored: false,
             theme_font_lang_east_asia: None,
             visible_unsupported: Vec::new(),
         }
@@ -67,6 +72,7 @@ impl Settings {
                         attr(c, W, "eastAsia").map(str::to_string)
                 }
                 "autoHyphenation" => settings.auto_hyphenation = toggle(c),
+                "rsids" => settings.word_authored = true,
                 "compat" => {
                     for cs in children(c) {
                         if super::is(cs, W, "compatSetting")

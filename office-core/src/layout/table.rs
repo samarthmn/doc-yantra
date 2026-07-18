@@ -718,6 +718,19 @@ fn resolve_columns(
     note_sequence: Option<&NoteSequence>,
 ) -> Result<Vec<f64>> {
     if should_autofit(table) {
+        // Word runs content AutoFit and writes the result back into
+        // `tblGrid`, so in a Word-authored file (rsids present) a grid that
+        // spans every column IS the rendered layout. Other producers
+        // (converters, generators) store speculative grids, so intrinsic
+        // measurement stays authoritative for them.
+        let columns = table_column_count(table);
+        if doc.settings.word_authored
+            && columns > 0
+            && table.grid.len() == columns
+            && table.grid.iter().all(|w| *w > 0.0)
+        {
+            return Ok(resolve_stored_columns(table, avail));
+        }
         return autofit_columns(doc, warnings, table, rels, avail, note_sequence);
     }
     Ok(resolve_stored_columns(table, avail))

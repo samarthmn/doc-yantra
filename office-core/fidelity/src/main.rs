@@ -63,6 +63,9 @@ enum Cmd {
         /// Optional JSON report path.
         #[arg(long)]
         json: Option<PathBuf>,
+        /// Write our converted PDF here for stream-level inspection.
+        #[arg(long = "dump-pdf")]
+        dump_pdf: Option<PathBuf>,
         /// Additional runtime font directory (repeatable).
         #[arg(long = "font-dir")]
         font_dirs: Vec<PathBuf>,
@@ -139,12 +142,14 @@ fn main() -> Result<()> {
             diag,
             page,
             json,
+            dump_pdf,
             font_dirs,
         } => run_probe(
             case.as_deref(),
             diag.as_deref(),
             page,
             json.as_deref(),
+            dump_pdf.as_deref(),
             &font_dirs,
         )?,
         Cmd::Run {
@@ -164,6 +169,7 @@ fn run_probe(
     diag: Option<&str>,
     page: u32,
     json_path: Option<&Path>,
+    dump_pdf: Option<&Path>,
     font_dirs: &[PathBuf],
 ) -> Result<()> {
     let directory = match (case, diag) {
@@ -187,6 +193,9 @@ fn run_probe(
     let resolved = resolver::resolve_for_case(name, &source, &base_options)?;
     let ours = convert(&source, OfficeFormat::Docx, &resolved.options)
         .with_context(|| format!("convert probe source {}", source_path.display()))?;
+    if let Some(path) = dump_pdf {
+        std::fs::write(path, &ours.pdf).context("write dumped probe PDF")?;
+    }
     let report = probe::compare_page(&ours.pdf, &truth, page)?;
     probe::print_report(&report);
     if let Some(path) = json_path {

@@ -144,7 +144,9 @@ impl<'a> FaceMetrics<'a> {
     }
 
     /// Baseline offset inside a Word line box. Word places the hhea line gap
-    /// above the glyph ascent rather than leaving it below the descent.
+    /// above the glyph ascent rather than leaving it below the descent
+    /// (A/B-verified against the Ubuntu and Arial ground-truth pages; the
+    /// gap-below reading regresses both).
     pub fn line_box_ascent_pt(&self, size_pt: f64) -> f64 {
         if let Some((asc, _)) = self
             .legacy_class

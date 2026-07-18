@@ -605,12 +605,15 @@ pub fn legacy_cjk_class(family: &str) -> Option<crate::fonts::LegacyCjkClass> {
 /// SimSun-class 1.30em faces, measured as a ~1.316em line with a lower
 /// baseline share.
 pub fn legacy_cjk_line_metrics_em(family: &str) -> (f64, f64, f64) {
+    // Encoded under the GDI convention (baseline at plain ascent, gap
+    // below): identical box ascents and totals as the earlier gap-above
+    // tuples they replace.
     matches!(
         family_key(family).as_str(),
         "noto sans cjk tc" | "noto serif cjk tc"
     )
-    .then_some((0.859375, 0.215, 0.2412))
-    .unwrap_or((0.859375, 0.290625, 0.15))
+    .then_some((1.1006, 0.215, 0.0))
+    .unwrap_or((1.009375, 0.290625, 0.0))
 }
 
 /// The family-class fallback for an unknown family, by name heuristic.

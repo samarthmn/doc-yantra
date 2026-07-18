@@ -257,7 +257,7 @@ pub fn build_label(
         let metrics = if hangul {
             font.parsed()
                 .map(crate::fonts::FaceMetrics::new)
-                .map(|metrics| metrics.with_line_metrics_em(0.859375, 0.140625, 0.38))
+                .map(|metrics| metrics.with_line_metrics_em(1.239375, 0.140625, 0.0))
         } else {
             font.line_metrics()
         };
