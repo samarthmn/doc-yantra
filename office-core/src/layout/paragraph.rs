@@ -8,6 +8,10 @@ use super::numbering_layout::{self, PlacedLabel};
 use super::{
     Decor, GlyphRun, ImageId, Item, LinkTarget, PlacedGlyph, SemanticCluster, SemanticRun, Stroke,
 };
+#[cfg(feature = "fidelity-diagnostics")]
+use crate::diagnostics::{
+    IndentTrace, InkBoundsTrace, LineTraceDraft, ParagraphPropertyTrace, tab_traces,
+};
 use crate::fonts::{FaceId, FontDb, FontSlot, matching};
 use crate::oxml::numbering::LabelJustification;
 use crate::oxml::numbering::LevelSuffix;
@@ -287,6 +291,8 @@ pub struct Line {
     /// on the ink bottom, letting this trailing leading overflow the
     /// content bottom for the last line of a page.
     pub bottom_slack_pt: f64,
+    #[cfg(feature = "fidelity-diagnostics")]
+    pub(crate) diagnostics: LineTraceDraft,
 }
 
 /// An item within a [`Line`], positioned relative to the line's top-left.
@@ -755,6 +761,41 @@ fn layout_paragraph_with_wrap_context(
             .partial_cmp(&b.pos_pt)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    #[cfg(feature = "fidelity-diagnostics")]
+    let diagnostic_paragraph = {
+        let style_props = para
+            .props
+            .style_id
+            .as_deref()
+            .map(|id| doc.styles.diagnostic_style_para_props(id))
+            .unwrap_or_default();
+        let numbering = eff_para.numbering;
+        let numbering_level =
+            numbering.and_then(|numbering| doc.numbering.resolve(numbering.num_id, numbering.ilvl));
+        ParagraphPropertyTrace {
+            style_id: para.props.style_id.clone(),
+            numbering: numbering.map(Into::into),
+            direct_indent: IndentTrace::from(&para.props.indent),
+            style_indent: IndentTrace::from(&style_props.indent),
+            numbering_indent: numbering_level
+                .as_ref()
+                .map(|level| IndentTrace::from(&level.indent))
+                .unwrap_or_default(),
+            effective_indent: IndentTrace {
+                left_pt: Some(left),
+                right_pt: Some(right_indent),
+                first_line_pt: Some(first_line),
+                hanging_pt: Some(hanging),
+            },
+            direct_tabs: tab_traces(&para.props.tabs),
+            style_tabs: tab_traces(&style_props.tabs),
+            numbering_tabs: numbering_level
+                .as_ref()
+                .map(|level| tab_traces(&level.diagnostic_tabs))
+                .unwrap_or_default(),
+            effective_tabs: tab_traces(&tab_stops),
+        }
+    };
 
     let nominal_natural_height = atoms
         .iter()
@@ -1026,7 +1067,18 @@ fn layout_paragraph_with_wrap_context(
             page_break_after: false,
             column_break_after: false,
             bottom_slack_pt: line_spacing_bottom_slack(line_spacing, height_pt, h),
+            #[cfg(feature = "fidelity-diagnostics")]
+            diagnostics: LineTraceDraft {
+                ascent_pt: height_pt * 0.8,
+                descent_pt: height_pt * 0.2,
+                ..LineTraceDraft::default()
+            },
         });
+    }
+
+    #[cfg(feature = "fidelity-diagnostics")]
+    for line in &mut lines {
+        line.diagnostics.paragraph = diagnostic_paragraph.clone();
     }
 
     // A paragraph-relative drawing is anchored to the paragraph, not the
@@ -1254,6 +1306,22 @@ fn prepend_line_clearance(lines: &mut [Line], clearance_pt: f64) {
             item.y_pt += clearance_pt;
         }
         first.height_pt += clearance_pt;
+        #[cfg(feature = "fidelity-diagnostics")]
+        shift_line_diagnostics(first, clearance_pt);
+    }
+}
+
+#[cfg(feature = "fidelity-diagnostics")]
+fn shift_line_diagnostics(line: &mut Line, offset_pt: f64) {
+    line.diagnostics.ascent_pt += offset_pt;
+    for bounds in line
+        .diagnostics
+        .object_ink_bounds
+        .iter_mut()
+        .chain(line.diagnostics.math_ink_bounds.iter_mut())
+    {
+        bounds.y0_pt += offset_pt;
+        bounds.y1_pt += offset_pt;
     }
 }
 
@@ -1287,6 +1355,8 @@ fn apply_top_bottom_band(lines: &mut [Line], top_pt: f64, bottom_pt: f64) {
                 link.y_pt += clearance;
             }
             lines[0].height_pt += clearance;
+            #[cfg(feature = "fidelity-diagnostics")]
+            shift_line_diagnostics(&mut lines[0], clearance);
         } else {
             lines[index - 1].height_pt += clearance;
         }
@@ -2660,6 +2730,10 @@ fn place_line(
     };
 
     let mut items: Vec<LineItem> = Vec::new();
+    #[cfg(feature = "fidelity-diagnostics")]
+    let mut object_ink_bounds = Vec::new();
+    #[cfg(feature = "fidelity-diagnostics")]
+    let mut math_ink_bounds = Vec::new();
     // Semantic text represents complex visible glyphs in logical source order.
     // Prefer it on an equal source key so a complex cluster at the start of a
     // same-style glyph run is exposed before later directly mapped characters.
@@ -2894,14 +2968,22 @@ fn place_line(
                     &mut items,
                     &mut internal_links,
                 );
+                let image_y = (ascent - h_pt).max(0.0);
                 items.push(LineItem {
                     x_pt: x,
-                    y_pt: (ascent - h_pt).max(0.0),
+                    y_pt: image_y,
                     item: Item::Image {
                         w_pt: *w_pt,
                         h_pt: *h_pt,
                         image_id: *image_id,
                     },
+                });
+                #[cfg(feature = "fidelity-diagnostics")]
+                object_ink_bounds.push(InkBoundsTrace {
+                    x0_pt: x,
+                    y0_pt: image_y,
+                    x1_pt: x + w_pt,
+                    y1_pt: image_y + h_pt,
                 });
                 x += w_pt;
             }
@@ -2943,6 +3025,20 @@ fn place_line(
                         x,
                         (ascent - baseline_pt.unwrap_or(*h_pt).clamp(0.0, *h_pt)).max(0.0),
                     ));
+                #[cfg(feature = "fidelity-diagnostics")]
+                {
+                    let bounds = InkBoundsTrace {
+                        x0_pt: origin_x,
+                        y0_pt: origin_y,
+                        x1_pt: origin_x + w_pt,
+                        y1_pt: origin_y + h_pt,
+                    };
+                    if baseline_pt.is_some() {
+                        math_ink_bounds.push(bounds);
+                    } else {
+                        object_ink_bounds.push(bounds);
+                    }
+                }
                 if let Some(position) = anchor
                     && position.relative_from_v == AnchorOrigin::Paragraph
                 {
@@ -3032,6 +3128,14 @@ fn place_line(
         page_break_after,
         column_break_after,
         bottom_slack_pt: line_spacing_bottom_slack(line_spacing, height, natural_h),
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: LineTraceDraft {
+            paragraph: ParagraphPropertyTrace::default(),
+            ascent_pt: ascent,
+            descent_pt: (height - ascent).max(0.0),
+            object_ink_bounds,
+            math_ink_bounds,
+        },
     })
 }
 

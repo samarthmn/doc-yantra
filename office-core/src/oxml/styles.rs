@@ -328,6 +328,11 @@ impl StyleResolver {
         acc
     }
 
+    #[cfg(feature = "fidelity-diagnostics")]
+    pub(crate) fn diagnostic_style_para_props(&self, id: &str) -> ParaProps {
+        self.resolved_style_ppr(id)
+    }
+
     /// Returns the `basedOn` chain for `id`, leaf-first, cycle-safe.
     fn chain(&self, id: &str) -> Vec<&Style> {
         let mut out = Vec::new();

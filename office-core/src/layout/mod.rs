@@ -29,6 +29,9 @@ pub struct LaidOutDocument {
     pub outline: Vec<OutlineEntry>,
     /// `(created, modified)` PDF date strings for deterministic metadata.
     pub dates: DocDates,
+    /// Feature-gated per-line fidelity trace.
+    #[cfg(feature = "fidelity-diagnostics")]
+    pub diagnostics: crate::diagnostics::LayoutTrace,
 }
 
 /// PDF date strings (`D:YYYYMMDDHHmmSSZ`) for `CreationDate`/`ModDate`.

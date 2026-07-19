@@ -4,15 +4,18 @@
 //! Ground-truth PDFs are produced by a human. `run` is strict: every selected
 //! case needs a source, manifest, ground truth, and recorded Word provenance.
 
+mod advance_probe;
 mod corpus;
+mod font_raster_probe;
 mod fonts;
+mod image_probe;
 mod probe;
 mod resolver;
 mod ssim;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use fidelity::evidence::{is_sha256, verify_sha256};
+use clap::{Args, Parser, Subcommand};
+use fidelity::evidence::{is_sha256, sha256_hex, verify_sha256};
 use office_core::{ConvertOptions, OfficeFormat, convert};
 use pdf_core::raster::{RenderOptions, render_page};
 use serde::{Deserialize, Serialize};
@@ -24,6 +27,16 @@ fn corpus_root() -> PathBuf {
 }
 fn report_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tmp/fidelity-report")
+}
+
+const SCORING_RASTER_CONFIG: &[u8] = b"pdfium-render=0.9.2;render_page;target_width_px=none;scale=2.0;format=png;page_aggregation=min;ssim_source=";
+
+fn scoring_raster_config_sha256() -> String {
+    let mut fingerprinted =
+        Vec::with_capacity(SCORING_RASTER_CONFIG.len() + include_bytes!("ssim.rs").len());
+    fingerprinted.extend_from_slice(SCORING_RASTER_CONFIG);
+    fingerprinted.extend_from_slice(include_bytes!("ssim.rs"));
+    sha256_hex(&fingerprinted)
 }
 
 #[derive(Parser)]
@@ -70,8 +83,45 @@ enum Cmd {
         #[arg(long = "font-dir")]
         font_dirs: Vec<PathBuf>,
     },
+    /// Compare exact per-glyph advances and cumulative text-show endpoints.
+    AdvanceProbe {
+        #[command(flatten)]
+        pdfs: PdfPairArgs,
+    },
+    /// Compare already-positioned glyph rasters with the official scorer.
+    FontRasterProbe {
+        #[command(flatten)]
+        pdfs: PdfPairArgs,
+        /// Optional pixel crop: x y width height.
+        #[arg(long, num_args = 4)]
+        crop: Option<Vec<u32>>,
+    },
+    /// Extract image XObjects and report their placement/codec metadata.
+    ImageProbe {
+        #[command(flatten)]
+        pdfs: PdfPairArgs,
+        /// Optional directory for exact encoded XObject byte streams.
+        #[arg(long)]
+        extract_dir: Option<PathBuf>,
+    },
     /// List corpus cases lacking a `ground-truth.pdf`.
     MissingGroundTruth,
+}
+
+#[derive(Args)]
+struct PdfPairArgs {
+    /// Candidate PDF produced by office-core or another controlled emitter.
+    #[arg(long)]
+    ours_pdf: PathBuf,
+    /// Word/reference PDF used for diagnostic comparison.
+    #[arg(long)]
+    truth_pdf: PathBuf,
+    /// One-based page number.
+    #[arg(long)]
+    page: u32,
+    /// Optional JSON report path.
+    #[arg(long)]
+    json: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -122,11 +172,29 @@ struct CaseReport {
     truth_fonts: Vec<String>,
     our_pages: u32,
     truth_pages: u32,
+    truth_pdf_sha256: String,
+    scoring_raster_config_sha256: String,
+    pages: Vec<PageReport>,
+    layout_trace: Option<serde_json::Value>,
     geometry_limits: probe::GeometryLimits,
     geometry: Vec<probe::GeometryPageMetrics>,
     geometry_pass: bool,
     pass: bool,
     note: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PageReport {
+    page: u32,
+    ssim: f64,
+    ssim_unweighted: f64,
+    diff_pct: f64,
+    ours_pixel_width: u32,
+    ours_pixel_height: u32,
+    truth_pixel_width: u32,
+    truth_pixel_height: u32,
+    our_pdf_pages: u32,
+    truth_pdf_pages: u32,
 }
 
 fn main() -> Result<()> {
@@ -152,6 +220,9 @@ fn main() -> Result<()> {
             dump_pdf.as_deref(),
             &font_dirs,
         )?,
+        Cmd::AdvanceProbe { pdfs } => run_advance_probe(&pdfs)?,
+        Cmd::FontRasterProbe { pdfs, crop } => run_font_raster_probe(&pdfs, crop.as_deref())?,
+        Cmd::ImageProbe { pdfs, extract_dir } => run_image_probe(&pdfs, extract_dir.as_deref())?,
         Cmd::Run {
             format,
             case,
@@ -172,6 +243,12 @@ fn run_probe(
     dump_pdf: Option<&Path>,
     font_dirs: &[PathBuf],
 ) -> Result<()> {
+    if let Some(path) = json_path {
+        ensure_diagnostic_output_outside_corpus(path)?;
+    }
+    if let Some(path) = dump_pdf {
+        ensure_diagnostic_output_outside_corpus(path)?;
+    }
     let directory = match (case, diag) {
         (Some(case), None) => corpus_root().join("docx").join(case),
         (None, Some(diag)) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -208,6 +285,62 @@ fn run_probe(
         std::fs::write(path, serde_json::to_vec_pretty(&report)?)
             .with_context(|| format!("write probe JSON {}", path.display()))?;
         println!("JSON: {}", path.display());
+    }
+    Ok(())
+}
+
+fn run_advance_probe(args: &PdfPairArgs) -> Result<()> {
+    let (ours, truth) = read_pdf_pair(args)?;
+    let ours = probe::extract_content_page(&ours, args.page)?;
+    let truth = probe::extract_content_page(&truth, args.page)?;
+    let report = advance_probe::compare(&ours, &truth);
+    print_or_write_json(&report, args.json.as_deref())
+}
+
+fn run_font_raster_probe(args: &PdfPairArgs, crop: Option<&[u32]>) -> Result<()> {
+    let (ours, truth) = read_pdf_pair(args)?;
+    let crop = crop
+        .map(|values| {
+            <[u32; 4]>::try_from(values)
+                .map_err(|_| anyhow::anyhow!("--crop requires x y width height"))
+        })
+        .transpose()?;
+    let report = font_raster_probe::compare(&ours, &truth, args.page, crop)?;
+    print_or_write_json(&report, args.json.as_deref())
+}
+
+fn run_image_probe(args: &PdfPairArgs, extract_dir: Option<&Path>) -> Result<()> {
+    let (ours, truth) = read_pdf_pair(args)?;
+    if let Some(directory) = extract_dir {
+        ensure_diagnostic_output_outside_corpus(directory)?;
+    }
+    let report = image_probe::compare(&ours, &truth, args.page, extract_dir)?;
+    print_or_write_json(&report, args.json.as_deref())
+}
+
+fn read_pdf_pair(args: &PdfPairArgs) -> Result<(Vec<u8>, Vec<u8>)> {
+    let ours = std::fs::read(&args.ours_pdf)
+        .with_context(|| format!("read candidate PDF {}", args.ours_pdf.display()))?;
+    let truth = std::fs::read(&args.truth_pdf)
+        .with_context(|| format!("read truth PDF {}", args.truth_pdf.display()))?;
+    Ok((ours, truth))
+}
+
+fn print_or_write_json<T: Serialize>(report: &T, json_path: Option<&Path>) -> Result<()> {
+    let json = serde_json::to_vec_pretty(report)?;
+    if let Some(path) = json_path {
+        ensure_diagnostic_output_outside_corpus(path)?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create diagnostic directory {}", parent.display()))?;
+        }
+        std::fs::write(path, &json)
+            .with_context(|| format!("write diagnostic JSON {}", path.display()))?;
+        println!("JSON: {}", path.display());
+    } else {
+        println!("{}", String::from_utf8_lossy(&json));
     }
     Ok(())
 }
@@ -253,6 +386,7 @@ fn case_dirs(format: &str) -> Result<Vec<PathBuf>> {
 }
 
 fn run(format: &str, only: Option<&str>, selected_report_dir: &Path) -> Result<()> {
+    ensure_diagnostic_output_outside_corpus(selected_report_dir)?;
     if format != "docx" {
         anyhow::bail!(
             "no {format} reference corpus is committed; refusing to claim fidelity coverage"
@@ -343,6 +477,43 @@ fn run(format: &str, only: Option<&str>, selected_report_dir: &Path) -> Result<(
         selected_report_dir.join("index.html").display()
     );
     Ok(())
+}
+
+fn ensure_diagnostic_output_outside_corpus(path: &Path) -> Result<()> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let resolved = resolve_output_path(&absolute)?;
+    let corpus = std::fs::canonicalize(corpus_root()).context("resolve fidelity corpus root")?;
+    if resolved.starts_with(&corpus) {
+        anyhow::bail!(
+            "refusing to write diagnostic output under the corpus tree: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn resolve_output_path(path: &Path) -> Result<PathBuf> {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("diagnostic output path has no existing ancestor"))?;
+        missing.push(name.to_owned());
+        existing = existing
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("diagnostic output path has no parent"))?;
+    }
+    let mut resolved = std::fs::canonicalize(existing)
+        .with_context(|| format!("resolve output ancestor {}", existing.display()))?;
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 fn lock_fonts() -> Result<()> {
@@ -739,6 +910,10 @@ mod gate_tests {
             truth_fonts: Vec::new(),
             our_pages: 1,
             truth_pages: 1,
+            truth_pdf_sha256: sha256_hex(b"truth"),
+            scoring_raster_config_sha256: scoring_raster_config_sha256(),
+            pages: Vec::new(),
+            layout_trace: None,
             geometry_limits: probe::GeometryLimits::default(),
             geometry: Vec::new(),
             geometry_pass: pass,
@@ -778,6 +953,67 @@ mod gate_tests {
         assert!(rendered.contains("weighted diagnostic"), "{rendered}");
         assert!(rendered.contains("geometry gate"), "{rendered}");
         assert!(rendered.contains("Quoted &quot;Font&quot;"), "{rendered}");
+    }
+
+    #[test]
+    fn reports_expose_page_scores_and_immutable_fingerprints() {
+        let json = serde_json::to_value([report("core", true)]).expect("serialize report");
+        let case = &json[0];
+
+        assert!(
+            case.get("pages").is_some()
+                && case.get("truth_pdf_sha256").is_some()
+                && case.get("scoring_raster_config_sha256").is_some()
+                && case.get("layout_trace").is_some(),
+            "Task 0 diagnostic fields are absent: {case}"
+        );
+    }
+
+    #[test]
+    fn case_unweighted_score_is_the_minimum_page_score() {
+        let mut report = report("core", true);
+        report.pages = vec![
+            page_report(1, 0.98, 0.97),
+            page_report(2, 0.95, 0.93),
+            page_report(3, 0.96, 0.94),
+        ];
+
+        recompute_case_page_minima(&mut report);
+
+        assert_eq!(report.ssim_unweighted, 0.93);
+    }
+
+    fn page_report(page: u32, ssim: f64, ssim_unweighted: f64) -> PageReport {
+        PageReport {
+            page,
+            ssim,
+            ssim_unweighted,
+            diff_pct: 0.0,
+            ours_pixel_width: 100,
+            ours_pixel_height: 100,
+            truth_pixel_width: 100,
+            truth_pixel_height: 100,
+            our_pdf_pages: 3,
+            truth_pdf_pages: 3,
+        }
+    }
+
+    #[test]
+    fn cli_accepts_task_zero_diagnostic_commands() {
+        for command in ["advance-probe", "font-raster-probe", "image-probe"] {
+            let parsed = Cli::try_parse_from([
+                "fidelity",
+                command,
+                "--ours-pdf",
+                "ours.pdf",
+                "--truth-pdf",
+                "truth.pdf",
+                "--page",
+                "1",
+            ]);
+            let error = parsed.err().map(|error| error.to_string());
+            assert!(error.is_none(), "{command} is unavailable: {error:?}");
+        }
     }
 
     #[test]
@@ -876,6 +1112,26 @@ golden_sha256 = "000000000000000000000000000000000000000000000000000000000000000
             ])
             .is_ok(),
             "run must accept an explicit report directory"
+        );
+    }
+
+    #[test]
+    fn diagnostic_outputs_reject_paths_under_the_corpus_tree() {
+        let path = corpus_root().join("docx/task-zero-must-not-write.json");
+        let error = ensure_diagnostic_output_outside_corpus(&path)
+            .expect_err("diagnostics must not write beneath fidelity-corpus");
+
+        assert!(error.to_string().contains("corpus tree"), "{error:#}");
+    }
+
+    #[test]
+    fn diagnostic_outputs_allow_project_local_tmp_paths() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp/task-zero-allowed/report.json");
+
+        assert!(
+            ensure_diagnostic_output_outside_corpus(&path).is_ok(),
+            "project-local tmp must remain writable"
         );
     }
 
@@ -1030,6 +1286,10 @@ fn score_case(
         truth_fonts: Vec::new(),
         our_pages: 0,
         truth_pages: 0,
+        truth_pdf_sha256: sha256_hex(truth_pdf),
+        scoring_raster_config_sha256: scoring_raster_config_sha256(),
+        pages: Vec::new(),
+        layout_trace: None,
         geometry_limits: probe::GeometryLimits {
             median_pt: manifest.geometry_median_pt,
             p95_pt: manifest.geometry_p95_pt,
@@ -1044,6 +1304,12 @@ fn score_case(
     let our_pdf = match convert(source, OfficeFormat::Docx, options) {
         Ok(out) => {
             report.our_pages = out.page_count;
+            #[cfg(feature = "layout-trace")]
+            {
+                report.layout_trace = out
+                    .diagnostics
+                    .map(|trace| serde_json::to_value(trace).expect("layout trace is serializable"));
+            }
             out.pdf
         }
         Err(e) => {
@@ -1094,8 +1360,6 @@ fn score_case(
     }
 
     let n = report.our_pages.min(truth_pages);
-    let mut min_ssim = f64::INFINITY;
-    let mut min_ssim_unweighted = f64::INFINITY;
     let mut max_diff = 0.0_f64;
     let mut geometry_pass = true;
     let mut geometry_violation = None;
@@ -1119,9 +1383,19 @@ fn score_case(
             return report;
         }
         let s = ssim::score_pages(&ours, &truth);
-        min_ssim = min_ssim.min(s.ssim);
-        min_ssim_unweighted = min_ssim_unweighted.min(s.ssim_unweighted);
         max_diff = max_diff.max(s.diff_pct);
+        report.pages.push(PageReport {
+            page: i + 1,
+            ssim: s.ssim,
+            ssim_unweighted: s.ssim_unweighted,
+            diff_pct: s.diff_pct,
+            ours_pixel_width: ours.width(),
+            ours_pixel_height: ours.height(),
+            truth_pixel_width: truth.width(),
+            truth_pixel_height: truth.height(),
+            our_pdf_pages: report.our_pages,
+            truth_pdf_pages: report.truth_pages,
+        });
         save_png(pages_dir, name, i, "heat", &s.heatmap_png);
         write_page_png(pages_dir, name, i, "ours", &ours);
         write_page_png(pages_dir, name, i, "truth", &truth);
@@ -1141,12 +1415,7 @@ fn score_case(
         }
         report.geometry.push(geometry);
     }
-    report.ssim = if min_ssim.is_finite() { min_ssim } else { 0.0 };
-    report.ssim_unweighted = if min_ssim_unweighted.is_finite() {
-        min_ssim_unweighted
-    } else {
-        0.0
-    };
+    recompute_case_page_minima(&mut report);
     report.diff_pct = max_diff;
     report.geometry_pass = geometry_pass;
     report.pass = case_passes_release_gates(
@@ -1163,6 +1432,23 @@ fn score_case(
         );
     }
     report
+}
+
+fn recompute_case_page_minima(report: &mut CaseReport) {
+    report.ssim = report
+        .pages
+        .iter()
+        .map(|page| page.ssim)
+        .reduce(f64::min)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    report.ssim_unweighted = report
+        .pages
+        .iter()
+        .map(|page| page.ssim_unweighted)
+        .reduce(f64::min)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
 }
 
 fn raster(pdf: &[u8], page: u32) -> Result<image::DynamicImage> {

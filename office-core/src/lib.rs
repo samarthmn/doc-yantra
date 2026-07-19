@@ -16,6 +16,8 @@
 
 use std::sync::{LazyLock, RwLock};
 
+#[cfg(feature = "fidelity-diagnostics")]
+pub mod diagnostics;
 pub mod drawing;
 pub mod emit;
 pub mod error;
@@ -205,6 +207,9 @@ pub struct ConvertOutput {
     /// Font resolution telemetry, byte-for-byte equivalent to profile state
     /// under the same registry and options.
     pub fonts: Vec<FontResolution>,
+    /// Feature-gated DOCX line trace used only by fidelity diagnostics.
+    #[cfg(feature = "fidelity-diagnostics")]
+    pub diagnostics: Option<diagnostics::LayoutTrace>,
 }
 
 /// Convert an Office document to PDF.
@@ -245,6 +250,8 @@ fn convert_xlsx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         page_count,
         warnings,
         fonts: prof.fonts,
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: None,
     })
 }
 
@@ -272,6 +279,8 @@ fn convert_pptx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         page_count,
         warnings,
         fonts: prof.fonts,
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: None,
     })
 }
 
@@ -295,6 +304,8 @@ fn convert_docx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
     let (laid, mut warnings, internal_links) = layout::flow::layout_docx_with_internal_links(&doc)?;
     guard_page_count(laid.pages.len())?;
     let page_count = laid.pages.len() as u32;
+    #[cfg(feature = "fidelity-diagnostics")]
+    let diagnostics = laid.diagnostics.clone();
     let pdf = emit::pdf::emit_with_internal_links(
         &laid,
         &doc.fonts,
@@ -307,6 +318,8 @@ fn convert_docx(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertOutput> {
         page_count,
         warnings,
         fonts: prof.fonts,
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: Some(diagnostics),
     })
 }
 

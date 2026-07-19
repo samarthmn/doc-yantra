@@ -91,6 +91,8 @@ pub fn render_pptx(doc: &PptxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         images: doc.images.clone(),
         outline: Vec::new(),
         dates: doc.dates.clone(),
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: crate::diagnostics::LayoutTrace::default(),
     };
     Ok((laid, warnings))
 }

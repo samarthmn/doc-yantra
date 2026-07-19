@@ -1,8 +1,9 @@
 //! Dev-only vector geometry probe for pairing engine and Word PDF elements.
 
 use anyhow::{Context, Result, anyhow, bail};
+use fidelity::evidence::sha256_hex;
 use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document, Object, ObjectId};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -132,6 +133,106 @@ pub struct ProbeReport {
     pub clusters: Vec<DeltaCluster>,
     pub unmatched: UnmatchedReport,
     pub duplicates: Vec<DuplicateRecord>,
+    /// Lossless text/image content records from our page.
+    pub ours_content: PdfPageContent,
+    /// Lossless text/image content records from the Word page.
+    pub truth_content: PdfPageContent,
+}
+
+/// Text and image records decoded from one PDF page's content streams.
+#[derive(Debug, Clone, Serialize)]
+pub struct PdfPageContent {
+    pub page: u32,
+    pub text: Vec<TextShowRecord>,
+    pub images: Vec<ImageXObjectRecord>,
+}
+
+/// One text-showing operator with its exact PDF font and advance inputs.
+#[derive(Debug, Clone, Serialize)]
+pub struct TextShowRecord {
+    pub operator_index: usize,
+    pub operator: String,
+    pub resource_name: String,
+    pub font_base_name: Option<String>,
+    pub font_family: Option<String>,
+    pub font_style: Option<String>,
+    pub font_subtype: Option<String>,
+    pub descendant_subtype: Option<String>,
+    pub font_encoding: Option<String>,
+    pub tf_pt: f64,
+    pub tm: [f64; 6],
+    pub ctm: [f64; 6],
+    pub origin: [f64; 2],
+    pub unicode: String,
+    pub encoded_hex: String,
+    pub glyphs: Vec<PdfGlyphRecord>,
+    pub tj_adjustments: Vec<f64>,
+    pub resulting_advance_text_units: f64,
+    pub resulting_advance_pt: f64,
+}
+
+/// One encoded PDF character code and its nominal/placed advance.
+#[derive(Debug, Clone, Serialize)]
+pub struct PdfGlyphRecord {
+    pub source_code: u32,
+    pub source_cid: Option<u32>,
+    pub source_gid: Option<u16>,
+    pub unicode: String,
+    pub nominal_width_text_units: f64,
+    pub following_tj: f64,
+    pub resulting_advance_text_units: f64,
+}
+
+/// One placed image XObject and the metadata that affects PDF rendering.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageXObjectRecord {
+    pub resource_name: String,
+    pub object_id: Option<[u32; 2]>,
+    pub encoded_sha256: String,
+    pub encoded_length: usize,
+    pub width_px: Option<u32>,
+    pub height_px: Option<u32>,
+    pub filters: Vec<String>,
+    pub color_space: Option<String>,
+    pub decode_parameters: Option<String>,
+    pub placement_matrix: [f64; 6],
+    pub clip_rectangle: Option<PdfRectangle>,
+    pub jpeg: Option<JpegMetadata>,
+}
+
+/// Axis-aligned PDF-user-space rectangle.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct PdfRectangle {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+}
+
+/// JPEG frame, quantization, and chroma-sampling metadata.
+#[derive(Debug, Clone, Serialize)]
+pub struct JpegMetadata {
+    pub frame_marker: String,
+    pub precision_bits: u8,
+    pub components: Vec<JpegComponent>,
+    pub quantization_tables: Vec<JpegQuantizationTable>,
+}
+
+/// JPEG component sampling factors and quantization-table selector.
+#[derive(Debug, Clone, Serialize)]
+pub struct JpegComponent {
+    pub component_id: u8,
+    pub horizontal_sampling: u8,
+    pub vertical_sampling: u8,
+    pub quantization_table: u8,
+}
+
+/// One JPEG DQT table in stored zig-zag order.
+#[derive(Debug, Clone, Serialize)]
+pub struct JpegQuantizationTable {
+    pub table_id: u8,
+    pub precision_bits: u8,
+    pub values: Vec<u16>,
 }
 
 /// Per-case vector-geometry bounds. Values are in PDF points except the
@@ -263,6 +364,10 @@ impl Affine {
 
     fn y_scale(self) -> f64 {
         self.c.hypot(self.d)
+    }
+
+    fn as_array(self) -> [f64; 6] {
+        [self.a, self.b, self.c, self.d, self.e, self.f]
     }
 }
 
@@ -407,6 +512,8 @@ impl ExtractedPage {
 }
 
 pub fn compare_page(ours: &[u8], truth: &[u8], page: u32) -> Result<ProbeReport> {
+    let ours_content = extract_content_page(ours, page).context("extract our PDF content")?;
+    let truth_content = extract_content_page(truth, page).context("extract truth PDF content")?;
     let mut ours = extract_page(ours, page).context("extract our PDF geometry")?;
     let mut truth = extract_page(truth, page).context("extract truth PDF geometry")?;
     canonicalize_page(&mut ours);
@@ -507,6 +614,8 @@ pub fn compare_page(ours: &[u8], truth: &[u8], page: u32) -> Result<ProbeReport>
             elements,
         },
         duplicates: duplicate_segments(&ours.borders),
+        ours_content,
+        truth_content,
     })
 }
 
@@ -717,6 +826,957 @@ fn extract_page(bytes: &[u8], page_number: u32) -> Result<ExtractedPage> {
         &mut extracted,
     )?;
     Ok(extracted)
+}
+
+#[derive(Clone, Default)]
+struct ContentState {
+    graphics: GraphicsState,
+    clip: Option<PdfRectangle>,
+    path_bounds: Option<PdfRectangle>,
+    pending_clip: bool,
+}
+
+pub(crate) struct ExtractedImageXObject {
+    pub record: ImageXObjectRecord,
+    pub bytes: Vec<u8>,
+}
+
+/// Extracts exact text-show and image-XObject records from one PDF page.
+pub fn extract_content_page(bytes: &[u8], page_number: u32) -> Result<PdfPageContent> {
+    let (content, _) = extract_content_page_with_bytes(bytes, page_number)?;
+    Ok(content)
+}
+
+pub(crate) fn extract_content_page_with_bytes(
+    bytes: &[u8],
+    page_number: u32,
+) -> Result<(PdfPageContent, Vec<ExtractedImageXObject>)> {
+    if page_number == 0 {
+        bail!("probe page is 1-based and must be at least 1");
+    }
+    let document = Document::load_mem(bytes).context("parse PDF")?;
+    let page_id = document
+        .get_pages()
+        .get(&page_number)
+        .copied()
+        .ok_or_else(|| anyhow!("PDF has no page {page_number}"))?;
+    let resources = inherited_dict(&document, page_id, b"Resources")?;
+    let data = document
+        .get_page_content(page_id)
+        .context("read page content streams")?;
+    let content = Content::decode(&data).context("decode page content")?;
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    let mut operator_index = 0usize;
+    record_operations(
+        &document,
+        &content.operations,
+        resources,
+        ContentState::default(),
+        0,
+        &mut operator_index,
+        &mut text,
+        &mut images,
+    )?;
+    let records = images.iter().map(|image| image.record.clone()).collect();
+    Ok((
+        PdfPageContent {
+            page: page_number,
+            text,
+            images: records,
+        },
+        images,
+    ))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF interpreter state is explicit at the recursion boundary"
+)]
+fn record_operations(
+    document: &Document,
+    operations: &[Operation],
+    resources: Option<&Dictionary>,
+    mut state: ContentState,
+    form_depth: u8,
+    operator_index: &mut usize,
+    text: &mut Vec<TextShowRecord>,
+    images: &mut Vec<ExtractedImageXObject>,
+) -> Result<()> {
+    if form_depth > 16 {
+        bail!("PDF form nesting exceeds diagnostic limit");
+    }
+    let mut stack = Vec::new();
+    for operation in operations {
+        let index = *operator_index;
+        *operator_index += 1;
+        match operation.operator.as_str() {
+            "q" => stack.push(state.clone()),
+            "Q" => {
+                if let Some(saved) = stack.pop() {
+                    state = saved;
+                }
+            }
+            "cm" => {
+                if let Some(matrix) = Affine::from_operands(&operation.operands) {
+                    state.graphics.ctm = state.graphics.ctm.concat(matrix);
+                }
+            }
+            "m" | "l" => {
+                if let Some(point) = transformed_point(&state.graphics, &operation.operands) {
+                    include_path_point(&mut state.path_bounds, point);
+                }
+            }
+            "c" => {
+                for pair in operation.operands.chunks_exact(2) {
+                    if let (Some(x), Some(y)) = (number(&pair[0]), number(&pair[1])) {
+                        include_path_point(
+                            &mut state.path_bounds,
+                            state.graphics.ctm.transform(Point { x, y }),
+                        );
+                    }
+                }
+            }
+            "v" | "y" => {
+                for pair in operation.operands.chunks_exact(2) {
+                    if let (Some(x), Some(y)) = (number(&pair[0]), number(&pair[1])) {
+                        include_path_point(
+                            &mut state.path_bounds,
+                            state.graphics.ctm.transform(Point { x, y }),
+                        );
+                    }
+                }
+            }
+            "re" => include_rectangle_path(&mut state, operation),
+            "W" | "W*" => state.pending_clip = true,
+            "n" | "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                apply_pending_clip(&mut state);
+                state.path_bounds = None;
+            }
+            "BT" => {
+                state.graphics.text_matrix = Affine::default();
+                state.graphics.text_line_matrix = Affine::default();
+            }
+            "Tf" => {
+                state.graphics.font_name = operation
+                    .operands
+                    .first()
+                    .and_then(|operand| operand.as_name().ok())
+                    .map(ToOwned::to_owned);
+                if let Some(size) = operation.operands.get(1).and_then(number) {
+                    state.graphics.font_size = size.abs();
+                }
+            }
+            "TL" => {
+                if let Some(leading) = operation.operands.first().and_then(number) {
+                    state.graphics.text_leading = leading;
+                }
+            }
+            "Tc" => {
+                if let Some(spacing) = operation.operands.first().and_then(number) {
+                    state.graphics.character_spacing = spacing;
+                }
+            }
+            "Tw" => {
+                if let Some(spacing) = operation.operands.first().and_then(number) {
+                    state.graphics.word_spacing = spacing;
+                }
+            }
+            "Tz" => {
+                if let Some(scale) = operation.operands.first().and_then(number) {
+                    state.graphics.horizontal_scale = scale / 100.0;
+                }
+            }
+            "Tm" => {
+                if let Some(matrix) = Affine::from_operands(&operation.operands) {
+                    state.graphics.text_matrix = matrix;
+                    state.graphics.text_line_matrix = matrix;
+                }
+            }
+            "Td" | "TD" => apply_text_position(operation, &mut state.graphics),
+            "T*" => next_text_line(&mut state.graphics),
+            "Tj" | "TJ" => record_text_show(
+                document,
+                resources,
+                operation,
+                index,
+                &mut state.graphics,
+                text,
+            ),
+            "'" => {
+                next_text_line(&mut state.graphics);
+                record_text_show(
+                    document,
+                    resources,
+                    operation,
+                    index,
+                    &mut state.graphics,
+                    text,
+                );
+            }
+            "\"" => {
+                if let Some(spacing) = operation.operands.first().and_then(number) {
+                    state.graphics.word_spacing = spacing;
+                }
+                if let Some(spacing) = operation.operands.get(1).and_then(number) {
+                    state.graphics.character_spacing = spacing;
+                }
+                next_text_line(&mut state.graphics);
+                record_text_show(
+                    document,
+                    resources,
+                    operation,
+                    index,
+                    &mut state.graphics,
+                    text,
+                );
+            }
+            "Do" => record_xobject(
+                document,
+                resources,
+                operation,
+                state.clone(),
+                form_depth,
+                operator_index,
+                text,
+                images,
+            )?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn include_rectangle_path(state: &mut ContentState, operation: &Operation) {
+    if operation.operands.len() < 4 {
+        return;
+    }
+    let (Some(x), Some(y), Some(width), Some(height)) = (
+        number(&operation.operands[0]),
+        number(&operation.operands[1]),
+        number(&operation.operands[2]),
+        number(&operation.operands[3]),
+    ) else {
+        return;
+    };
+    for point in [
+        Point { x, y },
+        Point { x: x + width, y },
+        Point {
+            x: x + width,
+            y: y + height,
+        },
+        Point { x, y: y + height },
+    ] {
+        include_path_point(&mut state.path_bounds, state.graphics.ctm.transform(point));
+    }
+}
+
+fn include_path_point(bounds: &mut Option<PdfRectangle>, point: Point) {
+    match bounds {
+        Some(bounds) => {
+            bounds.x0 = bounds.x0.min(point.x);
+            bounds.y0 = bounds.y0.min(point.y);
+            bounds.x1 = bounds.x1.max(point.x);
+            bounds.y1 = bounds.y1.max(point.y);
+        }
+        None => {
+            *bounds = Some(PdfRectangle {
+                x0: point.x,
+                y0: point.y,
+                x1: point.x,
+                y1: point.y,
+            });
+        }
+    }
+}
+
+fn apply_pending_clip(state: &mut ContentState) {
+    if !state.pending_clip {
+        return;
+    }
+    state.clip = match (state.clip, state.path_bounds) {
+        (Some(first), Some(second)) => intersect_rectangles(first, second),
+        (None, bounds) => bounds,
+        (clip, None) => clip,
+    };
+    state.pending_clip = false;
+}
+
+fn intersect_rectangles(first: PdfRectangle, second: PdfRectangle) -> Option<PdfRectangle> {
+    let rectangle = PdfRectangle {
+        x0: first.x0.max(second.x0),
+        y0: first.y0.max(second.y0),
+        x1: first.x1.min(second.x1),
+        y1: first.y1.min(second.y1),
+    };
+    (rectangle.x0 <= rectangle.x1 && rectangle.y0 <= rectangle.y1).then_some(rectangle)
+}
+
+fn apply_text_position(operation: &Operation, state: &mut GraphicsState) {
+    let (Some(tx), Some(ty)) = (
+        operation.operands.first().and_then(number),
+        operation.operands.get(1).and_then(number),
+    ) else {
+        return;
+    };
+    if operation.operator == "TD" {
+        state.text_leading = -ty;
+    }
+    state.text_line_matrix = state.text_line_matrix.concat(Affine::translation(tx, ty));
+    state.text_matrix = state.text_line_matrix;
+}
+
+fn record_text_show(
+    document: &Document,
+    resources: Option<&Dictionary>,
+    operation: &Operation,
+    operator_index: usize,
+    state: &mut GraphicsState,
+    records: &mut Vec<TextShowRecord>,
+) {
+    let Some(font) = selected_font(document, resources, state.font_name.as_deref()) else {
+        return;
+    };
+    let type0 = font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Type0");
+    let font_details = pdf_font_details(document, font);
+    let tm = state.text_matrix;
+    let device_origin = state.ctm.transform(tm.transform(Point::default()));
+    let mut glyphs = Vec::new();
+    let mut unicode = String::new();
+    let mut encoded = Vec::new();
+    let mut adjustments = Vec::new();
+    let mut advance_pt = 0.0;
+
+    match operation.operator.as_str() {
+        "Tj" | "'" => {
+            if let Some(bytes) = operation
+                .operands
+                .last()
+                .and_then(|value| value.as_str().ok())
+            {
+                append_text_bytes_record(
+                    document,
+                    font,
+                    type0,
+                    bytes,
+                    state,
+                    &mut unicode,
+                    &mut encoded,
+                    &mut glyphs,
+                    &mut advance_pt,
+                );
+            }
+        }
+        "\"" => {
+            if let Some(bytes) = operation
+                .operands
+                .get(2)
+                .and_then(|value| value.as_str().ok())
+            {
+                append_text_bytes_record(
+                    document,
+                    font,
+                    type0,
+                    bytes,
+                    state,
+                    &mut unicode,
+                    &mut encoded,
+                    &mut glyphs,
+                    &mut advance_pt,
+                );
+            }
+        }
+        "TJ" => {
+            if let Some(items) = operation
+                .operands
+                .first()
+                .and_then(|value| value.as_array().ok())
+            {
+                for item in items {
+                    if let Ok(bytes) = item.as_str() {
+                        append_text_bytes_record(
+                            document,
+                            font,
+                            type0,
+                            bytes,
+                            state,
+                            &mut unicode,
+                            &mut encoded,
+                            &mut glyphs,
+                            &mut advance_pt,
+                        );
+                    } else if let Some(adjustment) = number(item) {
+                        adjustments.push(adjustment);
+                        if let Some(glyph) = glyphs.last_mut() {
+                            glyph.following_tj += adjustment;
+                            glyph.resulting_advance_text_units -= adjustment;
+                        }
+                        let delta =
+                            -adjustment / 1_000.0 * state.font_size * state.horizontal_scale;
+                        advance_pt += delta;
+                        advance_text_matrix(state, delta);
+                    }
+                }
+            }
+        }
+        _ => return,
+    }
+    let resulting_advance_text_units = glyphs
+        .iter()
+        .map(|glyph| glyph.resulting_advance_text_units)
+        .sum();
+    records.push(TextShowRecord {
+        operator_index,
+        operator: operation.operator.clone(),
+        resource_name: state
+            .font_name
+            .as_deref()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .unwrap_or_default(),
+        font_base_name: font_details.base_name,
+        font_family: font_details.family,
+        font_style: font_details.style,
+        font_subtype: font_details.subtype,
+        descendant_subtype: font_details.descendant_subtype,
+        font_encoding: font_details.encoding,
+        tf_pt: state.font_size,
+        tm: tm.as_array(),
+        ctm: state.ctm.as_array(),
+        origin: [device_origin.x, device_origin.y],
+        unicode,
+        encoded_hex: hex_bytes(&encoded),
+        glyphs,
+        tj_adjustments: adjustments,
+        resulting_advance_text_units,
+        resulting_advance_pt: advance_pt,
+    });
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the helper mutates one in-progress PDF text record"
+)]
+fn append_text_bytes_record(
+    document: &Document,
+    font: &Dictionary,
+    type0: bool,
+    bytes: &[u8],
+    state: &mut GraphicsState,
+    unicode: &mut String,
+    encoded: &mut Vec<u8>,
+    glyphs: &mut Vec<PdfGlyphRecord>,
+    advance_pt: &mut f64,
+) {
+    encoded.extend_from_slice(bytes);
+    for (code, code_bytes) in encoded_codes(type0, bytes) {
+        let decoded = decode_text(document, font, code_bytes).unwrap_or_default();
+        unicode.push_str(&decoded);
+        let nominal_width = if type0 {
+            type0_width(document, font, code)
+        } else {
+            simple_font_width(document, font, code)
+        };
+        let spacing_pt = state.character_spacing
+            + if !type0 && code == 0x20 {
+                state.word_spacing
+            } else {
+                0.0
+            };
+        let scale = state.font_size * state.horizontal_scale;
+        let spacing_units = if scale.abs() > f64::EPSILON {
+            spacing_pt * state.horizontal_scale / scale * 1_000.0
+        } else {
+            0.0
+        };
+        let glyph_advance_units = nominal_width + spacing_units;
+        let glyph_advance_pt = glyph_advance_units / 1_000.0 * scale;
+        *advance_pt += glyph_advance_pt;
+        advance_text_matrix(state, glyph_advance_pt);
+        glyphs.push(PdfGlyphRecord {
+            source_code: code,
+            source_cid: type0.then_some(code),
+            source_gid: source_gid(document, font, type0, code, &decoded),
+            unicode: decoded,
+            nominal_width_text_units: nominal_width,
+            following_tj: 0.0,
+            resulting_advance_text_units: glyph_advance_units,
+        });
+    }
+}
+
+struct PdfFontDetails {
+    base_name: Option<String>,
+    family: Option<String>,
+    style: Option<String>,
+    subtype: Option<String>,
+    descendant_subtype: Option<String>,
+    encoding: Option<String>,
+}
+
+fn pdf_font_details(document: &Document, font: &Dictionary) -> PdfFontDetails {
+    let base_name = font
+        .get(b"BaseFont")
+        .and_then(Object::as_name)
+        .ok()
+        .map(|name| String::from_utf8_lossy(name).into_owned());
+    let normalized = base_name.as_deref().map(strip_pdf_subset_prefix);
+    let (family, style) = normalized.map(split_font_family_style).unwrap_or_default();
+    let descendant = font
+        .get(b"DescendantFonts")
+        .ok()
+        .and_then(|object| resolve_object(document, object).ok())
+        .and_then(|object| object.as_array().ok())
+        .and_then(|fonts| fonts.first())
+        .and_then(|object| resolve_object(document, object).ok())
+        .and_then(|object| object.as_dict().ok());
+    PdfFontDetails {
+        base_name,
+        family,
+        style,
+        subtype: dictionary_name(font, b"Subtype"),
+        descendant_subtype: descendant.and_then(|font| dictionary_name(font, b"Subtype")),
+        encoding: font.get(b"Encoding").ok().map(pdf_object_label),
+    }
+}
+
+fn strip_pdf_subset_prefix(name: &str) -> &str {
+    if name.as_bytes().get(6) == Some(&b'+')
+        && name.as_bytes()[..6].iter().all(u8::is_ascii_uppercase)
+    {
+        &name[7..]
+    } else {
+        name
+    }
+}
+
+fn split_font_family_style(name: &str) -> (Option<String>, Option<String>) {
+    let normalized = name.replace(',', "-");
+    for suffix in [
+        "-BoldItalic",
+        "-BoldOblique",
+        "-Italic",
+        "-Oblique",
+        "-Bold",
+    ] {
+        if let Some(family) = normalized.strip_suffix(suffix) {
+            return (
+                Some(family.to_string()),
+                Some(suffix.trim_start_matches('-').to_string()),
+            );
+        }
+    }
+    (Some(normalized), Some("Regular".to_string()))
+}
+
+fn dictionary_name(dictionary: &Dictionary, key: &[u8]) -> Option<String> {
+    dictionary
+        .get(key)
+        .and_then(Object::as_name)
+        .ok()
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+}
+
+fn encoded_codes(type0: bool, bytes: &[u8]) -> Vec<(u32, &[u8])> {
+    if type0 {
+        bytes
+            .chunks(2)
+            .map(|chunk| {
+                let code = if chunk.len() == 2 {
+                    u16::from_be_bytes([chunk[0], chunk[1]]) as u32
+                } else {
+                    u32::from(chunk[0])
+                };
+                (code, chunk)
+            })
+            .collect()
+    } else {
+        bytes
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| (u32::from(*byte), &bytes[index..index + 1]))
+            .collect()
+    }
+}
+
+fn decode_text(document: &Document, font: &Dictionary, bytes: &[u8]) -> Option<String> {
+    let mut to_unicode_font = font.clone();
+    let decoding_font = if to_unicode_font.get(b"ToUnicode").is_ok() {
+        to_unicode_font.remove(b"Encoding");
+        &to_unicode_font
+    } else {
+        font
+    };
+    decoding_font
+        .get_font_encoding(document)
+        .ok()?
+        .bytes_to_string(bytes)
+        .ok()
+}
+
+fn source_gid(
+    document: &Document,
+    font: &Dictionary,
+    type0: bool,
+    code: u32,
+    unicode: &str,
+) -> Option<u16> {
+    if type0 {
+        let descendant = font
+            .get(b"DescendantFonts")
+            .ok()
+            .and_then(|object| resolve_object(document, object).ok())
+            .and_then(|object| object.as_array().ok())
+            .and_then(|fonts| fonts.first())
+            .and_then(|object| resolve_object(document, object).ok())
+            .and_then(|object| object.as_dict().ok())?;
+        return match descendant.get(b"CIDToGIDMap") {
+            Ok(Object::Name(name)) if name == b"Identity" => u16::try_from(code).ok(),
+            Ok(object) => resolve_object(document, object)
+                .ok()
+                .and_then(|object| object.as_stream().ok())
+                .and_then(|stream| {
+                    let offset = usize::try_from(code).ok()?.checked_mul(2)?;
+                    let bytes = stream.content.get(offset..offset + 2)?;
+                    Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+                }),
+            Err(_) => u16::try_from(code).ok(),
+        };
+    }
+    if dictionary_name(font, b"Subtype").as_deref() != Some("TrueType") {
+        return None;
+    }
+    let descriptor = font
+        .get(b"FontDescriptor")
+        .ok()
+        .and_then(|object| resolve_object(document, object).ok())
+        .and_then(|object| object.as_dict().ok())?;
+    let stream = descriptor
+        .get(b"FontFile2")
+        .ok()
+        .and_then(|object| resolve_object(document, object).ok())
+        .and_then(|object| object.as_stream().ok())?;
+    let bytes = stream
+        .decompressed_content()
+        .unwrap_or_else(|_| stream.content.clone());
+    let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
+    face.glyph_index(unicode.chars().next()?).map(|gid| gid.0)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recursive XObject interpretation mirrors the PDF graphics stack"
+)]
+fn record_xobject(
+    document: &Document,
+    resources: Option<&Dictionary>,
+    operation: &Operation,
+    state: ContentState,
+    form_depth: u8,
+    operator_index: &mut usize,
+    text: &mut Vec<TextShowRecord>,
+    images: &mut Vec<ExtractedImageXObject>,
+) -> Result<()> {
+    let Some(name) = operation
+        .operands
+        .first()
+        .and_then(|operand| operand.as_name().ok())
+    else {
+        return Ok(());
+    };
+    let Some(resources) = resources else {
+        return Ok(());
+    };
+    let Ok(xobjects_object) = resources.get(b"XObject") else {
+        return Ok(());
+    };
+    let xobjects = resolve_object(document, xobjects_object)
+        .context("resolve XObject resources")?
+        .as_dict()
+        .context("XObject resources are not a dictionary")?;
+    let Ok(object) = xobjects.get(name) else {
+        return Ok(());
+    };
+    let object_id = object.as_reference().ok();
+    let stream = resolve_object(document, object)
+        .context("resolve XObject")?
+        .as_stream()
+        .context("XObject is not a stream")?;
+    match stream.dict.get(b"Subtype").and_then(Object::as_name).ok() {
+        Some(b"Image") => {
+            let bytes = stream.content.clone();
+            images.push(ExtractedImageXObject {
+                record: image_record(document, resources, name, object_id, stream, &bytes, &state),
+                bytes,
+            });
+        }
+        Some(b"Form") => {
+            let mut form_state = state;
+            if let Ok(matrix) = stream.dict.get(b"Matrix")
+                && let Ok(array) = matrix.as_array()
+                && let Some(matrix) = Affine::from_operands(array)
+            {
+                form_state.graphics.ctm = form_state.graphics.ctm.concat(matrix);
+            }
+            if let Ok(bbox) = stream.dict.get(b"BBox")
+                && let Ok(values) = bbox.as_array()
+                && values.len() == 4
+                && let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
+                    number(&values[0]),
+                    number(&values[1]),
+                    number(&values[2]),
+                    number(&values[3]),
+                )
+            {
+                let first = form_state.graphics.ctm.transform(Point { x: x0, y: y0 });
+                let second = form_state.graphics.ctm.transform(Point { x: x1, y: y1 });
+                let bbox = PdfRectangle {
+                    x0: first.x.min(second.x),
+                    y0: first.y.min(second.y),
+                    x1: first.x.max(second.x),
+                    y1: first.y.max(second.y),
+                };
+                form_state.clip = match form_state.clip {
+                    Some(clip) => intersect_rectangles(clip, bbox),
+                    None => Some(bbox),
+                };
+            }
+            let form_resources = stream
+                .dict
+                .get(b"Resources")
+                .ok()
+                .and_then(|object| resolve_object(document, object).ok())
+                .and_then(|object| object.as_dict().ok())
+                .or(Some(resources));
+            let data = stream
+                .decompressed_content()
+                .context("decompress form XObject")?;
+            let content = Content::decode(&data).context("decode form XObject content")?;
+            record_operations(
+                document,
+                &content.operations,
+                form_resources,
+                form_state,
+                form_depth + 1,
+                operator_index,
+                text,
+                images,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn image_record(
+    document: &Document,
+    resources: &Dictionary,
+    name: &[u8],
+    object_id: Option<ObjectId>,
+    stream: &Stream,
+    bytes: &[u8],
+    state: &ContentState,
+) -> ImageXObjectRecord {
+    ImageXObjectRecord {
+        resource_name: String::from_utf8_lossy(name).into_owned(),
+        object_id: object_id.map(|(number, generation)| [number, u32::from(generation)]),
+        encoded_sha256: sha256_hex(bytes),
+        encoded_length: bytes.len(),
+        width_px: dictionary_u32(&stream.dict, b"Width"),
+        height_px: dictionary_u32(&stream.dict, b"Height"),
+        filters: filter_names(&stream.dict),
+        color_space: stream
+            .dict
+            .get(b"ColorSpace")
+            .ok()
+            .map(|object| resolved_color_space_label(document, resources, object)),
+        decode_parameters: stream.dict.get(b"DecodeParms").ok().map(pdf_object_label),
+        placement_matrix: state.graphics.ctm.as_array(),
+        clip_rectangle: state.clip,
+        jpeg: parse_jpeg_metadata(bytes),
+    }
+}
+
+fn dictionary_u32(dictionary: &Dictionary, key: &[u8]) -> Option<u32> {
+    dictionary
+        .get(key)
+        .and_then(Object::as_i64)
+        .ok()
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn filter_names(dictionary: &Dictionary) -> Vec<String> {
+    let Ok(filter) = dictionary.get(b"Filter") else {
+        return Vec::new();
+    };
+    if let Ok(name) = filter.as_name() {
+        return vec![String::from_utf8_lossy(name).into_owned()];
+    }
+    filter
+        .as_array()
+        .map(|filters| filters.iter().map(pdf_object_label).collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+fn resolved_color_space_label(
+    document: &Document,
+    resources: &Dictionary,
+    object: &Object,
+) -> String {
+    if let Ok(name) = object.as_name()
+        && let Ok(color_spaces) = resources.get(b"ColorSpace")
+        && let Ok(color_spaces) = resolve_object(document, color_spaces)
+        && let Ok(color_spaces) = color_spaces.as_dict()
+        && let Ok(color_space) = color_spaces.get(name)
+    {
+        return pdf_object_label(color_space);
+    }
+    pdf_object_label(object)
+}
+
+fn pdf_object_label(object: &Object) -> String {
+    match object {
+        Object::Null => "null".to_string(),
+        Object::Boolean(value) => value.to_string(),
+        Object::Integer(value) => value.to_string(),
+        Object::Real(value) => value.to_string(),
+        Object::Name(value) => format!("/{}", String::from_utf8_lossy(value)),
+        Object::String(value, _) => format!("<{}>", hex_bytes(value)),
+        Object::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(pdf_object_label)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Object::Dictionary(dictionary) => {
+            let mut entries = dictionary
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "/{} {}",
+                        String::from_utf8_lossy(key),
+                        pdf_object_label(value)
+                    )
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            format!("<<{}>>", entries.join(" "))
+        }
+        Object::Stream(stream) => format!("stream({})", stream.content.len()),
+        Object::Reference((number, generation)) => format!("{number} {generation} R"),
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn parse_jpeg_metadata(bytes: &[u8]) -> Option<JpegMetadata> {
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    let mut offset = 2usize;
+    let mut frame = None;
+    let mut tables = Vec::new();
+    while offset + 1 < bytes.len() {
+        while offset < bytes.len() && bytes[offset] != 0xff {
+            offset += 1;
+        }
+        while offset < bytes.len() && bytes[offset] == 0xff {
+            offset += 1;
+        }
+        let marker = *bytes.get(offset)?;
+        offset += 1;
+        if matches!(marker, 0xd8 | 0xd9) {
+            continue;
+        }
+        if marker == 0xda {
+            break;
+        }
+        let length = usize::from(u16::from_be_bytes([
+            *bytes.get(offset)?,
+            *bytes.get(offset + 1)?,
+        ]));
+        if length < 2 || offset + length > bytes.len() {
+            return None;
+        }
+        let segment = &bytes[offset + 2..offset + length];
+        match marker {
+            0xdb => parse_dqt_segment(segment, &mut tables)?,
+            0xc0..=0xc2 => frame = parse_sof_segment(marker, segment),
+            _ => {}
+        }
+        offset += length;
+    }
+    let (frame_marker, precision_bits, components) = frame?;
+    Some(JpegMetadata {
+        frame_marker,
+        precision_bits,
+        components,
+        quantization_tables: tables,
+    })
+}
+
+fn parse_dqt_segment(segment: &[u8], tables: &mut Vec<JpegQuantizationTable>) -> Option<()> {
+    let mut offset = 0usize;
+    while offset < segment.len() {
+        let selector = *segment.get(offset)?;
+        offset += 1;
+        let precision_bits = if selector >> 4 == 0 { 8 } else { 16 };
+        let bytes_per_value = usize::from(precision_bits / 8);
+        let byte_len = 64usize.checked_mul(bytes_per_value)?;
+        let values_bytes = segment.get(offset..offset + byte_len)?;
+        let values = if precision_bits == 8 {
+            values_bytes.iter().map(|value| u16::from(*value)).collect()
+        } else {
+            values_bytes
+                .chunks_exact(2)
+                .map(|value| u16::from_be_bytes([value[0], value[1]]))
+                .collect()
+        };
+        tables.push(JpegQuantizationTable {
+            table_id: selector & 0x0f,
+            precision_bits,
+            values,
+        });
+        offset += byte_len;
+    }
+    Some(())
+}
+
+fn parse_sof_segment(marker: u8, segment: &[u8]) -> Option<(String, u8, Vec<JpegComponent>)> {
+    let precision_bits = *segment.first()?;
+    let count = usize::from(*segment.get(5)?);
+    let mut components = Vec::with_capacity(count);
+    for component in segment.get(6..)?.chunks_exact(3).take(count) {
+        components.push(JpegComponent {
+            component_id: component[0],
+            horizontal_sampling: component[1] >> 4,
+            vertical_sampling: component[1] & 0x0f,
+            quantization_table: component[2],
+        });
+    }
+    (components.len() == count).then(|| {
+        (
+            match marker {
+                0xc0 => "sof0_baseline",
+                0xc1 => "sof1_extended_sequential",
+                0xc2 => "sof2_progressive",
+                _ => "sof_unknown",
+            }
+            .to_string(),
+            precision_bits,
+            components,
+        )
+    })
 }
 
 fn canonicalize_page(page: &mut ExtractedPage) {
@@ -1885,7 +2945,7 @@ mod tests {
         widths[34] = Object::Integer(600); // B
         let font_id = doc.add_object(dictionary! {
             "Type" => "Font",
-            "Subtype" => "Type1",
+            "Subtype" => "TrueType",
             "BaseFont" => "Helvetica",
             "Encoding" => "WinAnsiEncoding",
             "FirstChar" => 32,
@@ -1918,6 +2978,8 @@ mod tests {
                     Object::string_literal("A"),
                     Object::Integer(-100),
                     Object::string_literal("B"),
+                    Object::Integer(50),
+                    Object::string_literal("A"),
                 ])],
             ),
             Operation::new("\"", vec![2.into(), 1.into(), Object::string_literal(" ")]),
@@ -2269,9 +3331,159 @@ end"#
                 (13.0, 40.0),
                 (16.5, 40.0),
                 (20.0, 40.0),
+                (23.25, 40.0),
                 (10.0, 52.0),
                 (12.75, 52.0)
             ]
         );
+    }
+
+    #[test]
+    fn comparison_serializes_lossless_content_stream_records() {
+        let pdf = text_advancement_pdf();
+        let report = compare_page(&pdf, &pdf, 1).expect("compare text probe PDF");
+        let json = serde_json::to_value(report).expect("serialize probe report");
+
+        assert!(
+            json.pointer("/ours_content/text/0/resource_name").is_some()
+                && json.pointer("/ours_content/text/0/font_subtype").is_some()
+                && json.pointer("/ours_content/text/0/tf_pt").is_some()
+                && json.pointer("/ours_content/text/0/tm").is_some()
+                && json
+                    .pointer("/ours_content/text/0/glyphs/0/source_code")
+                    .is_some()
+                && json
+                    .pointer("/ours_content/text/2/tj_adjustments/0")
+                    .is_some(),
+            "Task 0 content-stream fields are absent: {json}"
+        );
+    }
+
+    #[test]
+    fn content_stream_records_positive_and_negative_tj_values_exactly() {
+        let content =
+            extract_content_page(&text_advancement_pdf(), 1).expect("extract text content");
+
+        assert_eq!(content.text[2].tj_adjustments, [-100.0, 50.0]);
+    }
+
+    #[test]
+    fn content_stream_keeps_strings_split_across_showing_operators() {
+        let content =
+            extract_content_page(&text_advancement_pdf(), 1).expect("extract text content");
+        let text = content
+            .text
+            .iter()
+            .map(|record| record.unicode.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(text, ["A", "B", "ABA", " ", "A"]);
+    }
+
+    #[test]
+    fn compact_cid_to_gid_map_is_reported_without_identity_assumptions() {
+        let mut doc = Document::with_version("1.7");
+        let map_id = doc.add_object(Stream::new(dictionary! {}, vec![0, 0, 0, 37]));
+        let descendant = Object::Dictionary(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "CIDFontType2",
+            "CIDToGIDMap" => map_id,
+        });
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type0",
+            "Encoding" => "Identity-H",
+            "DescendantFonts" => vec![descendant],
+        };
+
+        assert_eq!(source_gid(&doc, &font, true, 1, "A"), Some(37));
+    }
+
+    #[test]
+    fn image_content_records_placement_clip_and_jpeg_sampling() {
+        let content = extract_content_page(&image_content_pdf(), 1).expect("extract image content");
+        let image = &content.images[0];
+
+        assert!(
+            image.width_px == Some(2)
+                && image.height_px == Some(1)
+                && image.filters == ["DCTDecode"]
+                && image.placement_matrix == [20.0, 0.0, 0.0, 10.0, 5.0, 7.0]
+                && image.clip_rectangle.is_some_and(|clip| {
+                    clip.x0 == 5.0 && clip.y0 == 7.0 && clip.x1 == 25.0 && clip.y1 == 17.0
+                })
+                && image.jpeg.as_ref().is_some_and(|jpeg| {
+                    jpeg.components[0].horizontal_sampling == 2
+                        && jpeg.components[0].vertical_sampling == 2
+                }),
+            "incomplete image record: {image:?}"
+        );
+    }
+
+    fn image_content_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.7");
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2,
+                "Height" => 1,
+                "ColorSpace" => "DeviceRGB",
+                "BitsPerComponent" => 8,
+                "Filter" => "DCTDecode",
+            },
+            minimal_jpeg_420(),
+        ));
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! { "Im1" => image_id },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![20.into(), 0.into(), 0.into(), 10.into(), 5.into(), 7.into()],
+                ),
+                Operation::new("re", vec![0.into(), 0.into(), 1.into(), 1.into()]),
+                Operation::new("W", vec![]),
+                Operation::new("n", vec![]),
+                Operation::new("Do", vec![Object::Name(b"Im1".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        }
+        .encode()
+        .expect("encode image content");
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            "Resources" => resources_id,
+            "Contents" => content_id,
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("save image probe PDF");
+        bytes
+    }
+
+    fn minimal_jpeg_420() -> Vec<u8> {
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00];
+        jpeg.extend([1; 64]);
+        jpeg.extend([
+            0xff, 0xc0, 0x00, 0x11, 8, 0, 1, 0, 2, 3, 1, 0x22, 0, 2, 0x11, 0, 3, 0x11, 0, 0xff,
+            0xda,
+        ]);
+        jpeg
     }
 }

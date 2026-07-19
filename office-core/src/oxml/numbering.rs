@@ -3,6 +3,8 @@
 //! uses to render counters.
 
 use super::wml::{Indent, RunProps, parse_run_props};
+#[cfg(feature = "fidelity-diagnostics")]
+use super::wml::{TabAlign, TabLeader, TabStop};
 use super::{Node, W, attr, child, children, measure_twip_to_pt, parse_i64};
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
@@ -99,6 +101,8 @@ pub struct LevelDef {
     pub justification: LabelJustification,
     /// Legal numbering forces referenced levels to decimal.
     pub legal: bool,
+    #[cfg(feature = "fidelity-diagnostics")]
+    pub(crate) diagnostic_tabs: Vec<TabStop>,
 }
 
 /// Number-label justification.
@@ -124,6 +128,8 @@ impl Default for LevelDef {
             rpr: RunProps::default(),
             justification: LabelJustification::Start,
             legal: false,
+            #[cfg(feature = "fidelity-diagnostics")]
+            diagnostic_tabs: Vec::new(),
         }
     }
 }
@@ -213,7 +219,13 @@ fn parse_level(lvl: Node) -> LevelDef {
             }
             "lvlText" => def.lvl_text = attr(c, W, "val").unwrap_or_default().to_string(),
             "suff" => def.suffix = LevelSuffix::parse(attr(c, W, "val")),
-            "pPr" => def.indent = parse_level_indent(c),
+            "pPr" => {
+                def.indent = parse_level_indent(c);
+                #[cfg(feature = "fidelity-diagnostics")]
+                {
+                    def.diagnostic_tabs = parse_level_tabs(c);
+                }
+            }
             "rPr" => def.rpr = parse_run_props(c),
             "lvlJc" => {
                 def.justification = match attr(c, W, "val") {
@@ -284,6 +296,38 @@ fn parse_level_indent(ppr: Node) -> Indent {
         indent.hanging_pt = g("hanging");
     }
     indent
+}
+
+#[cfg(feature = "fidelity-diagnostics")]
+fn parse_level_tabs(ppr: Node) -> Vec<TabStop> {
+    let Some(tabs) = child(ppr, W, "tabs") else {
+        return Vec::new();
+    };
+    children(tabs)
+        .filter(|tab| super::is(*tab, W, "tab"))
+        .filter_map(|tab| {
+            let pos_pt = measure_twip_to_pt(attr(tab, W, "pos"))?;
+            let alignment = match attr(tab, W, "val") {
+                Some("center") => TabAlign::Center,
+                Some("right" | "end") => TabAlign::Right,
+                Some("decimal") => TabAlign::Decimal,
+                Some("bar") => TabAlign::Bar,
+                Some("clear") => TabAlign::Clear,
+                _ => TabAlign::Left,
+            };
+            let leader = match attr(tab, W, "leader") {
+                Some("dot") => TabLeader::Dot,
+                Some("hyphen") => TabLeader::Hyphen,
+                Some("underscore") => TabLeader::Underscore,
+                _ => TabLeader::None,
+            };
+            Some(TabStop {
+                pos_pt,
+                alignment,
+                leader,
+            })
+        })
+        .collect()
 }
 
 fn parse_num_instance(node: Node) -> Option<NumInstance> {

@@ -22,6 +22,8 @@ cli = ["dep:clap"]
 bundled-fonts = []
 # wasm32 builds: JS crypto for any randomness pulled in transitively.
 wasm = []
+# Native/wasm-safe serializable line traces for the fidelity harness.
+fidelity-diagnostics = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }

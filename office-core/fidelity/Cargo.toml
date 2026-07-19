@@ -8,6 +8,10 @@ publish = false
 # both our output and the Word ground truth via pdf-core's pdfium, and scores
 # similarity (SSIM). Never published, never wasm.
 
+[features]
+default = ["layout-trace"]
+layout-trace = ["office-core/fidelity-diagnostics"]
+
 [dependencies]
 office-core = { path = ".." }
 pdf-core = { path = "../../pdf-core", default-features = false, features = ["pdfium"] }

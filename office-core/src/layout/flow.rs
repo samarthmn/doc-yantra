@@ -18,6 +18,8 @@ use super::{
     EncodedImage, FillRule, Item, LaidOutDocument, OutlineEntry, Page, PathCommand, Positioned,
     ResolvedInternalLink, Stroke,
 };
+#[cfg(feature = "fidelity-diagnostics")]
+use crate::diagnostics::{self, LayoutTrace, LineTrace, LineTraceDraft};
 use crate::oxml::numbering::{NumFmt, format_number};
 use crate::oxml::wml::{
     AnchorOrigin, BlockContent, ColumnSpec, FrameAlign, FrameHeightRule, FrameProps, HdrFtrKind,
@@ -68,6 +70,8 @@ struct Unit {
     /// Stable ordinal of this unit within its source body block.
     block_unit_index: usize,
     floating_table: Option<FloatingTablePlacement>,
+    #[cfg(feature = "fidelity-diagnostics")]
+    diagnostics: Option<LineTraceDraft>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -487,12 +491,16 @@ pub(crate) fn layout_docx_with_internal_links(
     )?;
     let outline = collect_outline(&units, &pages);
     let internal_links = resolve_internal_links(&pages);
+    #[cfg(feature = "fidelity-diagnostics")]
+    let diagnostics = collect_layout_trace(doc, &units, &pages);
 
     let laid = LaidOutDocument {
         pages: pages.into_iter().map(finish_work_page).collect(),
         images: clone_images(&doc.images),
         outline,
         dates: doc.dates.clone(),
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics,
     };
     Ok((laid, warnings, internal_links))
 }
@@ -581,6 +589,10 @@ fn align_body_vertically(
         }
         for (_, y) in &mut page.unit_ys {
             *y += shift;
+        }
+        #[cfg(feature = "fidelity-diagnostics")]
+        for placement in &mut page.diagnostic_placements {
+            placement.origin_y_pt += shift;
         }
         for (_, y) in &mut page.bookmarks {
             *y += shift;
@@ -697,6 +709,15 @@ struct WorkPage {
     /// page with a directly following next-page section transition when
     /// nothing visible was placed on it.
     from_explicit_break: bool,
+    #[cfg(feature = "fidelity-diagnostics")]
+    diagnostic_placements: Vec<DiagnosticPlacement>,
+}
+
+#[cfg(feature = "fidelity-diagnostics")]
+struct DiagnosticPlacement {
+    unit_index: usize,
+    origin_x_pt: f64,
+    origin_y_pt: f64,
 }
 
 #[derive(Clone)]
@@ -1045,6 +1066,8 @@ fn build_units(
                             x_pt: floating.x_pt,
                             y_pt: floating.y_pt,
                         }),
+                        #[cfg(feature = "fidelity-diagnostics")]
+                        diagnostics: None,
                     });
                     active_wrap = if wraps_text { side_wrap } else { None };
                     prev_after = 0.0;
@@ -1094,6 +1117,8 @@ fn build_units(
                         block_index: source_block_index,
                         block_unit_index: row_index,
                         floating_table: None,
+                        #[cfg(feature = "fidelity-diagnostics")]
+                        diagnostics: None,
                     };
                     if row_layout.is_header {
                         let mut repeated = clone_unit(&unit);
@@ -1185,6 +1210,8 @@ fn clone_unit(u: &Unit) -> Unit {
         block_index: u.block_index,
         block_unit_index: u.block_unit_index,
         floating_table: u.floating_table,
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: u.diagnostics.clone(),
     }
 }
 
@@ -1307,6 +1334,8 @@ fn push_paragraph_units(
             block_index,
             block_unit_index: i,
             floating_table: None,
+            #[cfg(feature = "fidelity-diagnostics")]
+            diagnostics: Some(line.diagnostics),
         });
     }
     *pending_break = brk;
@@ -1353,6 +1382,8 @@ fn push_frame_unit(
     let mut content_height = 0.0;
     let mut bookmarks = Vec::new();
     let mut internal_links = Vec::new();
+    #[cfg(feature = "fidelity-diagnostics")]
+    let frame_diagnostics = layout.lines.first().map(|line| line.diagnostics.clone());
     for line in layout.lines {
         bookmarks.extend(
             line.bookmarks
@@ -1477,6 +1508,8 @@ fn push_frame_unit(
         block_index,
         block_unit_index: 0,
         floating_table: None,
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: frame_diagnostics,
     });
     *prev_after = layout.space_after_pt;
     *keep_next_group = layout.keep_next.then_some(group);
@@ -2238,6 +2271,14 @@ fn place_unit(
     }
     if index != usize::MAX {
         page.unit_ys.push((index, unit_top));
+        #[cfg(feature = "fidelity-diagnostics")]
+        if unit.diagnostics.is_some() {
+            page.diagnostic_placements.push(DiagnosticPlacement {
+                unit_index: index,
+                origin_x_pt: frame_x,
+                origin_y_pt: frame_y,
+            });
+        }
     }
     place_logical_unit_metadata(page, unit, index, frame_y);
     page.internal_links
@@ -2496,6 +2537,8 @@ fn new_page(geo: &PageGeometry, governing_run: usize) -> WorkPage {
         float_bands: Vec::new(),
         float_carriers: Vec::new(),
         from_explicit_break: false,
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostic_placements: Vec::new(),
     }
 }
 
@@ -2519,6 +2562,72 @@ fn work_page_has_visible_content(page: &WorkPage) -> bool {
         && page.overlays.is_empty()
         && page.page_underlays.is_empty()
         && page.page_overlays.is_empty())
+}
+
+#[cfg(feature = "fidelity-diagnostics")]
+fn collect_layout_trace(doc: &WordDoc, units: &[Unit], pages: &[WorkPage]) -> LayoutTrace {
+    let mut lines = Vec::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        for placement in &page.diagnostic_placements {
+            let Some(unit) = units.get(placement.unit_index) else {
+                continue;
+            };
+            let Some(draft) = &unit.diagnostics else {
+                continue;
+            };
+            lines.push(LineTrace {
+                source_paragraph_index: doc
+                    .document
+                    .body
+                    .iter()
+                    .take(unit.block_index)
+                    .filter(|block| matches!(block, BlockContent::Paragraph(_)))
+                    .count(),
+                source_line_index: unit.block_unit_index,
+                page: page_index as u32 + 1,
+                paragraph: draft.paragraph.clone(),
+                line_box_top_pt: placement.origin_y_pt,
+                line_box_height_pt: unit.height,
+                line_ascent_pt: draft.ascent_pt,
+                line_descent_pt: draft.descent_pt,
+                baseline_pt: placement.origin_y_pt + draft.ascent_pt,
+                object_ink_bounds: draft
+                    .object_ink_bounds
+                    .iter()
+                    .map(|bounds| {
+                        translate_ink_bounds(bounds, placement.origin_x_pt, placement.origin_y_pt)
+                    })
+                    .collect(),
+                math_ink_bounds: draft
+                    .math_ink_bounds
+                    .iter()
+                    .map(|bounds| {
+                        translate_ink_bounds(bounds, placement.origin_x_pt, placement.origin_y_pt)
+                    })
+                    .collect(),
+                glyph_origins: diagnostics::glyph_origins(
+                    &unit.items,
+                    placement.origin_x_pt,
+                    placement.origin_y_pt,
+                ),
+            });
+        }
+    }
+    LayoutTrace { lines }
+}
+
+#[cfg(feature = "fidelity-diagnostics")]
+fn translate_ink_bounds(
+    bounds: &crate::diagnostics::InkBoundsTrace,
+    x_pt: f64,
+    y_pt: f64,
+) -> crate::diagnostics::InkBoundsTrace {
+    crate::diagnostics::InkBoundsTrace {
+        x0_pt: bounds.x0_pt + x_pt,
+        y0_pt: bounds.y0_pt + y_pt,
+        x1_pt: bounds.x1_pt + x_pt,
+        y1_pt: bounds.y1_pt + y_pt,
+    }
 }
 
 fn finish_work_page(mut work: WorkPage) -> Page {
@@ -3314,6 +3423,8 @@ mod tests {
             block_index: 0,
             block_unit_index: group,
             floating_table: None,
+            #[cfg(feature = "fidelity-diagnostics")]
+            diagnostics: None,
         }
     }
 
@@ -3456,6 +3567,8 @@ mod tests {
             block_index: 0,
             block_unit_index: 0,
             floating_table: None,
+            #[cfg(feature = "fidelity-diagnostics")]
+            diagnostics: None,
         };
         let mut page = WorkPage {
             governing_run: 0,
@@ -3472,6 +3585,8 @@ mod tests {
             float_bands: Vec::new(),
             float_carriers: Vec::new(),
             from_explicit_break: false,
+            #[cfg(feature = "fidelity-diagnostics")]
+            diagnostic_placements: Vec::new(),
         };
 
         place_logical_unit_metadata(&mut page, &unit, 4, 100.0);

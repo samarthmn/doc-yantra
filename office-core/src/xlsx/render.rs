@@ -98,6 +98,8 @@ pub fn render_xlsx(doc: &XlsxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
         images: doc.images.clone(),
         outline: Vec::new(),
         dates: doc.dates.clone(),
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: crate::diagnostics::LayoutTrace::default(),
     };
     Ok((laid, warnings))
 }
