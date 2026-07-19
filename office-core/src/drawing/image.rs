@@ -1,7 +1,91 @@
 //! Shared fail-closed raster validation and decoding for OOXML image parts.
 
 use crate::layout::EncodedImage;
+use crate::oxml::dml::{Drawing, DrawingKind};
 use crate::{OfficeError, Result, UnsupportedCode};
+
+/// Alpha/background decision included in every image cache key. Task 1 only
+/// ships the evidence-backed preserve path; flattening remains unproved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AlphaBackground {
+    /// Preserve source alpha as a PDF soft mask.
+    Preserve,
+}
+
+/// Every authored state that can change a Word image export. Keeping these
+/// fields in the key prevents a shared source part from accidentally reusing a
+/// variant produced for a different placement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageVariantKey {
+    /// Resolved OPC source part.
+    pub source_part: String,
+    /// Inline or anchored placement.
+    pub disposition: DrawingKind,
+    /// Authored display extent in exact EMU.
+    pub extent_emu: Option<(i64, i64)>,
+    /// Authored source clip in 1/1000-percent units.
+    pub crop_units: Option<[i32; 4]>,
+    /// Effective image-space clip after the authored crop is resolved.
+    pub effective_clip_units: Option<[i32; 4]>,
+    /// Authored rotation in 1/60000-degree units.
+    pub rotation_units: i32,
+    /// Alpha/background handling selected for the variant.
+    pub alpha_background: AlphaBackground,
+    /// Authored DrawingML compression state.
+    pub compression_state: Option<String>,
+    /// Authored Microsoft local-DPI switch.
+    pub use_local_dpi: Option<bool>,
+}
+
+impl ImageVariantKey {
+    /// Builds the complete key for a resolved source part and drawing.
+    pub fn from_drawing(source_part: &str, drawing: &Drawing) -> Self {
+        Self {
+            source_part: source_part.to_owned(),
+            disposition: drawing.kind,
+            extent_emu: drawing.extent_emu,
+            crop_units: drawing.crop_units,
+            effective_clip_units: drawing.crop_units,
+            rotation_units: drawing.rotation_units,
+            alpha_background: AlphaBackground::Preserve,
+            compression_state: drawing.compression_state.clone(),
+            use_local_dpi: drawing.use_local_dpi,
+        }
+    }
+}
+
+/// Produces the evidence-backed Word export variant. JPEG sources are already
+/// compressed and transparent PNGs have no proved flattening background, so
+/// both remain unchanged. Opaque PNGs carrying `useLocalDpi=0` use Word's
+/// baseline quality-75 4:2:0 path at source dimensions.
+pub fn export_variant(
+    source: &EncodedImage,
+    key: &ImageVariantKey,
+) -> Result<Option<EncodedImage>> {
+    let EncodedImage::Rgb8 {
+        width,
+        height,
+        data,
+    } = source
+    else {
+        return Ok(None);
+    };
+    if key.use_local_dpi != Some(false) {
+        return Ok(None);
+    }
+    let data = super::jpeg::encode_word_quality_75_420(data, *width, *height)?;
+    Ok(Some(EncodedImage::Jpeg {
+        data,
+        width: *width,
+        height: *height,
+    }))
+}
+
+#[cfg(feature = "fidelity-diagnostics")]
+/// Encodes diagnostic RGB candidates through the exact production Word path.
+pub fn diagnostics_encode_word_jpeg(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    super::jpeg::encode_word_quality_75_420(rgb, width, height)
+}
 
 /// Maximum number of decoded image resources in one document.
 pub const MAX_IMAGES: usize = 10_000;

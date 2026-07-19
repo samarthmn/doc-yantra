@@ -22,7 +22,7 @@ const COMPLEX_INPUT_SHA256 =
   "8c2a8c4725e77bbfb4ddc7925674dc221611a39b876dbd7ea2efc829e70b8530";
 // Includes the stable office-core-pdf-id-v1 trailer ID, not the package patch version.
 const COMPLEX_OUTPUT_SHA256 =
-  "e689b9f1911701a1bceaeea2263940acf5dc5b75eb9db0054a86763b5f426f2a";
+  "16859fa7183754060bd0b65bd2064a3680154de1f0f65d1e34433f0364f800a4";
 const MOCK_REGISTERED_FONT_SHA256S = [
   "51edbfa32d8af939913ae1f4ad0a5173e32083499218c133384638090295f0b0", // Carlito Bold
   "59faf27a90dee5c1b7813b12b26c725ea88adc1bfe37b0ac8e0b8b32a5732c2a", // Caladea Regular

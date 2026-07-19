@@ -494,9 +494,11 @@ pub(crate) fn layout_docx_with_internal_links(
     #[cfg(feature = "fidelity-diagnostics")]
     let diagnostics = collect_layout_trace(doc, &units, &pages);
 
+    let mut finished_pages: Vec<_> = pages.into_iter().map(finish_work_page).collect();
+    let images = compact_images(&doc.images, &mut finished_pages)?;
     let laid = LaidOutDocument {
-        pages: pages.into_iter().map(finish_work_page).collect(),
-        images: clone_images(&doc.images),
+        pages: finished_pages,
+        images,
         outline,
         dates: doc.dates.clone(),
         #[cfg(feature = "fidelity-diagnostics")]
@@ -683,8 +685,68 @@ fn validate_page_float_alignment(
     Ok(())
 }
 
-fn clone_images(images: &[EncodedImage]) -> Vec<EncodedImage> {
-    images.to_vec()
+fn compact_images(images: &[EncodedImage], pages: &mut [Page]) -> Result<Vec<EncodedImage>> {
+    let mut used = vec![false; images.len()];
+    for positioned in pages.iter().flat_map(|page| &page.items) {
+        collect_image_ids(&positioned.item, &mut used)?;
+    }
+
+    let mut remap = vec![usize::MAX; images.len()];
+    let mut compact = Vec::with_capacity(used.iter().filter(|used| **used).count());
+    for (old, image) in images.iter().enumerate() {
+        if used[old] {
+            remap[old] = compact.len();
+            compact.push(image.clone());
+        }
+    }
+    for positioned in pages.iter_mut().flat_map(|page| &mut page.items) {
+        remap_image_ids(&mut positioned.item, &remap)?;
+    }
+    Ok(compact)
+}
+
+fn collect_image_ids(item: &Item, used: &mut [bool]) -> Result<()> {
+    match item {
+        Item::Image { image_id, .. } | Item::CroppedImage { image_id, .. } => {
+            let slot = used.get_mut(image_id.0).ok_or_else(|| {
+                OfficeError::Internal(format!("layout references missing image {}", image_id.0))
+            })?;
+            *slot = true;
+        }
+        Item::Transform { item, .. } => collect_image_ids(item, used)?,
+        Item::Clip { items, .. } => {
+            for positioned in items {
+                collect_image_ids(&positioned.item, used)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn remap_image_ids(item: &mut Item, remap: &[usize]) -> Result<()> {
+    match item {
+        Item::Image { image_id, .. } | Item::CroppedImage { image_id, .. } => {
+            let new = remap.get(image_id.0).copied().ok_or_else(|| {
+                OfficeError::Internal(format!("layout references missing image {}", image_id.0))
+            })?;
+            if new == usize::MAX {
+                return Err(OfficeError::Internal(format!(
+                    "layout image {} was not retained",
+                    image_id.0
+                )));
+            }
+            image_id.0 = new;
+        }
+        Item::Transform { item, .. } => remap_image_ids(item, remap)?,
+        Item::Clip { items, .. } => {
+            for positioned in items {
+                remap_image_ids(&mut positioned.item, remap)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A page under construction plus the y where body content ended.

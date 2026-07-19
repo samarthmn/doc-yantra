@@ -5,7 +5,7 @@
 use super::{DocDates, EncodedImage, ImageId};
 use crate::drawing::chart::Chart;
 use crate::drawing::diagram::{DiagramFallback, DiagramStore};
-use crate::drawing::image::{add_to_budget, decode_required};
+use crate::drawing::image::{ImageVariantKey, add_to_budget, decode_required, export_variant};
 use crate::fonts::FontDb;
 use crate::fonts::odttf;
 use crate::opc::Package;
@@ -41,6 +41,7 @@ pub struct WordDoc {
     main_part: String,
     part_rels: HashMap<String, HashMap<String, String>>,
     image_by_part: HashMap<String, usize>,
+    image_by_variant: HashMap<ImageVariantKey, usize>,
     headers: HashMap<String, Vec<BlockContent>>,
     footnotes: NotesPart,
     endnotes: NotesPart,
@@ -151,7 +152,9 @@ impl WordDoc {
         table_style::apply_notes_table_styles(&styles, &mut endnotes);
 
         // Decode every image part referenced anywhere.
-        let (images, image_by_part) = decode_images(&pkg, &part_rels)?;
+        let image_variant_keys = collect_image_variant_keys(&pkg, &part_rels)?;
+        let (images, image_by_part, image_by_variant) =
+            decode_images(&pkg, &part_rels, &image_variant_keys)?;
         let dates = core_dates(&pkg);
         let diagrams = DiagramStore::load(&pkg)?;
         let mut chart_parts: Vec<_> = part_rels
@@ -186,6 +189,7 @@ impl WordDoc {
             main_part,
             part_rels,
             image_by_part,
+            image_by_variant,
             headers,
             footnotes,
             endnotes,
@@ -252,6 +256,22 @@ impl WordDoc {
     pub fn image_id(&self, rels: &HashMap<String, String>, rel_id: &str) -> Option<ImageId> {
         let target = rels.get(rel_id)?;
         self.image_by_part.get(target).map(|&i| ImageId(i))
+    }
+
+    /// Resolves the placement-specific image export, falling back to the
+    /// source resource when the matrix did not prove an export transform.
+    pub fn image_id_for_drawing(
+        &self,
+        rels: &HashMap<String, String>,
+        drawing: &crate::oxml::dml::Drawing,
+    ) -> Option<ImageId> {
+        let rel_id = drawing.blip_rel_id.as_deref()?;
+        let target = rels.get(rel_id)?;
+        let key = ImageVariantKey::from_drawing(target, drawing);
+        self.image_by_variant
+            .get(&key)
+            .or_else(|| self.image_by_part.get(target))
+            .map(|&index| ImageId(index))
     }
 
     /// Resolves a chart relationship against the current document part.
@@ -360,7 +380,12 @@ pub(crate) fn register_embedded_fonts(pkg: &Package, fonts: &mut FontDb) {
 fn decode_images(
     pkg: &Package,
     part_rels: &HashMap<String, HashMap<String, String>>,
-) -> Result<(Vec<EncodedImage>, HashMap<String, usize>)> {
+    variant_keys: &[ImageVariantKey],
+) -> Result<(
+    Vec<EncodedImage>,
+    HashMap<String, usize>,
+    HashMap<ImageVariantKey, usize>,
+)> {
     let mut images = Vec::new();
     let mut by_part: HashMap<String, usize> = HashMap::new();
 
@@ -395,7 +420,59 @@ fn decode_images(
         by_part.insert(target, images.len());
         images.push(decoded);
     }
-    Ok((images, by_part))
+    let mut by_variant = HashMap::new();
+    for key in variant_keys {
+        let Some(&source_index) = by_part.get(&key.source_part) else {
+            continue;
+        };
+        if let Some(variant) = export_variant(&images[source_index], key)? {
+            let pixels = match &variant {
+                EncodedImage::Jpeg { width, height, .. }
+                | EncodedImage::Rgb8 { width, height, .. }
+                | EncodedImage::Rgba8 { width, height, .. } => {
+                    u64::from(*width) * u64::from(*height)
+                }
+            };
+            add_to_budget(images.len(), &mut total_pixels, pixels)?;
+            by_variant.insert(key.clone(), images.len());
+            images.push(variant);
+        } else {
+            by_variant.insert(key.clone(), source_index);
+        }
+    }
+    Ok((images, by_part, by_variant))
+}
+
+fn collect_image_variant_keys(
+    pkg: &Package,
+    part_rels: &HashMap<String, HashMap<String, String>>,
+) -> Result<Vec<ImageVariantKey>> {
+    let mut keys = Vec::new();
+    let mut parts: Vec<_> = part_rels.keys().collect();
+    parts.sort();
+    for part in parts {
+        let Some(bytes) = pkg.part(part) else {
+            continue;
+        };
+        let Ok(xml) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        let document = crate::oxml::parse_xml(xml, part)?;
+        let rels = &part_rels[part];
+        for node in document
+            .descendants()
+            .filter(|node| crate::oxml::is(*node, W, "drawing"))
+        {
+            let drawing = crate::oxml::dml::Drawing::parse_w_drawing(node);
+            let Some(target) = drawing.blip_rel_id.as_deref().and_then(|id| rels.get(id)) else {
+                continue;
+            };
+            keys.push(ImageVariantKey::from_drawing(target, &drawing));
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
 }
 
 /// Reads `docProps/core.xml` created/modified and formats PDF date literals.

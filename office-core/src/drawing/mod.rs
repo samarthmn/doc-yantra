@@ -3,3 +3,4 @@
 pub mod chart;
 pub mod diagram;
 pub mod image;
+mod jpeg;

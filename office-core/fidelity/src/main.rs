@@ -104,6 +104,18 @@ enum Cmd {
         #[arg(long)]
         extract_dir: Option<PathBuf>,
     },
+    /// Run image resampling/codec candidates against one truth XObject per page.
+    ImageCandidateMatrix {
+        /// DOCX whose `word/media` images are evaluated in natural image-number order.
+        #[arg(long)]
+        source_docx: PathBuf,
+        /// Reference PDF containing one placed image on each corresponding page.
+        #[arg(long)]
+        truth_pdf: PathBuf,
+        /// Optional JSON report path.
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
     /// List corpus cases lacking a `ground-truth.pdf`.
     MissingGroundTruth,
 }
@@ -223,6 +235,14 @@ fn main() -> Result<()> {
         Cmd::AdvanceProbe { pdfs } => run_advance_probe(&pdfs)?,
         Cmd::FontRasterProbe { pdfs, crop } => run_font_raster_probe(&pdfs, crop.as_deref())?,
         Cmd::ImageProbe { pdfs, extract_dir } => run_image_probe(&pdfs, extract_dir.as_deref())?,
+        Cmd::ImageCandidateMatrix {
+            source_docx,
+            truth_pdf,
+            json,
+        } => {
+            let report = image_probe::candidate_matrix(&source_docx, &truth_pdf)?;
+            print_or_write_json(&report, json.as_deref())?;
+        }
         Cmd::Run {
             format,
             case,

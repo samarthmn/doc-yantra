@@ -12,6 +12,7 @@ use office_core::testkit::{
     page_floats_without_text_window_docx, page_top_bottom_float_docx,
     paragraph_column_top_bottom_float_docx, paragraph_float_with_page_horizontal_origin_docx,
     paragraph_top_bottom_anchor_after_text_docx, paragraph_top_bottom_anchor_order_docx,
+    paragraph_top_bottom_anchor_with_after_spacing_docx,
     single_narrow_page_float_docx, stacked_full_then_side_page_floats_docx,
     stale_page_band_schedule_docx, two_paragraph_floats_docx,
     vertically_aligned_body_page_float_docx, wrap_document, wrap_styles, zip_package,
@@ -405,6 +406,22 @@ fn anchor_only_paragraph_occupies_through_top_bottom_band() {
         after.2 >= image.y_pt + 20.0 + 9.0,
         "the following paragraph must begin below the complete band: image={image:?}, after={after:?}"
     );
+}
+
+#[test]
+fn top_bottom_band_absorbs_paragraph_after_spacing_inside_its_reserve() {
+    let baselines = [0, 200].map(|after_twips| {
+        let bytes = paragraph_top_bottom_anchor_with_after_spacing_docx(after_twips);
+        let doc = WordDoc::open(&bytes, &opts()).expect("open after-spacing fixture");
+        let laid = layout_docx(&doc).expect("layout after-spacing fixture").0;
+        glyph_runs(&laid.pages[0])
+            .into_iter()
+            .find(|(text, ..)| text.contains("After spaced band"))
+            .expect("trailing paragraph")
+            .2
+    });
+
+    assert_eq!(baselines[0], baselines[1]);
 }
 
 #[test]

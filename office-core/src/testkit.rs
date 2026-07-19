@@ -344,6 +344,23 @@ pub fn paragraph_top_bottom_anchor_order_docx(
     image_docx(&format!("{paragraph}{trailing}"))
 }
 
+/// Paragraph-relative top-and-bottom anchor with explicit paragraph after-spacing.
+pub fn paragraph_top_bottom_anchor_with_after_spacing_docx(after_twips: u32) -> Vec<u8> {
+    let anchor = picture_anchor(
+        "column",
+        "<wp:posOffset>0</wp:posOffset>",
+        "paragraph",
+        "<wp:posOffset>0</wp:posOffset>",
+        254_000,
+        254_000,
+        "<wp:wrapTopAndBottom/>",
+        1,
+    );
+    image_docx(&format!(
+        r#"<w:p><w:pPr><w:spacing w:after="{after_twips}"/></w:pPr><w:r>{anchor}</w:r></w:p><w:p><w:r><w:t>After spaced band</w:t></w:r></w:p>"#
+    ))
+}
+
 /// Two paragraph-relative floats in one paragraph, outside the bounded envelope.
 pub fn two_paragraph_floats_docx() -> Vec<u8> {
     let anchor = picture_anchor(

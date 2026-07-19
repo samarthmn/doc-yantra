@@ -1118,9 +1118,14 @@ fn layout_paragraph_with_wrap_context(
         }
     }
 
-    if let Some((band_top, band_bottom)) = top_bottom_reserve {
+    let top_bottom_reserve_extension = if let Some((band_top, band_bottom)) = top_bottom_reserve {
+        let occupied_before: f64 = lines.iter().map(|line| line.height_pt).sum();
         apply_top_bottom_band(&mut lines, band_top, band_bottom);
-    }
+        let occupied_after: f64 = lines.iter().map(|line| line.height_pt).sum();
+        (occupied_after - occupied_before).max(0.0)
+    } else {
+        0.0
+    };
     if let Some(first_line) = lines.first_mut() {
         first_line.anchored_items = paragraph_anchors;
     }
@@ -1231,9 +1236,10 @@ fn layout_paragraph_with_wrap_context(
     let wrap_after = (!wrap_after.left_bands.is_empty() || !wrap_after.right_bands.is_empty())
         .then_some(wrap_after);
 
+    let authored_space_after = eff_para.spacing.after_pt.unwrap_or(0.0).max(0.0);
     Ok(ParaLayout {
         space_before_pt: eff_para.spacing.before_pt.unwrap_or(0.0).max(0.0),
-        space_after_pt: eff_para.spacing.after_pt.unwrap_or(0.0).max(0.0),
+        space_after_pt: (authored_space_after - top_bottom_reserve_extension).max(0.0),
         lines,
         keep_next: eff_para.keep_next,
         keep_lines: eff_para.keep_lines,
@@ -1829,7 +1835,7 @@ fn flatten_run(
                 } else if let Some((w, h)) = d.drawing.extent_pt
                     && let Some(rel_id) = &d.drawing.blip_rel_id
                 {
-                    let image_id = doc.image_id(rels, rel_id).ok_or_else(|| {
+                    let image_id = doc.image_id_for_drawing(rels, &d.drawing).ok_or_else(|| {
                         crate::OfficeError::unsupported(
                             crate::UnsupportedCode::MissingRelationshipTarget,
                             format!("image relationship {rel_id} or its target is missing"),

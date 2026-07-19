@@ -458,6 +458,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_image_resize"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12dd43e5011e8d8411a3215a0d57a2ec5c68282fb90eb5d7221fab0113442174"
+dependencies = [
+ "cfg-if",
+ "num-traits",
+ "thiserror",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -472,7 +483,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "fast_image_resize",
  "image",
+ "jpeg-encoder",
  "lopdf",
  "office-core",
  "pdf-core",
@@ -481,6 +494,7 @@ dependencies = [
  "serde_json",
  "toml",
  "ttf-parser",
+ "zip",
 ]
 
 [[package]]
@@ -955,6 +969,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jpeg-encoder"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b0b36cbb4e6704f12f5b5d7b01dac593982c6550859ebd5a66fb15c9ea27fd5"
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1124,6 +1144,7 @@ version = "0.0.13"
 dependencies = [
  "clap",
  "image",
+ "jpeg-encoder",
  "miniz_oxide",
  "pdf-writer",
  "roxmltree",
