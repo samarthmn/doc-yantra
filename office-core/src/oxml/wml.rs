@@ -2721,7 +2721,7 @@ fn parse_indent(node: Node) -> Indent {
     }
 }
 
-fn parse_tabs(node: Node) -> Vec<TabStop> {
+pub(crate) fn parse_tabs(node: Node) -> Vec<TabStop> {
     let mut tabs = Vec::new();
     for c in children(node) {
         if !is(c, W, "tab") {

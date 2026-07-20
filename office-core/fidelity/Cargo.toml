@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 lopdf = { version = "0.42.0", default-features = false }
 ttf-parser = "0.25"
+skrifa = "0.42.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 flate2 = "1"
 tar = "0.4"

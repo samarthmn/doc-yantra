@@ -12,10 +12,10 @@ use office_core::testkit::{
     page_floats_without_text_window_docx, page_top_bottom_float_docx,
     paragraph_column_top_bottom_float_docx, paragraph_float_with_page_horizontal_origin_docx,
     paragraph_top_bottom_anchor_after_text_docx, paragraph_top_bottom_anchor_order_docx,
-    paragraph_top_bottom_anchor_with_after_spacing_docx,
-    single_narrow_page_float_docx, stacked_full_then_side_page_floats_docx,
-    stale_page_band_schedule_docx, two_paragraph_floats_docx,
-    vertically_aligned_body_page_float_docx, wrap_document, wrap_styles, zip_package,
+    paragraph_top_bottom_anchor_with_after_spacing_docx, single_narrow_page_float_docx,
+    stacked_full_then_side_page_floats_docx, stale_page_band_schedule_docx,
+    two_paragraph_floats_docx, vertically_aligned_body_page_float_docx, wrap_document, wrap_styles,
+    zip_package,
 };
 use office_core::{
     ConvertOptions, OfficeFormat, UnsupportedCode, convert, profile, profile_with_options,
@@ -104,6 +104,24 @@ fn glyph_runs(page: &Page) -> Vec<(String, f64, f64, f64)> {
             _ => None,
         })
         .collect()
+}
+
+fn layout_numbered_body(body: &str, numbering_inner: &str) -> LaidOutDocument {
+    let ns = office_core::testkit::DOC_NAMESPACES;
+    let document =
+        format!(r#"<?xml version="1.0"?><w:document{ns}><w:body>{body}</w:body></w:document>"#);
+    let numbering =
+        format!(r#"<?xml version="1.0"?><w:numbering{ns}>{numbering_inner}</w:numbering>"#);
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/numbering.xml", numbering.as_bytes()),
+    ]);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open numbered fixture");
+    layout_docx(&doc).expect("layout numbered fixture").0
 }
 
 fn pdf_page_object_ids(pdf: &[u8]) -> Vec<i32> {
@@ -2410,6 +2428,185 @@ fn numbering_suffix_positions_item_text_after_the_label() {
     }
 }
 
+#[test]
+fn numbering_level_tab_positions_the_body_at_the_authored_stop() {
+    let laid = layout_numbered_body(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Level tab body</w:t></w:r></w:p>"#,
+        r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+        <w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
+        <w:pPr><w:tabs><w:tab w:val="left" w:pos="1440"/></w:tabs><w:ind w:left="720" w:hanging="360"/></w:pPr>
+        </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let body_x = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Level tab body"))
+        .map(|(_, x, ..)| *x)
+        .expect("numbered body");
+    assert!(
+        (body_x - 144.0).abs() <= 0.15,
+        "level w:tab@pos=1440 must place the body 72pt from the text margin: {runs:?}"
+    );
+}
+
+#[test]
+fn numbering_justification_aligns_at_the_hanging_anchor_before_the_suffix_tab() {
+    for (justification, expected) in [("left", "start"), ("center", "center"), ("right", "end")] {
+        let laid = layout_numbered_body(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Roman body</w:t></w:r></w:p>"#,
+            &format!(
+                r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+                <w:start w:val="8"/><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="%1."/><w:lvlJc w:val="{justification}"/>
+                <w:pPr><w:ind w:left="1152" w:hanging="360"/></w:pPr>
+                </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#
+            ),
+        );
+        let runs = glyph_runs(&laid.pages[0]);
+        let (_, label_x, _, label_width) = runs
+            .iter()
+            .find(|(text, ..)| text == "viii.")
+            .expect("Roman numbering label");
+        let body_x = runs
+            .iter()
+            .find(|(text, ..)| text.contains("Roman body"))
+            .map(|(_, x, ..)| *x)
+            .expect("Roman body");
+        let hanging_anchor = 72.0 + 57.6 - 18.0;
+        let actual = match expected {
+            "start" => *label_x,
+            "center" => label_x + label_width / 2.0,
+            "end" => label_x + label_width,
+            _ => unreachable!(),
+        };
+        assert!(
+            (actual - hanging_anchor).abs() <= 0.15,
+            "{justification} label must align its {expected} at the hanging anchor: {runs:?}"
+        );
+        assert!(
+            (body_x - 129.6).abs() <= 0.15,
+            "the default tab suffix must target the 57.6pt text indent: {runs:?}"
+        );
+        if justification == "right" {
+            assert!(
+                body_x > label_x + label_width + 17.8,
+                "a right label must preserve the full hanging gap: {runs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn numbering_direct_indent_and_tabs_override_level_geometry() {
+    let laid = layout_numbered_body(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:tabs><w:tab w:val="left" w:pos="1800"/></w:tabs><w:ind w:left="1800" w:hanging="360"/></w:pPr><w:r><w:t>Direct geometry</w:t></w:r></w:p>"#,
+        r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+        <w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
+        <w:pPr><w:tabs><w:tab w:val="left" w:pos="1440"/></w:tabs><w:ind w:left="720" w:hanging="180"/></w:pPr>
+        </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let label_x = runs
+        .iter()
+        .find(|(text, ..)| text == "1.")
+        .map(|(_, x, ..)| *x)
+        .expect("numbering label");
+    let body_x = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Direct geometry"))
+        .map(|(_, x, ..)| *x)
+        .expect("numbered body");
+    assert!(
+        (label_x - 144.0).abs() <= 0.15 && (body_x - 162.0).abs() <= 0.15,
+        "direct left/hanging/tab values must override the numbering level: {runs:?}"
+    );
+}
+
+#[test]
+fn numbering_label_overflow_uses_the_next_default_tab_stop() {
+    let laid = layout_numbered_body(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Overflow body</w:t></w:r></w:p>"#,
+        r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+        <w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%1.%1."/>
+        <w:pPr><w:ind w:left="360" w:hanging="180"/></w:pPr>
+        </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let body_x = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Overflow body"))
+        .map(|(_, x, ..)| *x)
+        .expect("overflow body");
+    assert!(
+        (body_x - 108.0).abs() <= 0.15,
+        "an overflowing label must advance from the 18pt target to the 36pt default stop: {runs:?}"
+    );
+}
+
+#[test]
+fn numbering_symbol_face_does_not_increase_body_line_pitch() {
+    let laid = layout_numbered_body(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:spacing w:line="276" w:lineRule="auto"/></w:pPr><w:r><w:t>First body</w:t></w:r></w:p>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:spacing w:line="276" w:lineRule="auto"/></w:pPr><w:r><w:t>Second body</w:t></w:r></w:p>"#,
+        r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="●"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:rFonts w:ascii="Noto Sans Symbols"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let first_y = runs
+        .iter()
+        .find(|(text, ..)| text.contains("First body"))
+        .map(|(_, _, y, _)| *y)
+        .expect("first body");
+    let second_y = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Second body"))
+        .map(|(_, _, y, _)| *y)
+        .expect("second body");
+
+    let body_only = layout_numbered_body(
+        r#"<w:p><w:pPr><w:spacing w:line="276" w:lineRule="auto"/></w:pPr><w:r><w:t>First control</w:t></w:r></w:p>
+        <w:p><w:pPr><w:spacing w:line="276" w:lineRule="auto"/></w:pPr><w:r><w:t>Second control</w:t></w:r></w:p>"#,
+        r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="●"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:rFonts w:ascii="Noto Sans Symbols"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    );
+    let control_runs = glyph_runs(&body_only.pages[0]);
+    let control_first_y = control_runs
+        .iter()
+        .find(|(text, ..)| text.contains("First control"))
+        .map(|(_, _, y, _)| *y)
+        .expect("first control body");
+    let control_second_y = control_runs
+        .iter()
+        .find(|(text, ..)| text.contains("Second control"))
+        .map(|(_, _, y, _)| *y)
+        .expect("second control body");
+    assert!(
+        ((second_y - first_y) - (control_second_y - control_first_y)).abs() <= 0.01,
+        "numbering ink must not replace the paragraph body's line box: numbered={runs:?}, control={control_runs:?}"
+    );
+}
+
+#[test]
+fn numbering_text_label_contributes_to_body_line_pitch() {
+    let laid = layout_numbered_body(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>First body</w:t></w:r></w:p>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Second body</w:t></w:r></w:p>"#,
+        r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="[%1]"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    );
+    let runs = glyph_runs(&laid.pages[0]);
+    let first_y = runs
+        .iter()
+        .find(|(text, ..)| text.contains("First body"))
+        .map(|(_, _, y, _)| *y)
+        .expect("first body");
+    let second_y = runs
+        .iter()
+        .find(|(text, ..)| text.contains("Second body"))
+        .map(|(_, _, y, _)| *y)
+        .expect("second body");
+    assert!(
+        second_y - first_y >= 23.0,
+        "a textual numbering label remains part of the first-line box: {runs:?}"
+    );
+}
+
 /// Y-S3: headers on a *mid-document* section must be profiled, not just the final
 /// section's. A two-section doc with Arabic (complex script) in the first
 /// section's header must fail closed; before the all-section union fix, that
@@ -2502,8 +2699,14 @@ fn docx_cjk_text_embeds_cff_faces_as_cid_font_type0() {
     let pdf = convert(&bytes, OfficeFormat::Docx, &options).unwrap().pdf;
 
     let contains = |needle: &[u8]| pdf.windows(needle.len()).any(|window| window == needle);
-    assert!(contains(b"CIDFontType0C"), "CFF program must embed as FontFile3/CIDFontType0C");
-    assert!(contains(b"FontFile3"), "CFF descriptor must reference FontFile3");
+    assert!(
+        contains(b"CIDFontType0C"),
+        "CFF program must embed as FontFile3/CIDFontType0C"
+    );
+    assert!(
+        contains(b"FontFile3"),
+        "CFF descriptor must reference FontFile3"
+    );
     assert!(
         contains(b"/DocYantra-CFF-Encoding"),
         "CFF Type0 font must map codes through the embedded encoding CMap"

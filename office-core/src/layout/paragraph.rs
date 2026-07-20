@@ -10,7 +10,8 @@ use super::{
 };
 #[cfg(feature = "fidelity-diagnostics")]
 use crate::diagnostics::{
-    IndentTrace, InkBoundsTrace, LineTraceDraft, ParagraphPropertyTrace, tab_traces,
+    IndentTrace, InkBoundsTrace, LineTraceDraft, NumberingLayoutTrace, ParagraphPropertyTrace,
+    tab_traces,
 };
 use crate::fonts::{FaceId, FontDb, FontSlot, matching};
 use crate::oxml::numbering::LabelJustification;
@@ -61,6 +62,40 @@ pub(crate) const MAX_TAB_LEADER_GAP_PT: f64 = 1440.0;
 /// one tab. Kept separate from the physical-gap envelope for unusually narrow
 /// authored fonts.
 const MAX_TAB_LEADER_GLYPHS: usize = 4096;
+
+#[derive(Debug, Clone, Copy)]
+enum NumberingGeometryOrigin {
+    DirectParagraph,
+    ParagraphStyle,
+    NumberingLevel,
+    InheritedStyle,
+    Default,
+}
+
+impl NumberingGeometryOrigin {
+    #[cfg(feature = "fidelity-diagnostics")]
+    fn trace_name(self) -> &'static str {
+        match self {
+            Self::DirectParagraph => "direct_paragraph",
+            Self::ParagraphStyle => "paragraph_style",
+            Self::NumberingLevel => "numbering_level",
+            Self::InheritedStyle => "inherited_style",
+            Self::Default => "default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "fidelity-diagnostics"), allow(dead_code))]
+struct ResolvedNumberingGeometry {
+    label_alignment_box_start_pt: f64,
+    label_alignment_box_end_pt: f64,
+    label_ink_end_pt: f64,
+    following_text_start_pt: f64,
+    left_origin: NumberingGeometryOrigin,
+    hanging_origin: NumberingGeometryOrigin,
+    tab_origin: NumberingGeometryOrigin,
+}
 
 pub(crate) const TAB_LEADER_GAP_LIMIT_DETAIL: &str = "tab leader gap exceeds 1440pt safety limit";
 
@@ -493,12 +528,66 @@ fn cjk_breaks_after(ch: char) -> bool {
 fn forbids_line_start(ch: char) -> bool {
     matches!(
         ch,
-        '、' | '。' | '，' | '．' | '：' | '；' | '！' | '？' | '％'
-            | '）' | '］' | '｝' | '〉' | '》' | '」' | '』' | '】' | '〕' | '〗' | '〙' | '〛'
-            | '々' | '〜' | 'ー' | '・' | '゛' | '゜' | 'ゝ' | 'ゞ' | 'ヽ' | 'ヾ'
-            | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ'
-            | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ' | 'ヵ' | 'ヶ'
-            | '｡' | '｣' | '､' | '･' | 'ｰ' | '～' | '‰' | '℃'
+        '、' | '。'
+            | '，'
+            | '．'
+            | '：'
+            | '；'
+            | '！'
+            | '？'
+            | '％'
+            | '）'
+            | '］'
+            | '｝'
+            | '〉'
+            | '》'
+            | '」'
+            | '』'
+            | '】'
+            | '〕'
+            | '〗'
+            | '〙'
+            | '〛'
+            | '々'
+            | '〜'
+            | 'ー'
+            | '・'
+            | '゛'
+            | '゜'
+            | 'ゝ'
+            | 'ゞ'
+            | 'ヽ'
+            | 'ヾ'
+            | 'ぁ'
+            | 'ぃ'
+            | 'ぅ'
+            | 'ぇ'
+            | 'ぉ'
+            | 'っ'
+            | 'ゃ'
+            | 'ゅ'
+            | 'ょ'
+            | 'ゎ'
+            | 'ァ'
+            | 'ィ'
+            | 'ゥ'
+            | 'ェ'
+            | 'ォ'
+            | 'ッ'
+            | 'ャ'
+            | 'ュ'
+            | 'ョ'
+            | 'ヮ'
+            | 'ヵ'
+            | 'ヶ'
+            | '｡'
+            | '｣'
+            | '､'
+            | '･'
+            | 'ｰ'
+            | '～'
+            | '‰'
+            | '℃'
     )
 }
 
@@ -506,7 +595,20 @@ fn forbids_line_start(ch: char) -> bool {
 fn forbids_line_end(ch: char) -> bool {
     matches!(
         ch,
-        '（' | '［' | '｛' | '〈' | '《' | '「' | '『' | '【' | '〔' | '〖' | '〘' | '〚' | '｢' | '￥' | '＄'
+        '（' | '［'
+            | '｛'
+            | '〈'
+            | '《'
+            | '「'
+            | '『'
+            | '【'
+            | '〔'
+            | '〖'
+            | '〘'
+            | '〚'
+            | '｢'
+            | '￥'
+            | '＄'
     )
 }
 
@@ -630,7 +732,6 @@ fn layout_paragraph_with_wrap_context(
     note_sequence: Option<&NoteSequence>,
 ) -> Result<ParaLayout> {
     let eff_para = doc.styles.para_props(&para.props);
-    validate_tab_leader_stops(&eff_para.tabs)?;
     if let Some(detail) = eff_para.borders.unsupported_detail(&doc.theme) {
         return Err(OfficeError::unsupported(
             UnsupportedCode::UnknownElement,
@@ -658,13 +759,18 @@ fn layout_paragraph_with_wrap_context(
     let label_left = label.as_ref().and_then(|l| l.left_pt);
     let label_hanging = label.as_ref().and_then(|l| l.hanging_pt);
     let direct_indent = &para.props.indent;
-    let left = direct_indent
-        .left_pt
-        .or(own_style_indent.and_then(|indent| indent.left_pt))
-        .or(label_left)
-        .or(eff_para.indent.left_pt)
-        .unwrap_or(0.0)
-        .max(0.0);
+    let (left, left_origin) = if let Some(value) = direct_indent.left_pt {
+        (value, NumberingGeometryOrigin::DirectParagraph)
+    } else if let Some(value) = own_style_indent.and_then(|indent| indent.left_pt) {
+        (value, NumberingGeometryOrigin::ParagraphStyle)
+    } else if let Some(value) = label_left {
+        (value, NumberingGeometryOrigin::NumberingLevel)
+    } else if let Some(value) = eff_para.indent.left_pt {
+        (value, NumberingGeometryOrigin::InheritedStyle)
+    } else {
+        (0.0, NumberingGeometryOrigin::Default)
+    };
+    let left = left.max(0.0);
     let right_indent = eff_para.indent.right_pt.unwrap_or(0.0).max(0.0);
     let right_border = eff_para
         .borders
@@ -676,61 +782,68 @@ fn layout_paragraph_with_wrap_context(
     // from a single source at each precedence step.
     let own_style_pair = own_style_indent
         .filter(|indent| indent.first_line_pt.is_some() || indent.hanging_pt.is_some());
-    let (first_line, hanging) = if direct_indent.first_line_pt.is_some()
-        || direct_indent.hanging_pt.is_some()
-    {
-        (
-            direct_indent.first_line_pt.unwrap_or(0.0),
-            direct_indent.hanging_pt.unwrap_or(0.0),
-        )
-    } else if let Some(own) = own_style_pair {
-        (
-            own.first_line_pt.unwrap_or(0.0),
-            own.hanging_pt.unwrap_or(0.0),
-        )
-    } else if let Some(label_hanging) = label_hanging {
-        (0.0, label_hanging)
-    } else {
-        (
-            eff_para.indent.first_line_pt.unwrap_or(0.0),
-            eff_para.indent.hanging_pt.unwrap_or(0.0),
-        )
-    };
-    let first_offset = if let Some(label) = label.as_ref() {
-        let label_width: f64 = label
-            .runs
-            .iter()
-            .flat_map(|run| &run.glyphs)
-            .map(|glyph| glyph.advance_pt)
-            .sum();
-        let area_left = (left - hanging).max(0.0);
-        let label_x = match label.justification {
-            LabelJustification::Start => area_left,
-            LabelJustification::Center => area_left + (hanging - label_width).max(0.0) / 2.0,
-            LabelJustification::End => (left - label_width).max(area_left),
-        };
-        let text_x = match label.suffix {
-            // Word's default numbering suffix tabs to the level's text
-            // position (`w:ind/@w:left`). The hanging area positions only the
-            // label and must not pull item text back over it — and a label
-            // wider than the hanging area pushes the text on to the next
-            // default tab stop instead of being overprinted.
-            LevelSuffix::Tab => {
-                let label_end = label_x + label_width;
-                if label_end > left + 0.01 {
-                    let interval = doc.settings.default_tab_stop_pt.max(0.01);
-                    (label_end / interval).floor() * interval + interval
+    let (first_line, hanging, hanging_origin) =
+        if direct_indent.first_line_pt.is_some() || direct_indent.hanging_pt.is_some() {
+            (
+                direct_indent.first_line_pt.unwrap_or(0.0),
+                direct_indent.hanging_pt.unwrap_or(0.0),
+                NumberingGeometryOrigin::DirectParagraph,
+            )
+        } else if let Some(own) = own_style_pair {
+            (
+                own.first_line_pt.unwrap_or(0.0),
+                own.hanging_pt.unwrap_or(0.0),
+                NumberingGeometryOrigin::ParagraphStyle,
+            )
+        } else if let Some(label_hanging) = label_hanging {
+            (0.0, label_hanging, NumberingGeometryOrigin::NumberingLevel)
+        } else {
+            (
+                eff_para.indent.first_line_pt.unwrap_or(0.0),
+                eff_para.indent.hanging_pt.unwrap_or(0.0),
+                if eff_para.indent.first_line_pt.is_some() || eff_para.indent.hanging_pt.is_some() {
+                    NumberingGeometryOrigin::InheritedStyle
                 } else {
-                    left
-                }
-            }
-            LevelSuffix::Nothing => label_x + label_width,
-            LevelSuffix::Space => label_x + label_width + label.suffix_space_advance_pt,
+                    NumberingGeometryOrigin::Default
+                },
+            )
         };
-        (text_x - left + first_line.max(0.0)).max(-left)
-    } else {
-        (first_line - hanging).max(-left)
-    };
+
+    // Numbering-level `pPr` sits between inherited/style properties and direct
+    // paragraph formatting. Tab stops overlay by authored position; a `clear`
+    // removes the lower-precedence stop at that position.
+    let mut para_without_direct_tabs = para.props.clone();
+    para_without_direct_tabs.tabs.clear();
+    let inherited_tabs = doc.styles.para_props(&para_without_direct_tabs).tabs;
+    let resolved_tabs = resolve_numbering_tabs(
+        &inherited_tabs,
+        label
+            .as_ref()
+            .map(|label| label.tabs.as_slice())
+            .unwrap_or(&[]),
+        &para.props.tabs,
+    );
+    let tab_stops = resolved_tabs
+        .iter()
+        .map(|resolved| resolved.stop)
+        .collect::<Vec<_>>();
+    validate_tab_leader_stops(&tab_stops)?;
+
+    let numbering_geometry = label.as_ref().map(|label| {
+        resolve_numbering_geometry(
+            label,
+            left,
+            hanging,
+            doc.settings.default_tab_stop_pt,
+            &resolved_tabs,
+            left_origin,
+            hanging_origin,
+        )
+    });
+    let first_offset = numbering_geometry.as_ref().map_or_else(
+        || (first_line - hanging).max(-left),
+        |geometry| (geometry.following_text_start_pt - left + first_line.max(0.0)).max(-left),
+    );
 
     // A hanging indent moves the list label into the area before `left`; it
     // does not grant the first text line extra room at the right edge. Only a
@@ -755,12 +868,6 @@ fn layout_paragraph_with_wrap_context(
     });
     let line_spacing = eff_para.spacing.line;
     let default_tab = doc.settings.default_tab_stop_pt;
-    let mut tab_stops = eff_para.tabs.clone();
-    tab_stops.sort_by(|a, b| {
-        a.pos_pt
-            .partial_cmp(&b.pos_pt)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
     #[cfg(feature = "fidelity-diagnostics")]
     let diagnostic_paragraph = {
         let style_props = para
@@ -791,9 +898,18 @@ fn layout_paragraph_with_wrap_context(
             style_tabs: tab_traces(&style_props.tabs),
             numbering_tabs: numbering_level
                 .as_ref()
-                .map(|level| tab_traces(&level.diagnostic_tabs))
+                .map(|level| tab_traces(&level.tabs))
                 .unwrap_or_default(),
             effective_tabs: tab_traces(&tab_stops),
+            numbering_layout: numbering_geometry.map(|geometry| NumberingLayoutTrace {
+                label_alignment_box_start_pt: geometry.label_alignment_box_start_pt,
+                label_alignment_box_end_pt: geometry.label_alignment_box_end_pt,
+                label_ink_end_pt: geometry.label_ink_end_pt,
+                following_text_start_pt: geometry.following_text_start_pt,
+                left_origin: geometry.left_origin.trace_name().to_string(),
+                hanging_origin: geometry.hanging_origin.trace_name().to_string(),
+                tab_origin: geometry.tab_origin.trace_name().to_string(),
+            }),
         }
     };
 
@@ -803,7 +919,6 @@ fn layout_paragraph_with_wrap_context(
             Atom::Glyph { style, .. } => Some(style.line_box_height_pt),
             _ => None,
         })
-        .chain(label.as_ref().map(|value| value.line_height_pt))
         .fold(0.0_f64, f64::max)
         .max(para_mark_height(doc, para, false));
     let nominal_line_height = apply_line_spacing(line_spacing, nominal_natural_height).max(0.01);
@@ -813,7 +928,6 @@ fn layout_paragraph_with_wrap_context(
             Atom::Glyph { style, .. } => Some(style.line_box_ascent_pt),
             _ => None,
         })
-        .chain(label.as_ref().map(|value| value.ascent_pt))
         .fold(0.0_f64, f64::max);
     let nominal_baseline_offset = if nominal_baseline_offset > 0.0 {
         nominal_baseline_offset.min(nominal_line_height)
@@ -1040,14 +1154,17 @@ fn layout_paragraph_with_wrap_context(
             content_w,
             avail_width_pt,
             base_x,
-            left,
-            hanging,
             alignment,
             line_spacing,
             is_last,
             default_tab,
             &tab_stops,
             this_label,
+            if is_first {
+                numbering_geometry.as_ref()
+            } else {
+                None
+            },
             rtl,
             page_horizontal,
         )?;
@@ -2544,6 +2661,123 @@ fn next_tab_stop(x: f64, default_tab: f64, tab_stops: &[TabStop]) -> f64 {
     n * default_tab
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ResolvedTabStop {
+    stop: TabStop,
+    origin: NumberingGeometryOrigin,
+}
+
+fn resolve_numbering_tabs(
+    inherited: &[TabStop],
+    numbering_level: &[TabStop],
+    direct: &[TabStop],
+) -> Vec<ResolvedTabStop> {
+    fn overlay(
+        effective: &mut Vec<ResolvedTabStop>,
+        authored: &[TabStop],
+        origin: NumberingGeometryOrigin,
+    ) {
+        for stop in authored {
+            effective.retain(|existing| (existing.stop.pos_pt - stop.pos_pt).abs() > 0.01);
+            if stop.alignment != TabAlign::Clear {
+                effective.push(ResolvedTabStop {
+                    stop: *stop,
+                    origin,
+                });
+            }
+        }
+    }
+
+    let mut effective = Vec::new();
+    overlay(
+        &mut effective,
+        inherited,
+        NumberingGeometryOrigin::InheritedStyle,
+    );
+    overlay(
+        &mut effective,
+        numbering_level,
+        NumberingGeometryOrigin::NumberingLevel,
+    );
+    overlay(
+        &mut effective,
+        direct,
+        NumberingGeometryOrigin::DirectParagraph,
+    );
+    effective.sort_by(|left, right| {
+        left.stop
+            .pos_pt
+            .partial_cmp(&right.stop.pos_pt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    effective
+}
+
+fn resolve_numbering_geometry(
+    label: &PlacedLabel,
+    left: f64,
+    hanging: f64,
+    default_tab: f64,
+    tab_stops: &[ResolvedTabStop],
+    left_origin: NumberingGeometryOrigin,
+    hanging_origin: NumberingGeometryOrigin,
+) -> ResolvedNumberingGeometry {
+    let label_width: f64 = label
+        .runs
+        .iter()
+        .flat_map(|run| &run.glyphs)
+        .map(|glyph| glyph.advance_pt)
+        .sum();
+    // ECMA-376's numbering position is the alignment point at
+    // `left - hanging`: start labels begin there, centered labels straddle it,
+    // and end/right labels finish there. The hanging interval is the gap from
+    // that point to the following-text target, not a box in which a right
+    // label is aligned against the text indent.
+    let alignment_point = (left - hanging).max(0.0);
+    let label_start = match label.justification {
+        LabelJustification::Start => alignment_point,
+        LabelJustification::Center => (alignment_point - label_width / 2.0).max(0.0),
+        LabelJustification::End => (alignment_point - label_width).max(0.0),
+    };
+    let label_end = label_start + label_width;
+    let (following_text_start_pt, tab_origin) = match label.suffix {
+        LevelSuffix::Nothing => (label_end, left_origin),
+        LevelSuffix::Space => (
+            label_end + label.suffix_space_advance_pt,
+            NumberingGeometryOrigin::Default,
+        ),
+        LevelSuffix::Tab => {
+            if let Some(next) = tab_stops
+                .iter()
+                .find(|resolved| resolved.stop.pos_pt > label_end + 0.01)
+            {
+                (next.stop.pos_pt, next.origin)
+            } else if tab_stops.is_empty() && label_end < left - 0.01 {
+                // Omitted `w:suff` means tab. With no authored stop, Word
+                // first targets the text indent itself.
+                (left, left_origin)
+            } else {
+                // Reaching the target counts as consuming it; continue to the
+                // next document-default stop rather than abutting/overprinting
+                // the following text.
+                (
+                    next_tab_stop(label_end, default_tab.max(0.01), &[]),
+                    NumberingGeometryOrigin::Default,
+                )
+            }
+        }
+    };
+    ResolvedNumberingGeometry {
+        label_alignment_box_start_pt: label_start,
+        label_alignment_box_end_pt: label_end,
+        label_ink_end_pt: label_end,
+        following_text_start_pt,
+        left_origin,
+        hanging_origin,
+        tab_origin,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TabPlacement {
     target: f64,
@@ -2600,14 +2834,13 @@ fn place_line(
     content_w: f64,
     anchor_width_pt: f64,
     base_x: f64,
-    left: f64,
-    hanging: f64,
     alignment: Jc,
     line_spacing: Option<LineSpacing>,
     is_last: bool,
     default_tab: f64,
     tab_stops: &[TabStop],
     label: Option<&PlacedLabel>,
+    numbering_geometry: Option<&ResolvedNumberingGeometry>,
     rtl: bool,
     page_horizontal: Option<PageHorizontalContext>,
 ) -> Result<Line> {
@@ -2660,16 +2893,20 @@ fn place_line(
         _ => (0.0, 0.0),
     };
 
-    // Line box: max height/ascent over glyphs + label, with line spacing applied.
+    // Textual numbering is part of Word's first-line box. A `numFmt=bullet`
+    // marker is decorative ink instead: Task 0's anchors trace showed its
+    // Noto-symbol fallback incorrectly adding 0.99pt per row, while the CJK
+    // corpus proves textual labels such as `[0003]` and `[청구항 1]` retain
+    // their authored label metrics.
     let mut natural_h = 0.0_f64;
     let mut text_natural_h = 0.0_f64;
     let mut ascent = 0.0_f64;
     let mut descent = 0.0_f64;
-    if let Some(l) = label {
-        natural_h = natural_h.max(l.line_height_pt);
-        text_natural_h = text_natural_h.max(l.line_height_pt);
-        ascent = ascent.max(l.ascent_pt);
-        descent = descent.max((l.line_height_pt - l.ascent_pt).max(0.0));
+    if let Some(label) = label.filter(|label| label.contributes_to_line_box) {
+        natural_h = natural_h.max(label.line_height_pt);
+        text_natural_h = text_natural_h.max(label.line_height_pt);
+        ascent = ascent.max(label.ascent_pt);
+        descent = descent.max((label.line_height_pt - label.ascent_pt).max(0.0));
     }
     for &k in indices {
         match &atoms[k] {
@@ -2710,16 +2947,25 @@ fn place_line(
         }
     }
     if natural_h <= 0.0 {
-        natural_h = DEFAULT_SIZE_PT * 1.2;
-        ascent = DEFAULT_SIZE_PT;
+        if let Some(label) = label {
+            natural_h = label.line_height_pt;
+            ascent = label.ascent_pt;
+            descent = (label.line_height_pt - label.ascent_pt).max(0.0);
+        } else {
+            natural_h = DEFAULT_SIZE_PT * 1.2;
+            ascent = DEFAULT_SIZE_PT;
+        }
     }
     if text_natural_h <= 0.0 {
         text_natural_h = DEFAULT_SIZE_PT * 1.2;
     }
     natural_h = natural_h.max(ascent + descent);
-    let has_inline_object = indices
-        .iter()
-        .any(|&k| matches!(atoms[k], Atom::Image { .. } | Atom::Composite { anchor: None, .. }));
+    let has_inline_object = indices.iter().any(|&k| {
+        matches!(
+            atoms[k],
+            Atom::Image { .. } | Atom::Composite { anchor: None, .. }
+        )
+    });
     let height = match line_spacing {
         Some(LineSpacing::Auto(multiplier)) => {
             // Word grows an inline-object line by the surplus leading of one
@@ -2747,22 +2993,9 @@ fn place_line(
     let mut anchored_items: Vec<AnchoredLineItem> = Vec::new();
     let mut bookmarks = Vec::new();
 
-    // Numbering label at (left - hanging).
-    if let Some(l) = label {
-        let label_width: f64 = l
-            .runs
-            .iter()
-            .flat_map(|run| &run.glyphs)
-            .map(|glyph| glyph.advance_pt)
-            .sum();
-        let area_left = (left - hanging).max(0.0);
-        let label_x = match l.justification {
-            LabelJustification::Start => area_left,
-            LabelJustification::Center => area_left + (hanging - label_width).max(0.0) / 2.0,
-            LabelJustification::End => (left - label_width).max(area_left),
-        };
-        let mut run_x = label_x;
-        for run in &l.runs {
+    if let (Some(label), Some(geometry)) = (label, numbering_geometry) {
+        let mut run_x = geometry.label_alignment_box_start_pt;
+        for run in &label.runs {
             text_items.push((
                 0,
                 1,

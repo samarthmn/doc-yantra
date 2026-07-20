@@ -503,6 +503,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "skrifa",
  "tar",
  "toml",
  "ttf-parser",

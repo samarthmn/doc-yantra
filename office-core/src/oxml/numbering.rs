@@ -2,9 +2,7 @@
 //! instances (with `lvlOverride`), and the number-format helper the list layout
 //! uses to render counters.
 
-use super::wml::{Indent, RunProps, parse_run_props};
-#[cfg(feature = "fidelity-diagnostics")]
-use super::wml::{TabAlign, TabLeader, TabStop};
+use super::wml::{Indent, RunProps, TabStop, parse_run_props, parse_tabs};
 use super::{Node, W, attr, child, children, measure_twip_to_pt, parse_i64};
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
@@ -95,14 +93,34 @@ pub struct LevelDef {
     pub suffix: LevelSuffix,
     /// Indentation from the level's `pPr`.
     pub indent: Indent,
+    /// Typed tab stops from the level's `pPr`.
+    pub tabs: Vec<TabStop>,
+    /// Provenance of authored left/hanging indentation after level overrides.
+    pub indent_provenance: LevelIndentProvenance,
     /// The label's run properties (`lvl` `rPr`).
     pub rpr: RunProps,
     /// Label justification within the hanging-indent area.
     pub justification: LabelJustification,
     /// Legal numbering forces referenced levels to decimal.
     pub legal: bool,
-    #[cfg(feature = "fidelity-diagnostics")]
-    pub(crate) diagnostic_tabs: Vec<TabStop>,
+}
+
+/// Source of a numbering level's authored indentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelPropertyOrigin {
+    /// The property came from the abstract numbering level.
+    AbstractLevel,
+    /// The property came from a concrete `w:lvlOverride/w:lvl`.
+    LevelOverride,
+}
+
+/// Per-property provenance retained with a resolved numbering level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LevelIndentProvenance {
+    /// Origin of `w:ind/@w:left` or `@w:start`.
+    pub left: Option<LevelPropertyOrigin>,
+    /// Origin of `w:ind/@w:hanging`.
+    pub hanging: Option<LevelPropertyOrigin>,
 }
 
 /// Number-label justification.
@@ -125,11 +143,11 @@ impl Default for LevelDef {
             start: 1,
             suffix: LevelSuffix::Tab,
             indent: Indent::default(),
+            tabs: Vec::new(),
+            indent_provenance: LevelIndentProvenance::default(),
             rpr: RunProps::default(),
             justification: LabelJustification::Start,
             legal: false,
-            #[cfg(feature = "fidelity-diagnostics")]
-            diagnostic_tabs: Vec::new(),
         }
     }
 }
@@ -202,12 +220,14 @@ fn parse_abstract_num(node: Node) -> AbstractNum {
             continue;
         }
         let ilvl = parse_i64(attr(lvl, W, "ilvl")).unwrap_or(0).max(0) as u32;
-        abstract_num.levels.insert(ilvl, parse_level(lvl));
+        abstract_num
+            .levels
+            .insert(ilvl, parse_level(lvl, LevelPropertyOrigin::AbstractLevel));
     }
     abstract_num
 }
 
-fn parse_level(lvl: Node) -> LevelDef {
+fn parse_level(lvl: Node, origin: LevelPropertyOrigin) -> LevelDef {
     let mut def = LevelDef::default();
     for c in children(lvl) {
         match c.tag_name().name() {
@@ -221,10 +241,11 @@ fn parse_level(lvl: Node) -> LevelDef {
             "suff" => def.suffix = LevelSuffix::parse(attr(c, W, "val")),
             "pPr" => {
                 def.indent = parse_level_indent(c);
-                #[cfg(feature = "fidelity-diagnostics")]
-                {
-                    def.diagnostic_tabs = parse_level_tabs(c);
-                }
+                def.tabs = child(c, W, "tabs").map(parse_tabs).unwrap_or_default();
+                def.indent_provenance = LevelIndentProvenance {
+                    left: def.indent.left_pt.map(|_| origin),
+                    hanging: def.indent.hanging_pt.map(|_| origin),
+                };
             }
             "rPr" => def.rpr = parse_run_props(c),
             "lvlJc" => {
@@ -298,38 +319,6 @@ fn parse_level_indent(ppr: Node) -> Indent {
     indent
 }
 
-#[cfg(feature = "fidelity-diagnostics")]
-fn parse_level_tabs(ppr: Node) -> Vec<TabStop> {
-    let Some(tabs) = child(ppr, W, "tabs") else {
-        return Vec::new();
-    };
-    children(tabs)
-        .filter(|tab| super::is(*tab, W, "tab"))
-        .filter_map(|tab| {
-            let pos_pt = measure_twip_to_pt(attr(tab, W, "pos"))?;
-            let alignment = match attr(tab, W, "val") {
-                Some("center") => TabAlign::Center,
-                Some("right" | "end") => TabAlign::Right,
-                Some("decimal") => TabAlign::Decimal,
-                Some("bar") => TabAlign::Bar,
-                Some("clear") => TabAlign::Clear,
-                _ => TabAlign::Left,
-            };
-            let leader = match attr(tab, W, "leader") {
-                Some("dot") => TabLeader::Dot,
-                Some("hyphen") => TabLeader::Hyphen,
-                Some("underscore") => TabLeader::Underscore,
-                _ => TabLeader::None,
-            };
-            Some(TabStop {
-                pos_pt,
-                alignment,
-                leader,
-            })
-        })
-        .collect()
-}
-
 fn parse_num_instance(node: Node) -> Option<NumInstance> {
     let abstract_id = child(node, W, "abstractNumId").and_then(|n| parse_i64(attr(n, W, "val")))?;
     let mut inst = NumInstance {
@@ -348,7 +337,8 @@ fn parse_num_instance(node: Node) -> Option<NumInstance> {
             inst.start_overrides.insert(ilvl, start);
         }
         if let Some(lvl) = child(ov, W, "lvl") {
-            inst.level_overrides.insert(ilvl, parse_level(lvl));
+            inst.level_overrides
+                .insert(ilvl, parse_level(lvl, LevelPropertyOrigin::LevelOverride));
         }
     }
     Some(inst)
@@ -612,5 +602,38 @@ mod tests {
             "twenty-first"
         );
         assert_eq!(format_number(&NumFmt::parse("none"), 9).unwrap(), "");
+    }
+
+    #[test]
+    fn levels_zero_through_eight_retain_tabs_suffix_and_indent_provenance() {
+        let levels = (0..=8)
+            .map(|ilvl| {
+                let left = 720 + ilvl * 360;
+                format!(
+                    r#"<w:lvl w:ilvl="{ilvl}"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:tabs><w:tab w:val="left" w:pos="{left}"/></w:tabs><w:ind w:left="{left}" w:hanging="360"/></w:pPr></w:lvl>"#
+                )
+            })
+            .collect::<String>();
+        let xml = format!(
+            r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0">{levels}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        let numbering = Numbering::parse(&xml).expect("parse nine numbering levels");
+        for ilvl in 0..=8 {
+            let level = numbering.resolve(1, ilvl).expect("resolve numbering level");
+            let expected = (720.0 + f64::from(ilvl) * 360.0) / 20.0;
+            assert_eq!(level.suffix, LevelSuffix::Tab, "omitted w:suff at {ilvl}");
+            assert_eq!(level.indent.left_pt, Some(expected));
+            assert_eq!(level.indent.hanging_pt, Some(18.0));
+            assert_eq!(level.tabs.len(), 1);
+            assert_eq!(level.tabs[0].pos_pt, expected);
+            assert_eq!(
+                level.indent_provenance.left,
+                Some(LevelPropertyOrigin::AbstractLevel)
+            );
+            assert_eq!(
+                level.indent_provenance.hanging,
+                Some(LevelPropertyOrigin::AbstractLevel)
+            );
+        }
     }
 }

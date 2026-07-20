@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use office_core::layout::{Item, WordDoc, layout_docx};
 use office_core::{ConvertOptions, OfficeFormat, convert, profile};
 
 const DOCUMENTED_WARNING_CODES: &[&str] = &[
@@ -38,6 +39,74 @@ fn gdocs_anchors_toc_has_exact_word_page_count() {
     let output = convert(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
         .expect("convert anchors/TOC fixture");
     assert_eq!(output.page_count, 10, "must match the Word export");
+}
+
+#[test]
+fn gdocs_anchors_toc_retains_numbering_levels_and_page_ten_origins() {
+    let bytes = fixture("gdocs-anchors-toc");
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).expect("open anchors fixture");
+    for (ilvl, expected_left, expected_hanging) in [
+        (0, 36.0, 18.0),
+        (1, 57.6, 21.6),
+        (2, 79.2, 25.2),
+        (3, 104.4, 32.4),
+    ] {
+        let level = doc
+            .numbering
+            .resolve(3, ilvl)
+            .unwrap_or_else(|| panic!("resolve numId=3 ilvl={ilvl}"));
+        assert_eq!(level.indent.left_pt, Some(expected_left));
+        assert_eq!(level.indent.hanging_pt, Some(expected_hanging));
+    }
+    let roman = doc.numbering.resolve(5, 0).expect("resolve Roman level");
+    assert_eq!(roman.indent.left_pt, Some(57.6));
+    assert_eq!(roman.indent.hanging_pt, Some(18.0));
+
+    let (laid, _) = layout_docx(&doc).expect("layout anchors fixture");
+    let runs = laid.pages[9]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) => Some((
+                run.glyphs.iter().map(|glyph| glyph.ch).collect::<String>(),
+                positioned.x_pt,
+                run.glyphs.iter().map(|glyph| glyph.advance_pt).sum::<f64>(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let roman_index = runs
+        .iter()
+        .position(|(text, ..)| text == "i.")
+        .expect("page-10 i. label");
+    let (_, roman_x, roman_width) = &runs[roman_index];
+    let (_, roman_body_x, _) = runs
+        .iter()
+        .skip(roman_index + 1)
+        .find(|(text, ..)| text == "One")
+        .expect("page-10 Roman body");
+    assert!(
+        roman_body_x - (roman_x + roman_width) >= 17.8,
+        "Roman label must retain the truth's tab gap: {runs:?}"
+    );
+
+    let label_111 = runs
+        .iter()
+        .position(|(text, ..)| text == "1.1.1.")
+        .expect("1.1.1 label");
+    let label_112 = runs
+        .iter()
+        .position(|(text, ..)| text == "1.1.2.")
+        .expect("1.1.2 label");
+    let body_111_x = runs[label_111 + 1].1;
+    let body_112_x = runs[label_112 + 1].1;
+    let continuation_112_x = runs[label_112 + 2].1;
+    assert!(
+        (body_111_x - 180.0).abs() <= 0.15
+            && (body_112_x - 180.0).abs() <= 0.15
+            && (continuation_112_x - 151.2).abs() <= 0.15,
+        "level-2 labels must use the overflow tab while continuations retain the level-2 text indent: {runs:?}"
+    );
 }
 
 #[test]

@@ -855,12 +855,22 @@ pub(crate) fn extract_content_page_with_bytes(
         bail!("probe page is 1-based and must be at least 1");
     }
     let document = Document::load_mem(bytes).context("parse PDF")?;
+    extract_content_page_from_document(&document, page_number)
+}
+
+pub(crate) fn extract_content_page_from_document(
+    document: &Document,
+    page_number: u32,
+) -> Result<(PdfPageContent, Vec<ExtractedImageXObject>)> {
+    if page_number == 0 {
+        bail!("probe page is 1-based and must be at least 1");
+    }
     let page_id = document
         .get_pages()
         .get(&page_number)
         .copied()
         .ok_or_else(|| anyhow!("PDF has no page {page_number}"))?;
-    let resources = inherited_dict(&document, page_id, b"Resources")?;
+    let resources = inherited_dict(document, page_id, b"Resources")?;
     let data = document
         .get_page_content(page_id)
         .context("read page content streams")?;
@@ -869,7 +879,7 @@ pub(crate) fn extract_content_page_with_bytes(
     let mut images = Vec::new();
     let mut operator_index = 0usize;
     record_operations(
-        &document,
+        document,
         &content.operations,
         resources,
         ContentState::default(),

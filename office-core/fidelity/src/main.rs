@@ -4,6 +4,7 @@
 //! Ground-truth PDFs are produced by a human. `run` is strict: every selected
 //! case needs a source, manifest, ground truth, and recorded Word provenance.
 
+mod advance_models;
 mod advance_probe;
 mod corpus;
 mod font_form_experiment;
@@ -88,6 +89,15 @@ enum Cmd {
     AdvanceProbe {
         #[command(flatten)]
         pdfs: PdfPairArgs,
+    },
+    /// Evaluate Task 2 advance candidates on the frozen discovery/held-out split.
+    AdvanceModels {
+        /// Directory containing `<case>-ours.pdf` baseline candidates.
+        #[arg(long)]
+        ours_dir: PathBuf,
+        /// JSON result path, outside the frozen corpus.
+        #[arg(long)]
+        json: PathBuf,
     },
     /// Compare already-positioned glyph rasters with the official scorer.
     FontRasterProbe {
@@ -255,6 +265,11 @@ fn main() -> Result<()> {
             &font_dirs,
         )?,
         Cmd::AdvanceProbe { pdfs } => run_advance_probe(&pdfs)?,
+        Cmd::AdvanceModels { ours_dir, json } => {
+            ensure_diagnostic_output_outside_corpus(&json)?;
+            let report = advance_models::run(&ours_dir)?;
+            print_or_write_json(&report, Some(&json))?;
+        }
         Cmd::FontRasterProbe { pdfs, crop } => run_font_raster_probe(&pdfs, crop.as_deref())?,
         Cmd::FontFormExperiment {
             ubuntu_font,

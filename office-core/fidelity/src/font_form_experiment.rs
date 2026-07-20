@@ -1431,20 +1431,28 @@ fn outline_signature(face: &Face<'_>, gid: GlyphId) -> Option<OutlineSignature> 
     Some(signature)
 }
 
-fn embedded_font_program(pdf: &[u8], page: u32, resource_name: &str) -> Result<Vec<u8>> {
+pub(crate) fn embedded_font_program(pdf: &[u8], page: u32, resource_name: &str) -> Result<Vec<u8>> {
     let document = Document::load_mem(pdf)?;
+    embedded_font_program_from_document(&document, page, resource_name)
+}
+
+pub(crate) fn embedded_font_program_from_document(
+    document: &Document,
+    page: u32,
+    resource_name: &str,
+) -> Result<Vec<u8>> {
     let page_id = *document
         .get_pages()
         .get(&page)
         .with_context(|| format!("truth PDF has no page {page}"))?;
-    let resources = inherited_dictionary(&document, page_id, b"Resources")?;
-    let fonts = resolve(&document, resources.get(b"Font")?)?.as_dict()?;
-    let font = resolve(&document, fonts.get(resource_name.as_bytes())?)?.as_dict()?;
+    let resources = inherited_dictionary(document, page_id, b"Resources")?;
+    let fonts = resolve(document, resources.get(b"Font")?)?.as_dict()?;
+    let font = resolve(document, fonts.get(resource_name.as_bytes())?)?.as_dict()?;
     let descriptor_owner = if font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Type0")
     {
         let descendants = resolve(&document, font.get(b"DescendantFonts")?)?.as_array()?;
         resolve(
-            &document,
+            document,
             descendants
                 .first()
                 .context("Type0 font has no descendant")?,
@@ -1453,11 +1461,11 @@ fn embedded_font_program(pdf: &[u8], page: u32, resource_name: &str) -> Result<V
     } else {
         font
     };
-    let descriptor = resolve(&document, descriptor_owner.get(b"FontDescriptor")?)?.as_dict()?;
+    let descriptor = resolve(document, descriptor_owner.get(b"FontDescriptor")?)?.as_dict()?;
     let file = descriptor
         .get(b"FontFile2")
         .context("truth font has no TrueType FontFile2")?;
-    let stream = resolve(&document, file)?.as_stream()?;
+    let stream = resolve(document, file)?.as_stream()?;
     Ok(stream
         .decompressed_content()
         .unwrap_or_else(|_| stream.content.clone()))

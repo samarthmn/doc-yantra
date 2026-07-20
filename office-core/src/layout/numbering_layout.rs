@@ -6,8 +6,10 @@ use super::GlyphRun;
 use super::assemble::WordDoc;
 use crate::Result;
 use crate::fonts::{FontSlot, matching};
-use crate::oxml::numbering::{LabelJustification, LevelDef, LevelSuffix, NumFmt, format_number};
-use crate::oxml::wml::{NumRef, ParaProps, Paragraph};
+use crate::oxml::numbering::{
+    LabelJustification, LevelDef, LevelIndentProvenance, LevelSuffix, NumFmt, format_number,
+};
+use crate::oxml::wml::{NumRef, ParaProps, Paragraph, TabStop};
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
 use crate::text::shape;
@@ -22,10 +24,17 @@ pub struct PlacedLabel {
     pub line_height_pt: f64,
     /// Ascent of the label.
     pub ascent_pt: f64,
+    /// Whether this textual label participates in the first-line box.
+    /// Bullet markers are decorative ink and use the paragraph body's box.
+    pub contributes_to_line_box: bool,
     /// The level's left indent (`marL`), if any.
     pub left_pt: Option<f64>,
     /// The level's hanging indent, if any.
     pub hanging_pt: Option<f64>,
+    /// Typed tab stops authored on the resolved numbering level.
+    pub tabs: Vec<TabStop>,
+    /// Abstract-level versus concrete-level-override indent provenance.
+    pub indent_provenance: LevelIndentProvenance,
     /// Label justification inside the hanging area.
     pub justification: LabelJustification,
     /// Separator between the label and item text. An omitted `w:suff` is Tab.
@@ -116,7 +125,9 @@ pub fn build_label(
         .para_props(&para.props)
         .mark_rpr
         .unwrap_or_default();
-    let eff = doc.styles.run_props(&para.props, &level.rpr.merge_over(&mark));
+    let eff = doc
+        .styles
+        .run_props(&para.props, &level.rpr.merge_over(&mark));
     let size = eff.size_pt.unwrap_or(11.0);
     let color = Rgba::opaque(Rgb::new(0, 0, 0));
     let family = matching::wml_run_family(&eff.fonts, FontSlot::Ascii, &doc.theme);
@@ -271,8 +282,11 @@ pub fn build_label(
         runs,
         line_height_pt,
         ascent_pt,
+        contributes_to_line_box: level.num_fmt != NumFmt::Bullet,
         left_pt: level.indent.left_pt,
         hanging_pt: level.indent.hanging_pt,
+        tabs: level.tabs.clone(),
+        indent_provenance: level.indent_provenance,
         justification: level.justification,
         suffix: level.suffix,
         suffix_space_advance_pt,

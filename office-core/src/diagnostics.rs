@@ -65,6 +65,27 @@ pub struct ParagraphPropertyTrace {
     pub numbering_tabs: Vec<TabStopTrace>,
     /// Tabs actually supplied to line layout.
     pub effective_tabs: Vec<TabStopTrace>,
+    /// Resolved list-label alignment and following-text geometry.
+    pub numbering_layout: Option<NumberingLayoutTrace>,
+}
+
+/// Serializable numbering geometry, measured from the page's left text margin.
+#[derive(Debug, Clone, Serialize)]
+pub struct NumberingLayoutTrace {
+    /// Start of the aligned label box.
+    pub label_alignment_box_start_pt: f64,
+    /// End of the aligned label box.
+    pub label_alignment_box_end_pt: f64,
+    /// End of the rendered label advance.
+    pub label_ink_end_pt: f64,
+    /// Start of the following paragraph text after applying `w:suff`.
+    pub following_text_start_pt: f64,
+    /// Provenance of the effective left indent.
+    pub left_origin: String,
+    /// Provenance of the effective hanging indent.
+    pub hanging_origin: String,
+    /// Provenance of the tab target used for a tab suffix.
+    pub tab_origin: String,
 }
 
 /// Serializable numbering id and level.

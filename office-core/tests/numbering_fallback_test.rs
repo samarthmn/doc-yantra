@@ -92,6 +92,43 @@ fn numbering_label_splits_mixed_primary_and_fallback_faces() {
 }
 
 #[test]
+fn mixed_face_numbering_label_honors_the_level_tab_stop() {
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{DOC_NAMESPACES}><w:body><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>fallback body</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    let numbering = format!(
+        r#"<?xml version="1.0"?><w:numbering{DOC_NAMESPACES}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="१%1."/><w:pPr><w:tabs><w:tab w:val="left" w:pos="1800"/></w:tabs><w:ind w:left="1440" w:hanging="360"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/numbering.xml", numbering.as_bytes()),
+    ]);
+    let doc = WordDoc::open(&bytes, &options()).expect("open fallback-tab fixture");
+    let (laid, _) = layout_docx(&doc).expect("layout fallback-tab fixture");
+    let body_x = laid.pages[0]
+        .items
+        .iter()
+        .find_map(|positioned| match &positioned.item {
+            Item::Glyphs(run)
+                if run.glyphs.iter().map(|glyph| glyph.ch).collect::<String>()
+                    == "fallback body" =>
+            {
+                Some(positioned.x_pt)
+            }
+            _ => None,
+        })
+        .expect("fallback numbered body");
+    assert!(
+        (body_x - 162.0).abs() <= 0.15,
+        "the mixed-face label must tab to the level's 90pt stop: body_x={body_x}"
+    );
+}
+
+#[test]
 fn exotic_bullet_substitution_warns_in_profile_and_convert_once() {
     let bytes = bullet_docx('\u{2B9A}', 2);
     let predicted = profile(&bytes, OfficeFormat::Docx).expect("profile exotic bullet");
