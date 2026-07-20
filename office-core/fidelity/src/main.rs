@@ -6,6 +6,7 @@
 
 mod advance_probe;
 mod corpus;
+mod font_form_experiment;
 mod font_raster_probe;
 mod fonts;
 mod image_probe;
@@ -95,6 +96,27 @@ enum Cmd {
         /// Optional pixel crop: x y width height.
         #[arg(long, num_args = 4)]
         crop: Option<Vec<u32>>,
+    },
+    /// Run Task 5's controlled font-program/PDF-form raster experiment.
+    FontFormExperiment {
+        /// Hinted Ubuntu 0.83 `Ubuntu-R.ttf` from a legal source archive.
+        #[arg(long)]
+        ubuntu_font: PathBuf,
+        /// Microsoft Word's local DFonts directory (harness use only).
+        #[arg(
+            long,
+            default_value = "/Applications/Microsoft Word.app/Contents/Resources/DFonts"
+        )]
+        dfonts_dir: PathBuf,
+        /// Python interpreter with fontTools installed.
+        #[arg(long, default_value = "python3")]
+        python: PathBuf,
+        /// Scratch directory for generated candidate fonts, PDFs, and crops.
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// JSON result path, outside the frozen corpus.
+        #[arg(long)]
+        json: PathBuf,
     },
     /// Extract image XObjects and report their placement/codec metadata.
     ImageProbe {
@@ -234,6 +256,23 @@ fn main() -> Result<()> {
         )?,
         Cmd::AdvanceProbe { pdfs } => run_advance_probe(&pdfs)?,
         Cmd::FontRasterProbe { pdfs, crop } => run_font_raster_probe(&pdfs, crop.as_deref())?,
+        Cmd::FontFormExperiment {
+            ubuntu_font,
+            dfonts_dir,
+            python,
+            output_dir,
+            json,
+        } => {
+            ensure_diagnostic_output_outside_corpus(&output_dir)?;
+            ensure_diagnostic_output_outside_corpus(&json)?;
+            let report = font_form_experiment::run(
+                &output_dir,
+                &ubuntu_font,
+                &dfonts_dir,
+                &python,
+            )?;
+            print_or_write_json(&report, Some(&json))?;
+        }
         Cmd::ImageProbe { pdfs, extract_dir } => run_image_probe(&pdfs, extract_dir.as_deref())?,
         Cmd::ImageCandidateMatrix {
             source_docx,

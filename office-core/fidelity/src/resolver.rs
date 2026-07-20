@@ -7,12 +7,55 @@ use office_core::{ConvertOptions, FontExpectation, FontRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::Path;
 use std::time::Duration;
 
 const CDN_BASE: &str = "https://cdn.jsdelivr.net/fontsource/fonts/";
 const MAX_FONT_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_FONT_SOURCE_ARCHIVE_BYTES: u64 = 12 * 1024 * 1024;
+
+/// Legal, harness-only sources selected by Task 5's controlled raster
+/// experiment. They are never compiled into office-core or its wasm package.
+/// The full Ubuntu 0.83 face replaces Fontsource's dehinted Unicode shards for
+/// regular text; Supplemental Arial replaces Word's unhinted DFont regular.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HintedSourceLocation {
+    Ubuntu083Archive {
+        url: &'static str,
+        archive_sha256: &'static str,
+        member_suffix: &'static str,
+    },
+    SystemFile(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HintedHarnessSource {
+    family: &'static str,
+    weight: u16,
+    italic: bool,
+    sha256: &'static str,
+    location: HintedSourceLocation,
+}
+
+const HINTED_HARNESS_SOURCES: &[HintedHarnessSource] = &[
+    HintedHarnessSource {
+        family: "Ubuntu",
+        weight: 400,
+        italic: false,
+        sha256: "52c1afa489ae7bfd893af6cdd9f1af258005703600449e70d338caabcff507e5",
+        location: HintedSourceLocation::Ubuntu083Archive {
+            url: "https://archive.ubuntu.com/ubuntu/pool/main/f/fonts-ubuntu/fonts-ubuntu_0.83.orig.tar.gz",
+            archive_sha256: "1a96df0ea32bf88278ce9d24c3a31e4c3d31f4397ff7a3af6622dc488b0b830a",
+            member_suffix: "ubuntu-font-family-sources-0.83/Ubuntu-R.ttf",
+        },
+    },
+    // No Arial pin: the hinted macOS Supplemental Arial 5.01.2x is a
+    // legitimate hinted source, but its raster is a *worse* match for the
+    // Word truths than the unhinted Word DFonts Arial 6.80i they were
+    // produced with (korean regressed up to -0.0108, measured 2026-07-20).
+    // Hinting only helps when the hint program is the one Word used.
+];
 
 /// Repo-committed pan-CJK faces, hash-pinned like `fonts.lock` artifacts.
 /// These are the exact OTFs hosts register in production (shipped by
@@ -132,13 +175,17 @@ const LOCAL_LEGACY_FONTS: &[(&[&str], &[&str])] = &[
         ],
     ),
     (
-        &["Cambria.ttc", "Cambriab.ttf", "Cambriai.ttf", "Cambriaz.ttf"],
-        &["Cambria", "Cambria Math"],
-    ),
-    (
         &["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"],
         &["Arial"],
     ),
+    (
+        &["Cambria.ttc", "Cambriab.ttf", "Cambriai.ttf", "Cambriaz.ttf"],
+        &["Cambria", "Cambria Math"],
+    ),
+    // Supplemental Arial above is the pinned regular face. Keep Word's local
+    // style-specific files only; loading its unhinted `arial.ttf` would lose
+    // the raster gain proved by Task 5 and could win an equal-style tie.
+    (&["arialbd.ttf", "ariali.ttf", "arialbi.ttf"], &["Arial"]),
     (
         &[
             "Calibri.ttf",
@@ -346,22 +393,168 @@ pub(crate) fn resolve_for_case(
     let requests =
         office_core::font_requests(source, office_core::OfficeFormat::Docx, base_options)
             .with_context(|| format!("discover fonts for fidelity case {case_name}"))?;
-    let (provider_requests, satisfied_families) =
+    let (mut provider_requests, satisfied_families) =
         provider_requests(source, base_options, &requests)?;
     let fetcher = HttpFetcher::new()?;
+    let mut pinned_options = base_options.clone();
+    let pinned_families = attach_pinned_hinted_sources(&requests, &mut pinned_options, &fetcher)?;
+    provider_requests.retain(|request| pinned_harness_source_for(request).is_none());
     let mut resolved = resolve_requests_with_fetch(
         case_name,
         &provider_requests,
         &lock,
         &cache_dir(),
-        base_options,
+        &pinned_options,
         |url| fetcher.fetch(url),
     )?;
     resolved.families.extend(satisfied_families);
+    resolved.families.extend(pinned_families);
     attach_local_legacy_faces(&requests, &mut resolved)?;
     attach_pan_cjk_faces(case_name, &requests, &mut resolved, &fetcher)?;
     resolved.demanded_families = resolved.families.clone();
     Ok(resolved)
+}
+
+fn pinned_harness_source_for(request: &FontRequest) -> Option<&'static HintedHarnessSource> {
+    HINTED_HARNESS_SOURCES.iter().find(|source| {
+        request.weight == source.weight
+            && request.italic == source.italic
+            && request.stretch == 5
+            && std::iter::once(request.family.as_str())
+                .chain(request.alt_families.iter().map(String::as_str))
+                .any(|family| normalize_family(family) == normalize_family(source.family))
+    })
+}
+
+fn attach_pinned_hinted_sources(
+    requests: &[FontRequest],
+    options: &mut ConvertOptions,
+    fetcher: &HttpFetcher,
+) -> Result<BTreeSet<String>> {
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    for source in requests.iter().filter_map(pinned_harness_source_for) {
+        if seen.insert(source.sha256) {
+            selected.push(source);
+        }
+    }
+
+    let mut families = BTreeSet::new();
+    // Insert in reverse so HINTED_HARNESS_SOURCES/request order remains the
+    // FontDb tie-break order ahead of any provider artifacts.
+    for source in selected.into_iter().rev() {
+        let bytes = load_pinned_harness_font(source, fetcher)?;
+        let expectation = FontExpectation {
+            family: source.family.to_string(),
+            weight: source.weight,
+            italic: source.italic,
+            stretch: 5,
+            sha256: Some(source.sha256.to_string()),
+            ..FontExpectation::default()
+        };
+        office_core::fonts::validate_font(&bytes, Some(&expectation)).with_context(|| {
+            format!(
+                "validate pinned hinted fidelity source {} ({})",
+                source.family, source.sha256
+            )
+        })?;
+        prepend_pinned_harness_font(options, bytes, source.sha256);
+        families.insert(source.family.to_string());
+    }
+    Ok(families)
+}
+
+fn prepend_pinned_harness_font(options: &mut ConvertOptions, bytes: Vec<u8>, sha256: &str) {
+    options.font_bytes.insert(0, bytes);
+    options.font_hash_pins.insert(0, sha256.to_string());
+}
+
+fn load_pinned_harness_font(
+    source: &HintedHarnessSource,
+    fetcher: &HttpFetcher,
+) -> Result<Vec<u8>> {
+    let cache_path = cache_dir().join(format!("{}.ttf", source.sha256));
+    match fs::read(&cache_path) {
+        Ok(bytes) => {
+            if sha256_hex(&bytes) == source.sha256 {
+                return Ok(bytes);
+            }
+            fs::remove_file(&cache_path).with_context(|| {
+                format!(
+                    "remove corrupt pinned font cache entry {}",
+                    cache_path.display()
+                )
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("read pinned font cache entry {}", cache_path.display())
+            });
+        }
+    }
+
+    let bytes = match source.location {
+        HintedSourceLocation::SystemFile(path) => fs::read(path).with_context(|| {
+            format!(
+                "read pinned hinted fidelity source {path}; Task 5 requires macOS Supplemental Arial"
+            )
+        })?,
+        HintedSourceLocation::Ubuntu083Archive {
+            url,
+            archive_sha256,
+            member_suffix,
+        } => {
+            let archive = fetcher
+                .fetch_with_limit(url, MAX_FONT_SOURCE_ARCHIVE_BYTES)
+                .with_context(|| format!("fetch pinned Ubuntu 0.83 source archive {url}"))?;
+            let actual = sha256_hex(&archive);
+            if actual != archive_sha256 {
+                anyhow::bail!(
+                    "pinned Ubuntu source archive hash mismatch: expected {archive_sha256}, found {actual}"
+                );
+            }
+            extract_tar_gz_member(&archive, member_suffix)?
+        }
+    };
+    let actual = sha256_hex(&bytes);
+    if actual != source.sha256 {
+        anyhow::bail!(
+            "pinned hinted {} hash mismatch: expected {}, found {actual}",
+            source.family,
+            source.sha256
+        );
+    }
+    fs::create_dir_all(cache_dir()).context("create fidelity font cache")?;
+    fs::write(&cache_path, &bytes)
+        .with_context(|| format!("cache pinned hinted font {}", cache_path.display()))?;
+    Ok(bytes)
+}
+
+fn extract_tar_gz_member(archive: &[u8], member_suffix: &str) -> Result<Vec<u8>> {
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(archive));
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries().context("read Ubuntu source archive")? {
+        let mut entry = entry.context("read Ubuntu source archive entry")?;
+        let path = entry.path().context("read Ubuntu source member path")?;
+        if !path.ends_with(member_suffix) {
+            continue;
+        }
+        if entry.size() > MAX_FONT_BYTES {
+            anyhow::bail!("pinned Ubuntu font exceeds {MAX_FONT_BYTES} bytes");
+        }
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        entry
+            .by_ref()
+            .take(MAX_FONT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .context("extract pinned Ubuntu font")?;
+        if bytes.len() as u64 > MAX_FONT_BYTES {
+            anyhow::bail!("pinned Ubuntu font exceeds {MAX_FONT_BYTES} bytes");
+        }
+        return Ok(bytes);
+    }
+    anyhow::bail!("pinned Ubuntu source archive lacks {member_suffix}")
 }
 
 /// Registers the machine's real legacy East Asian fonts for every request
@@ -1336,6 +1529,56 @@ mod tests {
         assert_eq!(catalog_versions["ubuntu"], "v21");
         assert_eq!(catalog_versions["ubuntu-mono"], "v19");
         assert_eq!(catalog_versions["gelasio"], "v14");
+    }
+
+    #[test]
+    fn task5_hinted_sources_are_narrowly_pinned_to_ubuntu_regular_and_arial() {
+        let mut ubuntu = request();
+        ubuntu.family = "Ubuntu".into();
+        let ubuntu_source = pinned_harness_source_for(&ubuntu).expect("Ubuntu regular source pin");
+        assert_eq!(ubuntu_source.family, "Ubuntu");
+        assert_eq!(
+            ubuntu_source.sha256,
+            "52c1afa489ae7bfd893af6cdd9f1af258005703600449e70d338caabcff507e5"
+        );
+        assert!(matches!(
+            ubuntu_source.location,
+            HintedSourceLocation::Ubuntu083Archive { .. }
+        ));
+
+        ubuntu.weight = 700;
+        assert!(
+            pinned_harness_source_for(&ubuntu).is_none(),
+            "the regular source must not shadow an authored bold face"
+        );
+        ubuntu.weight = 400;
+        ubuntu.italic = true;
+        assert!(
+            pinned_harness_source_for(&ubuntu).is_none(),
+            "the regular source must not shadow an authored italic face"
+        );
+        ubuntu.italic = false;
+        ubuntu.family = "Ubuntu Mono".into();
+        assert!(pinned_harness_source_for(&ubuntu).is_none());
+
+        // Arial is deliberately unpinned: see HINTED_HARNESS_SOURCES.
+        let mut arial = request();
+        arial.family = "Arial".into();
+        assert!(pinned_harness_source_for(&arial).is_none());
+    }
+
+    #[test]
+    fn task5_hinted_source_is_registered_before_existing_provider_bytes() {
+        let mut options = ConvertOptions {
+            font_bytes: vec![vec![2, 3]],
+            font_hash_pins: vec!["existing".into()],
+            ..ConvertOptions::default()
+        };
+
+        prepend_pinned_harness_font(&mut options, vec![1], "pinned");
+
+        assert_eq!(options.font_bytes, vec![vec![1], vec![2, 3]]);
+        assert_eq!(options.font_hash_pins, vec!["pinned", "existing"]);
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //! Subsets a face to exactly its used glyphs via the `subsetter` crate, keeping
 //! the old→new glyph-id mapping so the emitter can write CIDs = new gids under
 //! `Identity-H` / `CIDToGIDMap Identity`, plus per-glyph widths and a ToUnicode
-//! table.
+//! table. For TrueType faces, compact remapping must retain composite closure,
+//! global hint tables, and the instructions on retained simple and composite
+//! glyphs; `pdf_font_embedding_test` locks that production contract down.
 
 use super::db::Face;
 use super::metrics::FaceMetrics;

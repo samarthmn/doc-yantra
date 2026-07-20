@@ -1,6 +1,7 @@
 //! Pdfium glyph-raster comparison using the unchanged official page scorer.
 
 use anyhow::{Result, bail};
+use image::DynamicImage;
 use serde::Serialize;
 
 use crate::{raster, ssim};
@@ -27,6 +28,28 @@ pub fn compare(
     }
     let mut ours = raster(ours_pdf, page - 1)?;
     let mut truth = raster(truth_pdf, page - 1)?;
+    let score = score_crop(&ours, &truth, crop)?;
+    if let Some([x, y, width, height]) = crop {
+        ours = ours.crop_imm(x, y, width, height);
+        truth = truth.crop_imm(x, y, width, height);
+    }
+    Ok(FontRasterProbeReport {
+        page,
+        crop,
+        ours_pixel_dimensions: [ours.width(), ours.height()],
+        truth_pixel_dimensions: [truth.width(), truth.height()],
+        ssim: score.ssim,
+        ssim_unweighted: score.ssim_unweighted,
+        diff_pct: score.diff_pct,
+    })
+}
+
+/// Scores an already-rendered glyph crop with the unchanged official scorer.
+pub(crate) fn score_crop(
+    ours: &DynamicImage,
+    truth: &DynamicImage,
+    crop: Option<[u32; 4]>,
+) -> Result<ssim::PageScore> {
     if let Some([x, y, width, height]) = crop {
         if width == 0
             || height == 0
@@ -37,19 +60,12 @@ pub fn compare(
         {
             bail!("font-raster-probe crop is outside a rendered page");
         }
-        ours = ours.crop_imm(x, y, width, height);
-        truth = truth.crop_imm(x, y, width, height);
+        let ours = ours.crop_imm(x, y, width, height);
+        let truth = truth.crop_imm(x, y, width, height);
+        Ok(ssim::score_pages(&ours, &truth))
+    } else {
+        Ok(ssim::score_pages(ours, truth))
     }
-    let score = ssim::score_pages(&ours, &truth);
-    Ok(FontRasterProbeReport {
-        page,
-        crop,
-        ours_pixel_dimensions: [ours.width(), ours.height()],
-        truth_pixel_dimensions: [truth.width(), truth.height()],
-        ssim: score.ssim,
-        ssim_unweighted: score.ssim_unweighted,
-        diff_pct: score.diff_pct,
-    })
 }
 
 #[cfg(test)]
