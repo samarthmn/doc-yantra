@@ -2653,6 +2653,9 @@ fn collect_layout_trace(doc: &WordDoc, units: &[Unit], pages: &[WorkPage]) -> La
                 line_ascent_pt: draft.ascent_pt,
                 line_descent_pt: draft.descent_pt,
                 baseline_pt: placement.origin_y_pt + draft.ascent_pt,
+                natural_line_height_pt: draft.natural_height_pt,
+                text_natural_height_pt: draft.text_natural_height_pt,
+                run_metrics: draft.run_metrics.clone(),
                 object_ink_bounds: draft
                     .object_ink_bounds
                     .iter()

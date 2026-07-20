@@ -27,6 +27,9 @@ pub struct PlacedLabel {
     /// Whether this textual label participates in the first-line box.
     /// Bullet markers are decorative ink and use the paragraph body's box.
     pub contributes_to_line_box: bool,
+    /// Whether the numbering level explicitly authors a metric-bearing run
+    /// property instead of inheriting the paragraph mark's metrics.
+    pub has_authored_line_metrics: bool,
     /// The level's left indent (`marL`), if any.
     pub left_pt: Option<f64>,
     /// The level's hanging indent, if any.
@@ -283,6 +286,7 @@ pub fn build_label(
         line_height_pt,
         ascent_pt,
         contributes_to_line_box: level.num_fmt != NumFmt::Bullet,
+        has_authored_line_metrics: label_has_authored_line_metrics(&level.rpr),
         left_pt: level.indent.left_pt,
         hanging_pt: level.indent.hanging_pt,
         tabs: level.tabs.clone(),
@@ -291,6 +295,23 @@ pub fn build_label(
         suffix: level.suffix,
         suffix_space_advance_pt,
     }))
+}
+
+fn label_has_authored_line_metrics(props: &crate::oxml::wml::RunProps) -> bool {
+    let fonts = &props.fonts;
+    props.style_id.is_some()
+        || props.size_pt.is_some()
+        || props.bold.is_some()
+        || props.italic.is_some()
+        || props.vert_align.is_some()
+        || fonts.ascii.is_some()
+        || fonts.h_ansi.is_some()
+        || fonts.east_asia.is_some()
+        || fonts.cs.is_some()
+        || fonts.ascii_theme.is_some()
+        || fonts.h_ansi_theme.is_some()
+        || fonts.east_asia_theme.is_some()
+        || fonts.cs_theme.is_some()
 }
 
 /// A paragraph's list context passed to line layout.

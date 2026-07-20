@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::layout::Item;
 use crate::layout::paragraph::LineItem;
-use crate::oxml::wml::{Indent, NumRef, TabStop};
+use crate::oxml::wml::{Indent, LineSpacing, NumRef, Spacing, TabStop};
 
 /// Serializable per-line layout evidence returned by diagnostic conversions.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -34,6 +34,12 @@ pub struct LineTrace {
     pub line_descent_pt: f64,
     /// Final baseline in page points.
     pub baseline_pt: f64,
+    /// Natural line height before the paragraph's line-spacing rule.
+    pub natural_line_height_pt: f64,
+    /// Largest resolved text line box, including an inline object's owning run.
+    pub text_natural_height_pt: f64,
+    /// Resolved font metrics that contributed to this line.
+    pub run_metrics: Vec<RunMetricTrace>,
     /// Visual bounds of non-math inline objects in page coordinates.
     pub object_ink_bounds: Vec<InkBoundsTrace>,
     /// Visual bounds of math composites in page coordinates.
@@ -49,6 +55,14 @@ pub struct ParagraphPropertyTrace {
     pub style_id: Option<String>,
     /// Effective numbering reference, when present.
     pub numbering: Option<NumberingReferenceTrace>,
+    /// Document-default and default-paragraph-style spacing.
+    pub default_spacing: SpacingTrace,
+    /// Resolved selected paragraph-style spacing.
+    pub style_spacing: SpacingTrace,
+    /// Directly authored paragraph spacing.
+    pub direct_spacing: SpacingTrace,
+    /// Spacing values actually used by paragraph layout.
+    pub effective_spacing: SpacingTrace,
     /// Directly authored paragraph indent.
     pub direct_indent: IndentTrace,
     /// Resolved paragraph-style indent before direct formatting.
@@ -67,6 +81,39 @@ pub struct ParagraphPropertyTrace {
     pub effective_tabs: Vec<TabStopTrace>,
     /// Resolved list-label alignment and following-text geometry.
     pub numbering_layout: Option<NumberingLayoutTrace>,
+}
+
+/// Serializable paragraph spacing with the OOXML rule/value split preserved.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SpacingTrace {
+    /// Space before the paragraph in points.
+    pub before_pt: Option<f64>,
+    /// Space after the paragraph in points.
+    pub after_pt: Option<f64>,
+    /// `auto`, `at_least`, or `exact` when line spacing is authored.
+    pub line_rule: Option<String>,
+    /// Auto multiplier or fixed/at-least point value, according to `line_rule`.
+    pub line_value: Option<f64>,
+}
+
+/// One resolved line-box metric source.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunMetricTrace {
+    /// Font database face id.
+    pub face_id: usize,
+    /// Resolved face family name.
+    pub family_name: String,
+    /// Unscripted run size governing the line box.
+    pub size_pt: f64,
+    /// Resolved line-box ascent in points.
+    pub line_box_ascent_pt: f64,
+    /// Resolved natural line-box height in points.
+    pub line_box_height_pt: f64,
+    /// Whether these metrics came from an inline object's owning run.
+    pub inline_object: bool,
+    /// Whether a directly authored run size is smaller than the paragraph
+    /// mark's effective size.
+    pub direct_size_smaller_than_paragraph: bool,
 }
 
 /// Serializable numbering geometry, measured from the page's left text margin.
@@ -154,8 +201,28 @@ pub(crate) struct LineTraceDraft {
     pub paragraph: ParagraphPropertyTrace,
     pub ascent_pt: f64,
     pub descent_pt: f64,
+    pub natural_height_pt: f64,
+    pub text_natural_height_pt: f64,
+    pub run_metrics: Vec<RunMetricTrace>,
     pub object_ink_bounds: Vec<InkBoundsTrace>,
     pub math_ink_bounds: Vec<InkBoundsTrace>,
+}
+
+impl From<&Spacing> for SpacingTrace {
+    fn from(spacing: &Spacing) -> Self {
+        let (line_rule, line_value) = match spacing.line {
+            Some(LineSpacing::Auto(value)) => (Some("auto".to_string()), Some(value)),
+            Some(LineSpacing::AtLeast(value)) => (Some("at_least".to_string()), Some(value)),
+            Some(LineSpacing::Exact(value)) => (Some("exact".to_string()), Some(value)),
+            None => (None, None),
+        };
+        Self {
+            before_pt: spacing.before_pt,
+            after_pt: spacing.after_pt,
+            line_rule,
+            line_value,
+        }
+    }
 }
 
 impl From<&Indent> for IndentTrace {

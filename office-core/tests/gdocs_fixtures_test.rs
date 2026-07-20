@@ -124,3 +124,42 @@ fn gdocs_columns_has_exact_word_page_count() {
         .expect("convert columns fixture");
     assert_eq!(output.page_count, 3, "must match the Word export");
 }
+
+#[test]
+fn japanese_inline_image_transition_matches_word_logical_object_box() {
+    let bytes = fixture("japanese");
+    let mut options = ConvertOptions::default();
+    let word_fonts = Path::new("/Applications/Microsoft Word.app/Contents/Resources/DFonts");
+    if word_fonts.is_dir() {
+        options.font_dirs.push(word_fonts.to_path_buf());
+    }
+    options.font_bytes.push(
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../pdf-core/wasm/pkg/fonts/NotoSansCJKjp-Regular.otf"),
+        )
+        .expect("read committed Japanese fallback face"),
+    );
+    let doc = WordDoc::open(&bytes, &options).expect("open Japanese fixture");
+    let (laid, _) = layout_docx(&doc).expect("layout Japanese fixture");
+
+    let mut baselines = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| {
+            matches!(positioned.item, Item::Glyphs(_)).then_some(positioned.y_pt)
+        })
+        .collect::<Vec<_>>();
+    baselines.sort_by(f64::total_cmp);
+    baselines.dedup_by(|left, right| (*left - *right).abs() <= 0.01);
+
+    let largest_gap = baselines
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .max_by(f64::total_cmp)
+        .expect("at least two Japanese page-one baselines");
+    assert!(
+        (largest_gap - 68.77).abs() <= 0.25,
+        "inline-image transition must match Word's 68.77pt gap; got {largest_gap:.4}pt from {baselines:?}"
+    );
+}

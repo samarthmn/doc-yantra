@@ -55,6 +55,56 @@ fn layout_body_with_styles(body: &str, styles_inner: &str) -> LaidOutDocument {
     layout_docx(&doc).expect("layout styled docx").0
 }
 
+fn inline_object_spacing_layout(
+    spacing_attrs: &str,
+    middle_size_half_points: u32,
+    effect_bottom_emu: i64,
+    text_control: bool,
+) -> LaidOutDocument {
+    let middle = if text_control {
+        "<w:t>PROBE</w:t>".to_string()
+    } else {
+        format!(
+            r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="466725"/><wp:effectExtent l="0" t="0" r="0" b="{effect_bottom_emu}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+        )
+    };
+    let document = wrap_document(&format!(
+        r#"<w:p><w:pPr><w:spacing w:after="0" {spacing_attrs}/></w:pPr><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>BEFORE</w:t><w:br/></w:r><w:r><w:rPr><w:sz w:val="{middle_size_half_points}"/></w:rPr>{middle}<w:br/></w:r><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>AFTER</w:t></w:r></w:p>"#
+    ));
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let document_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", document_rels.as_bytes()),
+        (
+            "word/media/image1.png",
+            include_bytes!("../../mock-files/png/file1.png"),
+        ),
+    ]);
+    let doc = WordDoc::open(&bytes, &opts()).expect("open inline-object spacing fixture");
+    layout_docx(&doc)
+        .expect("layout inline-object spacing fixture")
+        .0
+}
+
+fn before_after_gap(laid: &LaidOutDocument) -> f64 {
+    let runs = glyph_runs(&laid.pages[0]);
+    let before = runs
+        .iter()
+        .find(|(text, ..)| text == "BEFORE")
+        .expect("BEFORE run")
+        .2;
+    let after = runs
+        .iter()
+        .find(|(text, ..)| text == "AFTER")
+        .expect("AFTER run")
+        .2;
+    after - before
+}
+
 /// All glyph text on a page, in item (paint) order.
 fn page_text(page: &Page) -> String {
     let mut s = String::new();
@@ -1264,6 +1314,66 @@ fn two_line_auto_spacing_uses_the_face_hhea_line_gap() {
         ((second_y - first_y) - 1.15 * expected_natural).abs() < 0.01,
         "12pt Liberation Sans with line=276 auto must include its 67-unit hhea lineGap: {runs:?}"
     );
+}
+
+#[test]
+fn inline_object_line_contribution_uses_effect_bounds_and_its_run_metrics() {
+    let cases = [
+        ("single", r#"w:line="240" w:lineRule="auto""#, 1.0, false),
+        (
+            "one-and-a-half",
+            r#"w:line="360" w:lineRule="auto""#,
+            1.5,
+            false,
+        ),
+        ("double", r#"w:line="480" w:lineRule="auto""#, 2.0, false),
+        ("exact", r#"w:line="1000" w:lineRule="exact""#, 0.0, true),
+        (
+            "at-least",
+            r#"w:line="300" w:lineRule="atLeast""#,
+            0.0,
+            false,
+        ),
+    ];
+
+    for (name, spacing, multiplier, exact) in cases {
+        let no_effect = inline_object_spacing_layout(spacing, 24, 0, false);
+        let bottom_effect = inline_object_spacing_layout(spacing, 24, 9_525, false);
+        let effect_delta = before_after_gap(&bottom_effect) - before_after_gap(&no_effect);
+        let expected_effect_delta = if exact { 0.0 } else { 0.75 };
+        assert!(
+            (effect_delta - expected_effect_delta).abs() <= 0.01,
+            "{name}: 0.75pt logical bottom effect must change only the object's line contribution; delta={effect_delta}"
+        );
+        let image_y = [&no_effect, &bottom_effect].map(|laid| {
+            laid.pages[0]
+                .items
+                .iter()
+                .find_map(|positioned| {
+                    matches!(positioned.item, Item::Image { .. }).then_some(positioned.y_pt)
+                })
+                .expect("inline image")
+        });
+        assert!(
+            (image_y[0] - image_y[1]).abs() <= 0.01,
+            "{name}: effect extent expands the logical box without moving the image: {image_y:?}"
+        );
+
+        let object_12 = before_after_gap(&no_effect);
+        let object_20 = before_after_gap(&inline_object_spacing_layout(spacing, 40, 0, false));
+        let text_12 = before_after_gap(&inline_object_spacing_layout(spacing, 24, 0, true));
+        let text_20 = before_after_gap(&inline_object_spacing_layout(spacing, 40, 0, true));
+        let expected_metric_delta = if multiplier > 0.0 {
+            (text_20 - text_12) * (multiplier - 1.0) / multiplier
+        } else {
+            0.0
+        };
+        let object_metric_delta = object_20 - object_12;
+        assert!(
+            (object_metric_delta - expected_metric_delta).abs() <= 0.01,
+            "{name}: object run metrics must contribute exactly (multiplier - 1) * text_natural_height; object delta={object_metric_delta}, expected={expected_metric_delta}"
+        );
+    }
 }
 
 #[test]
@@ -2604,6 +2714,37 @@ fn numbering_text_label_contributes_to_body_line_pitch() {
     assert!(
         second_y - first_y >= 23.0,
         "a textual numbering label remains part of the first-line box: {runs:?}"
+    );
+}
+
+#[test]
+fn inherited_numbering_label_metrics_do_not_override_smaller_body_line_box() {
+    let numbered = layout_numbered_body(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:spacing w:line="360" w:lineRule="auto"/><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>First body</w:t><w:br/><w:t>Second body</w:t></w:r></w:p>"#,
+        r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="[%1]"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    );
+    let control = layout_body(
+        r#"<w:p><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>First control</w:t><w:br/><w:t>Second control</w:t></w:r></w:p>"#,
+    );
+    let pitch = |laid: &LaidOutDocument, first: &str, second: &str| {
+        let runs = glyph_runs(&laid.pages[0]);
+        let first_y = runs
+            .iter()
+            .find(|(text, ..)| text == first)
+            .expect("first line")
+            .2;
+        let second_y = runs
+            .iter()
+            .find(|(text, ..)| text == second)
+            .expect("second line")
+            .2;
+        second_y - first_y
+    };
+    let numbered_pitch = pitch(&numbered, "First body", "Second body");
+    let control_pitch = pitch(&control, "First control", "Second control");
+    assert!(
+        (numbered_pitch - control_pitch).abs() <= 0.01,
+        "an inherited paragraph-mark label paints on the body baseline but must not enlarge a smaller explicit body line box: numbered={numbered_pitch}, control={control_pitch}"
     );
 }
 

@@ -25,6 +25,9 @@ pub struct Drawing {
     pub extent_pt: Option<(f64, f64)>,
     /// Exact extent in EMU, retained for deterministic image-variant identity.
     pub extent_emu: Option<(i64, i64)>,
+    /// Logical effect margins `(left, top, right, bottom)` around `wp:extent`.
+    /// These participate in inline layout without changing the painted image.
+    pub effect_extent_pt: [f64; 4],
     /// The image part relationship id (`a:blip @r:embed`), if any.
     pub blip_rel_id: Option<String>,
     /// Relationship id carried by a chart/diagram graphic reference.
@@ -65,6 +68,7 @@ impl Drawing {
 
         let mut extent_pt = None;
         let mut extent_emu = None;
+        let mut effect_extent_pt = [0.0; 4];
         let mut blip_rel_id = None;
         let mut graphic_rel_id = None;
         let mut cropped = false;
@@ -82,6 +86,14 @@ impl Drawing {
                     extent_pt = Some((emu_to_pt(cx), emu_to_pt(cy)));
                     extent_emu = Some((cx, cy));
                 }
+            }
+            if let Some(ext) = children(container).find(|c| is_wp(*c, "effectExtent")) {
+                effect_extent_pt = ["l", "t", "r", "b"].map(|name| {
+                    parse_i64(attr(ext, WP, name))
+                        .map(emu_to_pt)
+                        .unwrap_or(0.0)
+                        .max(0.0)
+                });
             }
             for d in container.descendants() {
                 if super::is(d, A, "graphicData") {
@@ -120,6 +132,7 @@ impl Drawing {
             kind,
             extent_pt,
             extent_emu,
+            effect_extent_pt,
             blip_rel_id,
             graphic_rel_id,
             cropped,

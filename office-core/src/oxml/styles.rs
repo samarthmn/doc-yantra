@@ -333,6 +333,15 @@ impl StyleResolver {
         self.resolved_style_ppr(id)
     }
 
+    #[cfg(feature = "fidelity-diagnostics")]
+    pub(crate) fn diagnostic_default_para_props(&self) -> ParaProps {
+        let mut acc = self.default_ppr.clone();
+        if let Some(default_style) = &self.default_para_style {
+            acc = self.resolved_style_ppr(default_style).merge_over(&acc);
+        }
+        acc
+    }
+
     /// Returns the `basedOn` chain for `id`, leaf-first, cycle-safe.
     fn chain(&self, id: &str) -> Vec<&Style> {
         let mut out = Vec::new();

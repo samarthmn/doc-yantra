@@ -11,7 +11,7 @@ use super::{
 #[cfg(feature = "fidelity-diagnostics")]
 use crate::diagnostics::{
     IndentTrace, InkBoundsTrace, LineTraceDraft, NumberingLayoutTrace, ParagraphPropertyTrace,
-    tab_traces,
+    RunMetricTrace, SpacingTrace, tab_traces,
 };
 use crate::fonts::{FaceId, FontDb, FontSlot, matching};
 use crate::oxml::numbering::LabelJustification;
@@ -385,6 +385,9 @@ pub(crate) struct PageFloat {
 #[derive(Debug, Clone)]
 struct RunStyle {
     face: FaceId,
+    #[cfg(feature = "fidelity-diagnostics")]
+    family_name: String,
+    direct_size_smaller_than_paragraph: bool,
     size_pt: f64,
     color: Rgba,
     background: Option<Rgba>,
@@ -397,6 +400,12 @@ struct RunStyle {
     line_box_ascent_pt: f64,
     line_box_height_pt: f64,
     link: Option<RunLink>,
+}
+
+#[derive(Debug, Clone)]
+struct InlineObjectLayout {
+    effect_extent_pt: [f64; 4],
+    text_style: Option<Rc<RunStyle>>,
 }
 
 #[derive(Debug, Clone)]
@@ -445,6 +454,8 @@ enum Atom {
         image_id: ImageId,
         w_pt: f64,
         h_pt: f64,
+        effect_extent_pt: [f64; 4],
+        text_style: Option<Rc<RunStyle>>,
         link: Option<RunLink>,
     },
     Composite {
@@ -453,6 +464,7 @@ enum Atom {
         baseline_pt: Option<f64>,
         items: Vec<LineItem>,
         anchor: Option<AnchorProps>,
+        inline_layout: Option<InlineObjectLayout>,
     },
 }
 
@@ -460,10 +472,22 @@ impl Atom {
     fn advance(&self) -> f64 {
         match self {
             Atom::Glyph { advance_pt, .. } => *advance_pt,
-            Atom::Image { w_pt, .. } => *w_pt,
+            Atom::Image {
+                w_pt,
+                effect_extent_pt,
+                ..
+            } => w_pt + effect_extent_pt[0] + effect_extent_pt[2],
             Atom::Composite {
-                w_pt, anchor: None, ..
-            } => *w_pt,
+                w_pt,
+                anchor: None,
+                inline_layout,
+                ..
+            } => {
+                let margins = inline_layout
+                    .as_ref()
+                    .map_or([0.0; 4], |layout| layout.effect_extent_pt);
+                w_pt + margins[0] + margins[2]
+            }
             Atom::Composite { .. } => 0.0,
             _ => 0.0,
         }
@@ -851,6 +875,43 @@ fn layout_paragraph_with_wrap_context(
     let content_first = (avail_width_pt - left - right - first_offset.max(0.0)).max(1.0);
     let content_rest = (avail_width_pt - left - right).max(1.0);
     let atoms = flatten(doc, warnings, para, rels, field_ctx, note_sequence)?;
+    let mut atoms = atoms;
+    // A drawing between text lines inherits that paragraph's text-natural box
+    // for auto leading, and `wp:effectExtent` expands its logical inline box.
+    // A drawing-only paragraph has no text line to supply that box: the three
+    // CJK fixtures' repeated standalone drawings retain their extent-only flow.
+    let has_paragraph_text = atoms.iter().any(|atom| {
+        matches!(
+            atom,
+            Atom::Glyph {
+                ch: visible,
+                ..
+            } if *visible != '\0'
+        )
+    });
+    if !has_paragraph_text {
+        for atom in &mut atoms {
+            match atom {
+                Atom::Image {
+                    effect_extent_pt,
+                    text_style,
+                    ..
+                } => {
+                    *effect_extent_pt = [0.0; 4];
+                    *text_style = None;
+                }
+                Atom::Composite {
+                    inline_layout: Some(layout),
+                    anchor: None,
+                    ..
+                } => {
+                    layout.effect_extent_pt = [0.0; 4];
+                    layout.text_style = None;
+                }
+                _ => {}
+            }
+        }
+    }
     let text: String = atoms
         .iter()
         .filter_map(|a| match a {
@@ -882,6 +943,12 @@ fn layout_paragraph_with_wrap_context(
         ParagraphPropertyTrace {
             style_id: para.props.style_id.clone(),
             numbering: numbering.map(Into::into),
+            default_spacing: SpacingTrace::from(
+                &doc.styles.diagnostic_default_para_props().spacing,
+            ),
+            style_spacing: SpacingTrace::from(&style_props.spacing),
+            direct_spacing: SpacingTrace::from(&para.props.spacing),
+            effective_spacing: SpacingTrace::from(&eff_para.spacing),
             direct_indent: IndentTrace::from(&para.props.indent),
             style_indent: IndentTrace::from(&style_props.indent),
             numbering_indent: numbering_level
@@ -1188,6 +1255,8 @@ fn layout_paragraph_with_wrap_context(
             diagnostics: LineTraceDraft {
                 ascent_pt: height_pt * 0.8,
                 descent_pt: height_pt * 0.2,
+                natural_height_pt: h,
+                text_natural_height_pt: h,
                 ..LineTraceDraft::default()
             },
         });
@@ -1779,6 +1848,16 @@ fn flatten_run(
     };
 
     let base_size = eff.size_pt.unwrap_or(DEFAULT_SIZE_PT);
+    let paragraph_mark = doc
+        .styles
+        .para_props(&para.props)
+        .mark_rpr
+        .unwrap_or_default();
+    let paragraph_size = doc
+        .styles
+        .run_props(&para.props, &paragraph_mark)
+        .size_pt
+        .unwrap_or(DEFAULT_SIZE_PT);
     let (size, rise) = match eff.vert_align {
         Some(VertAlign::Super) => (
             base_size * SCRIPT_SCALE,
@@ -1797,6 +1876,12 @@ fn flatten_run(
     let (u_pos, u_thick) = metrics.underline_pt(size);
     let style = Rc::new(RunStyle {
         face,
+        #[cfg(feature = "fidelity-diagnostics")]
+        family_name: font_face.family_name.clone(),
+        direct_size_smaller_than_paragraph: run
+            .props
+            .size_pt
+            .is_some_and(|direct| direct + 0.01 < paragraph_size),
         size_pt: size,
         color: resolve_color(&eff),
         background: eff.highlight.or(eff.shading).map(Rgba::opaque),
@@ -1901,6 +1986,12 @@ fn flatten_run(
                         "picture drawing has no positive extent",
                     ));
                 }
+                let inline_layout = || {
+                    d.anchor.is_none().then(|| InlineObjectLayout {
+                        effect_extent_pt: d.drawing.effect_extent_pt,
+                        text_style: Some(Rc::clone(&style)),
+                    })
+                };
                 if let Some(text_box) = &d.text_box {
                     atoms.push(Atom::Composite {
                         w_pt: text_box.width_pt,
@@ -1908,6 +1999,7 @@ fn flatten_run(
                         baseline_pt: None,
                         items: text_box_items(doc, warnings, text_box, rels)?,
                         anchor: d.anchor,
+                        inline_layout: inline_layout(),
                     });
                 } else if d.drawing.graphic_uri.as_deref() == Some(crate::oxml::dml::URI_DIAGRAM)
                     && let Some((w, h)) = d.drawing.extent_pt
@@ -1928,6 +2020,7 @@ fn flatten_run(
                             })
                             .collect(),
                         anchor: d.anchor,
+                        inline_layout: inline_layout(),
                     });
                 } else if d.drawing.graphic_uri.as_deref() == Some(crate::oxml::dml::URI_CHART)
                     && let Some((w, h)) = d.drawing.extent_pt
@@ -1948,6 +2041,7 @@ fn flatten_run(
                             })
                             .collect(),
                         anchor: d.anchor,
+                        inline_layout: inline_layout(),
                     });
                 } else if let Some((w, h)) = d.drawing.extent_pt
                     && let Some(rel_id) = &d.drawing.blip_rel_id
@@ -1984,12 +2078,15 @@ fn flatten_run(
                                 item: image,
                             }],
                             anchor: d.anchor,
+                            inline_layout: inline_layout(),
                         });
                     } else {
                         atoms.push(Atom::Image {
                             image_id,
                             w_pt: w,
                             h_pt: h,
+                            effect_extent_pt: d.drawing.effect_extent_pt,
+                            text_style: Some(Rc::clone(&style)),
                             link: style.link.clone(),
                         });
                     }
@@ -2018,6 +2115,7 @@ fn flatten_run(
                         behind_doc: false,
                         relative_height: 0,
                     }),
+                    inline_layout: None,
                 });
             }
             RunContent::OlePreview(shape) => {
@@ -2047,6 +2145,10 @@ fn flatten_run(
                         },
                     }],
                     anchor: None,
+                    inline_layout: Some(InlineObjectLayout {
+                        effect_extent_pt: [0.0; 4],
+                        text_style: Some(Rc::clone(&style)),
+                    }),
                 });
             }
             RunContent::Math(math) => push_math_atom(doc, math, atoms)?,
@@ -2123,6 +2225,7 @@ fn push_math_atom(
         baseline_pt: Some(equation.baseline),
         items: equation.items,
         anchor: None,
+        inline_layout: None,
     });
     Ok(())
 }
@@ -2530,6 +2633,12 @@ fn fallback_style(fonts: &FontDb, face: FaceId, base: &RunStyle) -> Rc<RunStyle>
         .and_then(|font| font.line_metrics());
     Rc::new(RunStyle {
         face,
+        #[cfg(feature = "fidelity-diagnostics")]
+        family_name: fonts
+            .face(face)
+            .map(|font| font.family_name.clone())
+            .unwrap_or_else(|| base.family_name.clone()),
+        direct_size_smaller_than_paragraph: base.direct_size_smaller_than_paragraph,
         size_pt: base.size_pt,
         color: base.color,
         background: base.background,
@@ -2866,10 +2975,22 @@ fn place_line(
                     spaces += 1;
                 }
             }
-            Atom::Image { w_pt, .. } => natural += w_pt,
-            Atom::Composite { w_pt, anchor, .. } => {
+            Atom::Image {
+                w_pt,
+                effect_extent_pt,
+                ..
+            } => natural += w_pt + effect_extent_pt[0] + effect_extent_pt[2],
+            Atom::Composite {
+                w_pt,
+                anchor,
+                inline_layout,
+                ..
+            } => {
                 if anchor.is_none() {
-                    natural += w_pt;
+                    let margins = inline_layout
+                        .as_ref()
+                        .map_or([0.0; 4], |layout| layout.effect_extent_pt);
+                    natural += w_pt + margins[0] + margins[2];
                 }
             }
             Atom::Bookmark(_) | Atom::Break(_) => {}
@@ -2902,7 +3023,21 @@ fn place_line(
     let mut text_natural_h = 0.0_f64;
     let mut ascent = 0.0_f64;
     let mut descent = 0.0_f64;
-    if let Some(label) = label.filter(|label| label.contributes_to_line_box) {
+    let inherited_label_overridden_by_body = label.is_some_and(|label| {
+        // An explicitly smaller body run replaces inherited paragraph-mark
+        // metrics on that line. Explicit numbering-level metrics remain
+        // authoritative (Task 3's large textual-label contract).
+        !label.has_authored_line_metrics
+            && indices.iter().any(|index| {
+                matches!(
+                    &atoms[*index],
+                    Atom::Glyph { style, .. } if style.direct_size_smaller_than_paragraph
+                )
+            })
+    });
+    if let Some(label) = label.filter(|label| {
+        label.contributes_to_line_box && !inherited_label_overridden_by_body
+    }) {
         natural_h = natural_h.max(label.line_height_pt);
         text_natural_h = text_natural_h.max(label.line_height_pt);
         ascent = ascent.max(label.ascent_pt);
@@ -2928,20 +3063,40 @@ fn place_line(
                     );
                 }
             }
-            Atom::Image { h_pt, .. } => {
-                natural_h = natural_h.max(*h_pt);
-                ascent = ascent.max(*h_pt);
+            Atom::Image {
+                h_pt,
+                effect_extent_pt,
+                text_style,
+                ..
+            } => {
+                let logical_height = effect_extent_pt[1] + h_pt + effect_extent_pt[3];
+                natural_h = natural_h.max(logical_height);
+                if let Some(text_style) = text_style {
+                    text_natural_h = text_natural_h.max(text_style.line_box_height_pt);
+                }
+                ascent = ascent.max(logical_height);
             }
             Atom::Composite {
                 h_pt,
                 baseline_pt,
                 anchor,
+                inline_layout,
                 ..
             } if anchor.is_none() => {
-                natural_h = natural_h.max(*h_pt);
-                let baseline = baseline_pt.unwrap_or(*h_pt).clamp(0.0, *h_pt);
-                ascent = ascent.max(baseline);
-                descent = descent.max(*h_pt - baseline);
+                if let Some(layout) = inline_layout {
+                    let logical_height =
+                        layout.effect_extent_pt[1] + h_pt + layout.effect_extent_pt[3];
+                    natural_h = natural_h.max(logical_height);
+                    if let Some(text_style) = &layout.text_style {
+                        text_natural_h = text_natural_h.max(text_style.line_box_height_pt);
+                    }
+                    ascent = ascent.max(logical_height);
+                } else {
+                    natural_h = natural_h.max(*h_pt);
+                    let baseline = baseline_pt.unwrap_or(*h_pt).clamp(0.0, *h_pt);
+                    ascent = ascent.max(baseline);
+                    descent = descent.max(*h_pt - baseline);
+                }
             }
             _ => {}
         }
@@ -2979,6 +3134,58 @@ fn place_line(
             (natural_h + object_growth).max(apply_line_spacing(line_spacing, text_natural_h))
         }
         _ => apply_line_spacing(line_spacing, natural_h),
+    };
+
+    #[cfg(feature = "fidelity-diagnostics")]
+    let run_metrics = {
+        let mut traces = Vec::<RunMetricTrace>::new();
+        let mut record = |style: &RunStyle, inline_object: bool| {
+            if traces.iter().any(|trace| {
+                trace.face_id == style.face.0
+                    && trace.size_pt == style.line_box_size_pt
+                    && trace.line_box_ascent_pt == style.line_box_ascent_pt
+                    && trace.line_box_height_pt == style.line_box_height_pt
+                    && trace.inline_object == inline_object
+                    && trace.direct_size_smaller_than_paragraph
+                        == style.direct_size_smaller_than_paragraph
+            }) {
+                return;
+            }
+            traces.push(RunMetricTrace {
+                face_id: style.face.0,
+                family_name: style.family_name.clone(),
+                size_pt: style.line_box_size_pt,
+                line_box_ascent_pt: style.line_box_ascent_pt,
+                line_box_height_pt: style.line_box_height_pt,
+                inline_object,
+                direct_size_smaller_than_paragraph: style.direct_size_smaller_than_paragraph,
+            });
+        };
+        for &index in indices {
+            match &atoms[index] {
+                Atom::Glyph { style, .. } => record(style, false),
+                Atom::Tab { leaders } => {
+                    for (_, leader) in leaders {
+                        record(&leader.style, false);
+                    }
+                }
+                Atom::Image {
+                    text_style: Some(text_style),
+                    ..
+                } => record(text_style, true),
+                Atom::Composite {
+                    inline_layout:
+                        Some(InlineObjectLayout {
+                            text_style: Some(text_style),
+                            ..
+                        }),
+                    anchor: None,
+                    ..
+                } => record(text_style, true),
+                _ => {}
+            }
+        }
+        traces
     };
 
     let mut items: Vec<LineItem> = Vec::new();
@@ -3189,7 +3396,9 @@ fn place_line(
                 image_id,
                 w_pt,
                 h_pt,
+                effect_extent_pt,
                 link,
+                ..
             } => {
                 flush(
                     &mut pending,
@@ -3207,9 +3416,10 @@ fn place_line(
                     &mut items,
                     &mut internal_links,
                 );
-                let image_y = (ascent - h_pt).max(0.0);
+                let image_x = x + effect_extent_pt[0];
+                let image_y = (ascent - effect_extent_pt[3] - h_pt).max(0.0);
                 items.push(LineItem {
-                    x_pt: x,
+                    x_pt: image_x,
                     y_pt: image_y,
                     item: Item::Image {
                         w_pt: *w_pt,
@@ -3219,12 +3429,12 @@ fn place_line(
                 });
                 #[cfg(feature = "fidelity-diagnostics")]
                 object_ink_bounds.push(InkBoundsTrace {
-                    x0_pt: x,
+                    x0_pt: image_x,
                     y0_pt: image_y,
-                    x1_pt: x + w_pt,
+                    x1_pt: image_x + w_pt,
                     y1_pt: image_y + h_pt,
                 });
-                x += w_pt;
+                x += w_pt + effect_extent_pt[0] + effect_extent_pt[2];
             }
             Atom::Composite {
                 w_pt,
@@ -3232,6 +3442,7 @@ fn place_line(
                 baseline_pt,
                 items: nested,
                 anchor,
+                inline_layout,
             } => {
                 flush(
                     &mut pending,
@@ -3241,29 +3452,34 @@ fn place_line(
                     &mut background_items,
                     &mut text_items,
                 );
-                let (origin_x, origin_y) = anchor
-                    .map(|position| {
-                        let origin_x = resolve_paragraph_anchor_x(
-                            position,
-                            *w_pt,
-                            anchor_width_pt,
-                            page_horizontal,
-                        );
-                        let origin_y = match position.y_align {
-                            Some(crate::oxml::wml::FrameAlign::Start) => 0.0,
-                            Some(crate::oxml::wml::FrameAlign::Center) => {
-                                (height - h_pt).max(0.0) / 2.0
-                            }
-                            Some(crate::oxml::wml::FrameAlign::End) => (height - h_pt).max(0.0),
-                            None if position.wrap == WrapMode::Square => position.y_pt - height,
-                            None => position.y_pt,
-                        };
-                        (origin_x, origin_y)
-                    })
-                    .unwrap_or((
+                let (origin_x, origin_y) = if let Some(position) = anchor {
+                    let origin_x = resolve_paragraph_anchor_x(
+                        *position,
+                        *w_pt,
+                        anchor_width_pt,
+                        page_horizontal,
+                    );
+                    let origin_y = match position.y_align {
+                        Some(crate::oxml::wml::FrameAlign::Start) => 0.0,
+                        Some(crate::oxml::wml::FrameAlign::Center) => {
+                            (height - h_pt).max(0.0) / 2.0
+                        }
+                        Some(crate::oxml::wml::FrameAlign::End) => (height - h_pt).max(0.0),
+                        None if position.wrap == WrapMode::Square => position.y_pt - height,
+                        None => position.y_pt,
+                    };
+                    (origin_x, origin_y)
+                } else if let Some(layout) = inline_layout {
+                    (
+                        x + layout.effect_extent_pt[0],
+                        (ascent - layout.effect_extent_pt[3] - h_pt).max(0.0),
+                    )
+                } else {
+                    (
                         x,
                         (ascent - baseline_pt.unwrap_or(*h_pt).clamp(0.0, *h_pt)).max(0.0),
-                    ));
+                    )
+                };
                 #[cfg(feature = "fidelity-diagnostics")]
                 {
                     let bounds = InkBoundsTrace {
@@ -3294,7 +3510,10 @@ fn place_line(
                         y_pt: origin_y + nested_item.y_pt,
                         item: nested_item.item.clone(),
                     }));
-                    x += w_pt;
+                    let margins = inline_layout
+                        .as_ref()
+                        .map_or([0.0; 4], |layout| layout.effect_extent_pt);
+                    x += w_pt + margins[0] + margins[2];
                 }
             }
             Atom::Break(_) => {}
@@ -3372,6 +3591,9 @@ fn place_line(
             paragraph: ParagraphPropertyTrace::default(),
             ascent_pt: ascent,
             descent_pt: (height - ascent).max(0.0),
+            natural_height_pt: natural_h,
+            text_natural_height_pt: text_natural_h,
+            run_metrics,
             object_ink_bounds,
             math_ink_bounds,
         },
