@@ -1657,7 +1657,8 @@ fn paginate(
 ) -> Result<Vec<WorkPage>> {
     let first_geo = &run_layouts[0].geo;
     let mut pages: Vec<WorkPage> = Vec::new();
-    let mut page = new_page(first_geo, 0);
+    let mut page =
+        reserve_then_build_page(page_budget, "DOCX body page", || new_page(first_geo, 0))?;
     let mut y = first_geo.content_top_pt;
 
     for (run_index, (section_run, run_layout)) in section_runs.iter().zip(run_layouts).enumerate() {
@@ -1675,16 +1676,23 @@ fn paginate(
                 // section rather than kept as a blank page. A blank page
                 // that is a section's entire content is preserved.
                 let bookmarks = std::mem::take(&mut page.bookmarks);
+                // This replacement inherits the reservation for the same
+                // retained page; it does not create another output page.
                 page = new_page(geo, run_index);
                 page.bookmarks = bookmarks;
             } else {
-                page_budget.consume("DOCX section page")?;
-                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+                let next_page = reserve_then_build_page(page_budget, "DOCX section page", || {
+                    new_page(geo, run_index)
+                })?;
+                pages.push(std::mem::replace(&mut page, next_page));
             }
             let next_page_number = pages.len() + 1;
             if parity_blank_needed(next_page_number, section_run.sect.sect_type) {
-                page_budget.consume("DOCX section parity page")?;
-                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+                let next_page =
+                    reserve_then_build_page(page_budget, "DOCX section parity page", || {
+                        new_page(geo, run_index)
+                    })?;
+                pages.push(std::mem::replace(&mut page, next_page));
             }
             y = geo.content_top_pt;
         }
@@ -1772,8 +1780,11 @@ fn paginate(
                     .flatten()
                     .filter(|unit| unit.items.is_empty())
                     .map_or(0.0, |unit| unit.height);
-                page_budget.consume("DOCX explicit-break page")?;
-                pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+                let next_page =
+                    reserve_then_build_page(page_budget, "DOCX explicit-break page", || {
+                        new_page(geo, run_index)
+                    })?;
+                pages.push(std::mem::replace(&mut page, next_page));
                 page.from_explicit_break = true;
                 y = geo.content_top_pt + carried_break_line;
                 band_top = y;
@@ -1812,8 +1823,11 @@ fn paginate(
                     fragment_table = None;
                     advanced = true;
                 } else if y > band_top + 0.01 || column > 0 {
-                    page_budget.consume("DOCX overflow page")?;
-                    pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
+                    let next_page =
+                        reserve_then_build_page(page_budget, "DOCX overflow page", || {
+                            new_page(geo, run_index)
+                        })?;
+                    pages.push(std::mem::replace(&mut page, next_page));
                     y = geo.content_top_pt;
                     band_top = y;
                     band_leading = effective_gap_before(
@@ -1904,7 +1918,6 @@ fn paginate(
         && final_run.unit_start == final_run.unit_end
         && section_runs[section_runs.len() - 1].sect.sect_type != SectType::Continuous;
     if !work_page_is_empty(&page) || pages.is_empty() || empty_final_run_starts_page {
-        page_budget.consume("DOCX body page")?;
         pages.push(page);
     }
     Ok(pages)
@@ -3051,8 +3064,12 @@ fn place_footnotes(
                 };
             if y + needed > geo.content_bottom_pt && y > note_top {
                 target += 1;
-                page_budget.consume("DOCX footnote continuation page")?;
-                pages.insert(target, new_page(geo, governing_run));
+                let continuation = reserve_then_build_page(
+                    page_budget,
+                    "DOCX footnote continuation page",
+                    || new_page(geo, governing_run),
+                )?;
+                pages.insert(target, continuation);
                 let continuation_separator_y = geo.content_top_pt;
                 y = continuation_separator_y + NOTE_SEPARATOR_GAP_PT;
                 add_note_separator(&mut pages[target], geo, true, continuation_separator_y);
@@ -3142,7 +3159,9 @@ fn append_endnotes(
             &mut build_state,
         )?);
     }
-    let mut page = new_page(geo, governing_run);
+    let mut page = reserve_then_build_page(page_budget, "DOCX endnote page", || {
+        new_page(geo, governing_run)
+    })?;
     let mut y = geo.content_top_pt;
     let mut fragment_table = None;
     for unit in &units {
@@ -3162,8 +3181,11 @@ fn append_endnotes(
             > geo.content_bottom_pt
             && !work_page_is_empty(&page)
         {
-            page_budget.consume("DOCX endnote continuation page")?;
-            pages.push(std::mem::replace(&mut page, new_page(geo, governing_run)));
+            let next_page =
+                reserve_then_build_page(page_budget, "DOCX endnote continuation page", || {
+                    new_page(geo, governing_run)
+                })?;
+            pages.push(std::mem::replace(&mut page, next_page));
             y = geo.content_top_pt;
             fragment_table = None;
         }
@@ -3183,9 +3205,17 @@ fn append_endnotes(
             unit.table_id
         };
     }
-    page_budget.consume("DOCX endnote page")?;
     pages.push(page);
     Ok(())
+}
+
+fn reserve_then_build_page<T>(
+    page_budget: &mut PageBudget,
+    context: &str,
+    build: impl FnOnce() -> T,
+) -> Result<T> {
+    page_budget.consume(context)?;
+    Ok(build())
 }
 
 fn reset_page_budget(page_budget: &mut PageBudget) {
@@ -3529,6 +3559,19 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn denied_page_reservation_does_not_run_constructor() {
+        let mut budget = PageBudget::new(0);
+        let mut constructions = 0;
+        let error = reserve_then_build_page(&mut budget, "test page", || {
+            constructions += 1;
+        })
+        .unwrap_err();
+
+        assert_eq!(constructions, 0);
+        assert_resource_limit(error);
     }
 
     #[test]
