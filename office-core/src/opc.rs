@@ -31,6 +31,7 @@ const ZIP64_EOCD_SIGNATURE: u32 = 0x0606_4b50;
 const ZIP64_LOCATOR_SIGNATURE: u32 = 0x0706_4b50;
 const EOCD_MIN_LEN: usize = 22;
 const ZIP64_LOCATOR_LEN: usize = 20;
+const CENTRAL_DIRECTORY_HEADER_MIN_LEN: u64 = 46;
 
 /// OLE2 / CFB compound-file magic (`D0 CF 11 E0 A1 B1 1A E1`). Legacy binary
 /// Office formats and encrypted OOXML both use this container.
@@ -200,7 +201,12 @@ fn reject_entry_count(entries: u64, limit: usize) -> Result<usize> {
         .map_err(|_| OfficeError::Invalid("ZIP entry count does not fit this platform".into()))
 }
 
-fn validate_central_directory_bounds(offset: u64, size: u64, before: usize) -> Result<()> {
+fn validate_central_directory_metadata(
+    entries: u64,
+    offset: u64,
+    size: u64,
+    before: usize,
+) -> Result<()> {
     let end = offset
         .checked_add(size)
         .ok_or_else(|| OfficeError::Invalid("ZIP central-directory range overflows".into()))?;
@@ -208,6 +214,16 @@ fn validate_central_directory_bounds(offset: u64, size: u64, before: usize) -> R
         return Err(OfficeError::Invalid(
             "ZIP central directory overlaps its end metadata".into(),
         ));
+    }
+    let minimum_size = entries
+        .checked_mul(CENTRAL_DIRECTORY_HEADER_MIN_LEN)
+        .ok_or_else(|| {
+            OfficeError::Invalid("ZIP central-directory minimum size overflows".into())
+        })?;
+    if size < minimum_size || (entries == 0 && size != 0) {
+        return Err(OfficeError::Invalid(format!(
+            "ZIP central-directory size {size} is inconsistent with {entries} declared entries"
+        )));
     }
     Ok(())
 }
@@ -282,7 +298,6 @@ fn preflight_zip64_entry_count(
             "classic and ZIP64 entry counts disagree".into(),
         ));
     }
-    let entries = reject_entry_count(entries_total, limit)?;
     let directory_size = read_u64(bytes, record_offset, 40, "ZIP64 directory size")?;
     let directory_offset = read_u64(bytes, record_offset, 48, "ZIP64 directory offset")?;
     if classic_directory_size != u32::MAX && u64::from(classic_directory_size) != directory_size
@@ -293,8 +308,13 @@ fn preflight_zip64_entry_count(
             "classic and ZIP64 central-directory metadata disagree".into(),
         ));
     }
-    validate_central_directory_bounds(directory_offset, directory_size, record_offset)?;
-    Ok(entries)
+    validate_central_directory_metadata(
+        entries_total,
+        directory_offset,
+        directory_size,
+        record_offset,
+    )?;
+    reject_entry_count(entries_total, limit)
 }
 
 fn preflight_entry_count(bytes: &[u8], limit: usize) -> Result<usize> {
@@ -330,13 +350,13 @@ fn preflight_entry_count(bytes: &[u8], limit: usize) -> Result<usize> {
             "ZIP per-disk and total entry counts disagree".into(),
         ));
     }
-    let entries = reject_entry_count(u64::from(entries_total), limit)?;
-    validate_central_directory_bounds(
+    validate_central_directory_metadata(
+        u64::from(entries_total),
         u64::from(directory_offset),
         u64::from(directory_size),
         eocd_offset,
     )?;
-    Ok(entries)
+    reject_entry_count(u64::from(entries_total), limit)
 }
 
 impl Package {
@@ -612,20 +632,32 @@ mod tests {
         entries_on_disk: u16,
         entries_total: u16,
     ) -> Vec<u8> {
+        classic_eocd_with_directory(disk, central_disk, entries_on_disk, entries_total, 0, 0)
+    }
+
+    fn classic_eocd_with_directory(
+        disk: u16,
+        central_disk: u16,
+        entries_on_disk: u16,
+        entries_total: u16,
+        directory_size: u32,
+        directory_offset: u32,
+    ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0x0605_4b50_u32.to_le_bytes());
         bytes.extend_from_slice(&disk.to_le_bytes());
         bytes.extend_from_slice(&central_disk.to_le_bytes());
         bytes.extend_from_slice(&entries_on_disk.to_le_bytes());
         bytes.extend_from_slice(&entries_total.to_le_bytes());
-        bytes.extend_from_slice(&0_u32.to_le_bytes());
-        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&directory_size.to_le_bytes());
+        bytes.extend_from_slice(&directory_offset.to_le_bytes());
         bytes.extend_from_slice(&0_u16.to_le_bytes());
         bytes
     }
 
-    fn zip64_eocd(entries: u64) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    fn zip64_eocd(entries: u64, directory_size: u64) -> Vec<u8> {
+        let mut bytes = vec![0; usize::try_from(directory_size).unwrap()];
+        let record_offset = bytes.len() as u64;
         bytes.extend_from_slice(&0x0606_4b50_u32.to_le_bytes());
         bytes.extend_from_slice(&44_u64.to_le_bytes());
         bytes.extend_from_slice(&45_u16.to_le_bytes());
@@ -634,13 +666,20 @@ mod tests {
         bytes.extend_from_slice(&0_u32.to_le_bytes());
         bytes.extend_from_slice(&entries.to_le_bytes());
         bytes.extend_from_slice(&entries.to_le_bytes());
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&directory_size.to_le_bytes());
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         bytes.extend_from_slice(&0x0706_4b50_u32.to_le_bytes());
         bytes.extend_from_slice(&0_u32.to_le_bytes());
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&record_offset.to_le_bytes());
         bytes.extend_from_slice(&1_u32.to_le_bytes());
-        bytes.extend_from_slice(&classic_eocd(0, 0, u16::MAX, u16::MAX));
+        bytes.extend_from_slice(&classic_eocd_with_directory(
+            0,
+            0,
+            u16::MAX,
+            u16::MAX,
+            u32::try_from(directory_size).unwrap(),
+            0,
+        ));
         bytes
     }
 
@@ -689,7 +728,8 @@ mod tests {
 
     #[test]
     fn classic_declared_entry_count_is_preflighted_with_an_injectable_limit() {
-        let bytes = classic_eocd(0, 0, 2, 2);
+        let mut bytes = vec![0; 2 * 46];
+        bytes.extend_from_slice(&classic_eocd_with_directory(0, 0, 2, 2, 2 * 46, 0));
         let error = preflight_entry_count(&bytes, 1).expect_err("entry limit");
         assert!(matches!(
             error,
@@ -702,14 +742,32 @@ mod tests {
 
     #[test]
     fn zip64_declared_entry_count_is_preflighted_before_archive_open() {
-        let bytes = zip64_eocd((MAX_ENTRIES + 1) as u64);
-        let error = preflight_entry_count(&bytes, MAX_ENTRIES).expect_err("entry limit");
+        let bytes = zip64_eocd(2, 2 * 46);
+        let error = preflight_entry_count(&bytes, 1).expect_err("entry limit");
         assert!(matches!(
             error,
             OfficeError::Unsupported {
                 code: UnsupportedCode::DecompressionLimit,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn excessive_classic_count_with_impossible_directory_is_invalid() {
+        let bytes = classic_eocd(0, 0, 2, 2);
+        assert!(matches!(
+            preflight_entry_count(&bytes, 1),
+            Err(OfficeError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn excessive_zip64_count_with_impossible_directory_is_invalid() {
+        let bytes = zip64_eocd(2, 0);
+        assert!(matches!(
+            preflight_entry_count(&bytes, 1),
+            Err(OfficeError::Invalid(_))
         ));
     }
 

@@ -110,6 +110,33 @@ mod tests {
     }
 
     #[test]
+    fn checked_count_add_returns_sum_or_typed_overflow() {
+        assert_eq!(checked_count_add("rows", 2, 3).unwrap(), 5);
+        let error = checked_count_add("rows", usize::MAX, 1).expect_err("overflow");
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn try_reserve_maps_capacity_overflow_to_resource_limit() {
+        let mut values = Vec::<u8>::new();
+        let error = try_reserve(&mut values, usize::MAX, "cells").expect_err("capacity overflow");
+        assert!(values.is_empty());
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn page_budget_refuses_before_exceeding_configured_limit() {
         let mut budget = PageBudget::new(2);
         budget.consume("first page").unwrap();
