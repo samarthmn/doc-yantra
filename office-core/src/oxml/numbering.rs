@@ -7,6 +7,65 @@ use super::{Node, W, attr, child, children, measure_twip_to_pt, parse_i64};
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
 
+/// Word numbering levels are indexed from zero through eight.
+pub(crate) const MAX_NUMBERING_LEVEL: u32 = 8;
+/// Existing fixtures start at 21 or below; one million leaves more than four
+/// orders of magnitude of headroom while bounding counter-controlled work.
+pub(crate) const MAX_NUMBERING_VALUE: i64 = 1_000_000;
+pub(crate) const MIN_NUMBERING_VALUE: i64 = -MAX_NUMBERING_VALUE;
+
+fn numbering_resource_limit(detail: impl Into<String>) -> OfficeError {
+    OfficeError::unsupported(UnsupportedCode::ResourceLimit, detail)
+}
+
+pub(crate) fn parse_numbering_level(raw: Option<&str>, label: &str) -> Result<u32> {
+    let value = parse_bounded_number(raw, 0, 0, i64::from(MAX_NUMBERING_LEVEL), label)?;
+    u32::try_from(value).map_err(|_| numbering_resource_limit(format!("{label} exceeds u32")))
+}
+
+fn parse_numbering_value(raw: Option<&str>, default: i64, label: &str) -> Result<i64> {
+    parse_bounded_number(
+        raw,
+        default,
+        MIN_NUMBERING_VALUE,
+        MAX_NUMBERING_VALUE,
+        label,
+    )
+}
+
+fn parse_bounded_number(
+    raw: Option<&str>,
+    default: i64,
+    minimum: i64,
+    maximum: i64,
+    label: &str,
+) -> Result<i64> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    let integer_syntax = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    let value = match raw.parse::<i64>() {
+        Ok(value) => value,
+        Err(_) if integer_syntax => {
+            return Err(numbering_resource_limit(format!(
+                "{label} exceeds the integer range"
+            )));
+        }
+        Err(_) => {
+            return Err(OfficeError::Invalid(format!(
+                "{label} is not an integer: {raw}"
+            )));
+        }
+    };
+    if !(minimum..=maximum).contains(&value) {
+        return Err(numbering_resource_limit(format!(
+            "{label} {value} is outside {minimum}..={maximum}"
+        )));
+    }
+    Ok(value)
+}
+
 /// A number format (`w:numFmt`). Unlisted formats become [`NumFmt::Other`] and
 /// fail closed only if a paragraph actually uses that level.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,12 +242,14 @@ impl Numbering {
                 let Some(id) = parse_i64(attr(node, W, "abstractNumId")) else {
                     continue;
                 };
-                numbering.abstract_nums.insert(id, parse_abstract_num(node));
+                numbering
+                    .abstract_nums
+                    .insert(id, parse_abstract_num(node)?);
             } else if super::is(node, W, "num") {
                 let Some(id) = parse_i64(attr(node, W, "numId")) else {
                     continue;
                 };
-                if let Some(inst) = parse_num_instance(node) {
+                if let Some(inst) = parse_num_instance(node)? {
                     numbering.nums.insert(id, inst);
                 }
             }
@@ -211,27 +272,46 @@ impl Numbering {
         }
         Some(level)
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_levels(levels: &[(i64, u32, LevelDef)]) -> Numbering {
+        let mut numbering = Numbering::default();
+        for (num_id, ilvl, level) in levels {
+            numbering
+                .abstract_nums
+                .entry(*num_id)
+                .or_default()
+                .levels
+                .insert(*ilvl, level.clone());
+            numbering.nums.entry(*num_id).or_insert(NumInstance {
+                abstract_id: *num_id,
+                start_overrides: HashMap::new(),
+                level_overrides: HashMap::new(),
+            });
+        }
+        numbering
+    }
 }
 
-fn parse_abstract_num(node: Node) -> AbstractNum {
+fn parse_abstract_num(node: Node) -> Result<AbstractNum> {
     let mut abstract_num = AbstractNum::default();
     for lvl in children(node) {
         if !super::is(lvl, W, "lvl") {
             continue;
         }
-        let ilvl = parse_i64(attr(lvl, W, "ilvl")).unwrap_or(0).max(0) as u32;
+        let ilvl = parse_numbering_level(attr(lvl, W, "ilvl"), "w:lvl@w:ilvl")?;
         abstract_num
             .levels
-            .insert(ilvl, parse_level(lvl, LevelPropertyOrigin::AbstractLevel));
+            .insert(ilvl, parse_level(lvl, LevelPropertyOrigin::AbstractLevel)?);
     }
-    abstract_num
+    Ok(abstract_num)
 }
 
-fn parse_level(lvl: Node, origin: LevelPropertyOrigin) -> LevelDef {
+fn parse_level(lvl: Node, origin: LevelPropertyOrigin) -> Result<LevelDef> {
     let mut def = LevelDef::default();
     for c in children(lvl) {
         match c.tag_name().name() {
-            "start" => def.start = parse_i64(attr(c, W, "val")).unwrap_or(1),
+            "start" => def.start = parse_numbering_value(attr(c, W, "val"), 1, "w:start@w:val")?,
             "numFmt" => {
                 def.num_fmt = attr(c, W, "val")
                     .map(NumFmt::parse)
@@ -268,7 +348,7 @@ fn parse_level(lvl: Node, origin: LevelPropertyOrigin) -> LevelDef {
             _ => {}
         }
     }
-    def
+    Ok(def)
 }
 
 fn alternate_num_fmt(node: Node) -> Option<NumFmt> {
@@ -319,8 +399,12 @@ fn parse_level_indent(ppr: Node) -> Indent {
     indent
 }
 
-fn parse_num_instance(node: Node) -> Option<NumInstance> {
-    let abstract_id = child(node, W, "abstractNumId").and_then(|n| parse_i64(attr(n, W, "val")))?;
+fn parse_num_instance(node: Node) -> Result<Option<NumInstance>> {
+    let Some(abstract_id) =
+        child(node, W, "abstractNumId").and_then(|n| parse_i64(attr(n, W, "val")))
+    else {
+        return Ok(None);
+    };
     let mut inst = NumInstance {
         abstract_id,
         start_overrides: HashMap::new(),
@@ -330,18 +414,18 @@ fn parse_num_instance(node: Node) -> Option<NumInstance> {
         if !super::is(ov, W, "lvlOverride") {
             continue;
         }
-        let ilvl = parse_i64(attr(ov, W, "ilvl")).unwrap_or(0).max(0) as u32;
-        if let Some(start) =
-            child(ov, W, "startOverride").and_then(|n| parse_i64(attr(n, W, "val")))
-        {
+        let ilvl = parse_numbering_level(attr(ov, W, "ilvl"), "w:lvlOverride@w:ilvl")?;
+        if let Some(start_node) = child(ov, W, "startOverride") {
+            let start =
+                parse_numbering_value(attr(start_node, W, "val"), 1, "w:startOverride@w:val")?;
             inst.start_overrides.insert(ilvl, start);
         }
         if let Some(lvl) = child(ov, W, "lvl") {
             inst.level_overrides
-                .insert(ilvl, parse_level(lvl, LevelPropertyOrigin::LevelOverride));
+                .insert(ilvl, parse_level(lvl, LevelPropertyOrigin::LevelOverride)?);
         }
     }
-    Some(inst)
+    Ok(Some(inst))
 }
 
 /// Formats a counter `n` under a numeric [`NumFmt`].
@@ -381,10 +465,11 @@ pub fn format_number(fmt: &NumFmt, n: i64) -> Result<String> {
 }
 
 fn ordinal_decimal(n: i64) -> String {
-    let suffix = if (11..=13).contains(&(n.abs() % 100)) {
+    let magnitude = n.unsigned_abs();
+    let suffix = if (11..=13).contains(&(magnitude % 100)) {
         "th"
     } else {
-        match n.abs() % 10 {
+        match magnitude % 10 {
             1 => "st",
             2 => "nd",
             3 => "rd",
@@ -395,16 +480,20 @@ fn ordinal_decimal(n: i64) -> String {
 }
 
 fn cardinal_text(n: i64) -> String {
+    let magnitude = n.unsigned_abs();
+    let formatted = if magnitude > 999_999 {
+        magnitude.to_string()
+    } else {
+        cardinal_under_million(magnitude)
+    };
     if n < 0 {
-        return format!("minus {}", cardinal_text(-n));
+        format!("minus {formatted}")
+    } else {
+        formatted
     }
-    if n > 999_999 {
-        return n.to_string();
-    }
-    cardinal_under_million(n)
 }
 
-fn cardinal_under_million(n: i64) -> String {
+fn cardinal_under_million(n: u64) -> String {
     if n >= 1_000 {
         let rest = n % 1_000;
         let head = format!("{} thousand", cardinal_under_thousand(n / 1_000));
@@ -417,7 +506,7 @@ fn cardinal_under_million(n: i64) -> String {
     cardinal_under_thousand(n)
 }
 
-fn cardinal_under_thousand(n: i64) -> String {
+fn cardinal_under_thousand(n: u64) -> String {
     const SMALL: [&str; 20] = [
         "zero",
         "one",
@@ -602,6 +691,75 @@ mod tests {
             "twenty-first"
         );
         assert_eq!(format_number(&NumFmt::parse("none"), 9).unwrap(), "");
+    }
+
+    #[test]
+    fn ordinal_decimal_formats_i64_min_without_overflow() {
+        assert_eq!(
+            format_number(&NumFmt::Ordinal, i64::MIN).expect("format ordinal"),
+            "-9223372036854775808th"
+        );
+    }
+
+    #[test]
+    fn cardinal_text_formats_i64_min_without_recursive_negation() {
+        assert_eq!(
+            format_number(&NumFmt::CardinalText, i64::MIN).expect("format cardinal text"),
+            "minus 9223372036854775808"
+        );
+    }
+
+    #[test]
+    fn ordinal_text_formats_i64_min_without_overflow() {
+        assert_eq!(
+            format_number(&NumFmt::OrdinalText, i64::MIN).expect("format ordinal text"),
+            "-9223372036854775808th"
+        );
+    }
+
+    #[test]
+    fn numbering_rejects_levels_above_eight() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="9"/></w:abstractNum></w:numbering>"#;
+
+        let error = Numbering::parse(xml).expect_err("reject out-of-range ilvl");
+
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn numbering_rejects_start_above_engine_range() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1000001"/></w:lvl></w:abstractNum></w:numbering>"#;
+
+        let error = Numbering::parse(xml).expect_err("reject excessive start");
+
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn numbering_rejects_start_override_above_engine_range() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1000001"/></w:lvlOverride></w:num></w:numbering>"#;
+
+        let error = Numbering::parse(xml).expect_err("reject excessive restart");
+
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
     }
 
     #[test]

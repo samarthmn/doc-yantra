@@ -2777,44 +2777,61 @@ fn resolve_numbering_tabs(
     numbering_level: &[TabStop],
     direct: &[TabStop],
 ) -> Vec<ResolvedTabStop> {
-    fn overlay(
-        effective: &mut Vec<ResolvedTabStop>,
-        authored: &[TabStop],
-        origin: NumberingGeometryOrigin,
-    ) {
-        for stop in authored {
-            effective.retain(|existing| (existing.stop.pos_pt - stop.pos_pt).abs() > 0.01);
-            if stop.alignment != TabAlign::Clear {
-                effective.push(ResolvedTabStop {
-                    stop: *stop,
-                    origin,
-                });
-            }
-        }
+    #[derive(Clone, Copy)]
+    struct TaggedTabStop {
+        resolved: ResolvedTabStop,
+        precedence: u8,
+        authored_order: usize,
     }
 
-    let mut effective = Vec::new();
-    overlay(
-        &mut effective,
-        inherited,
-        NumberingGeometryOrigin::InheritedStyle,
-    );
-    overlay(
-        &mut effective,
-        numbering_level,
-        NumberingGeometryOrigin::NumberingLevel,
-    );
-    overlay(
-        &mut effective,
-        direct,
-        NumberingGeometryOrigin::DirectParagraph,
-    );
-    effective.sort_by(|left, right| {
-        left.stop
+    let mut tagged = Vec::with_capacity(inherited.len() + numbering_level.len() + direct.len());
+    for (precedence, origin, stops) in [
+        (0, NumberingGeometryOrigin::InheritedStyle, inherited),
+        (1, NumberingGeometryOrigin::NumberingLevel, numbering_level),
+        (2, NumberingGeometryOrigin::DirectParagraph, direct),
+    ] {
+        tagged.extend(
+            stops
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(authored_order, stop)| TaggedTabStop {
+                    resolved: ResolvedTabStop { stop, origin },
+                    precedence,
+                    authored_order,
+                }),
+        );
+    }
+    tagged.sort_by(|left, right| {
+        left.resolved
+            .stop
             .pos_pt
-            .partial_cmp(&right.stop.pos_pt)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&right.resolved.stop.pos_pt)
+            .then_with(|| left.precedence.cmp(&right.precedence))
+            .then_with(|| left.authored_order.cmp(&right.authored_order))
     });
+
+    let mut effective = Vec::new();
+    let mut cluster_start = 0;
+    while cluster_start < tagged.len() {
+        let mut cluster_end = cluster_start + 1;
+        while cluster_end < tagged.len()
+            && (tagged[cluster_end].resolved.stop.pos_pt
+                - tagged[cluster_end - 1].resolved.stop.pos_pt)
+                .abs()
+                <= 0.01
+        {
+            cluster_end += 1;
+        }
+        let winner = tagged[cluster_start..cluster_end]
+            .iter()
+            .max_by_key(|stop| (stop.precedence, stop.authored_order))
+            .expect("tab cluster is non-empty");
+        if winner.resolved.stop.alignment != TabAlign::Clear {
+            effective.push(winner.resolved);
+        }
+        cluster_start = cluster_end;
+    }
     effective
 }
 
@@ -3717,7 +3734,62 @@ fn para_mark_height(doc: &WordDoc, para: &Paragraph, use_mark_rpr: bool) -> f64 
 
 #[cfg(test)]
 mod tests {
-    use super::EdgeWrapBand;
+    use super::{EdgeWrapBand, NumberingGeometryOrigin, resolve_numbering_tabs};
+    use crate::oxml::wml::{TabAlign, TabLeader, TabStop};
+
+    fn tab(pos_pt: f64, alignment: TabAlign) -> TabStop {
+        TabStop {
+            pos_pt,
+            alignment,
+            leader: TabLeader::None,
+        }
+    }
+
+    #[test]
+    fn numbering_tabs_apply_direct_then_numbering_then_inherited_precedence() {
+        let inherited = [tab(36.0, TabAlign::Left), tab(72.0, TabAlign::Left)];
+        let numbering = [tab(36.0, TabAlign::Center), tab(54.0, TabAlign::Right)];
+        let direct = [tab(36.0, TabAlign::Decimal), tab(54.0, TabAlign::Left)];
+
+        let resolved = resolve_numbering_tabs(&inherited, &numbering, &direct);
+
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(
+            (resolved[0].stop.pos_pt, resolved[0].stop.alignment),
+            (direct[0].pos_pt, direct[0].alignment)
+        );
+        assert!(matches!(
+            resolved[0].origin,
+            NumberingGeometryOrigin::DirectParagraph
+        ));
+        assert_eq!(
+            (resolved[1].stop.pos_pt, resolved[1].stop.alignment),
+            (direct[1].pos_pt, direct[1].alignment)
+        );
+        assert!(matches!(
+            resolved[1].origin,
+            NumberingGeometryOrigin::DirectParagraph
+        ));
+        assert_eq!(
+            (resolved[2].stop.pos_pt, resolved[2].stop.alignment),
+            (inherited[1].pos_pt, inherited[1].alignment)
+        );
+        assert!(matches!(
+            resolved[2].origin,
+            NumberingGeometryOrigin::InheritedStyle
+        ));
+    }
+
+    #[test]
+    fn direct_clear_removes_lower_precedence_tab_at_same_position() {
+        let inherited = [tab(36.0, TabAlign::Left)];
+        let numbering = [tab(36.005, TabAlign::Right)];
+        let direct = [tab(36.01, TabAlign::Clear)];
+
+        let resolved = resolve_numbering_tabs(&inherited, &numbering, &direct);
+
+        assert!(resolved.is_empty(), "resolved stops: {resolved:?}");
+    }
 
     #[test]
     fn tight_wrap_releases_a_line_when_its_baseline_clears_the_polygon() {

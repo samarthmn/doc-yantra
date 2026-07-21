@@ -50,28 +50,53 @@ pub struct PlacedLabel {
 /// deeper levels (Word restart semantics).
 #[derive(Clone, Default)]
 pub struct ListCounters {
-    counters: HashMap<(i64, u32), i64>,
+    counters: HashMap<i64, [Option<i64>; 9]>,
 }
 
 impl ListCounters {
     /// Advances the counter for `num_ref` and returns the formatted label text
-    /// and its level definition. `None` if the reference is dangling.
-    pub fn advance(&mut self, doc: &WordDoc, num_ref: NumRef) -> Option<(String, LevelDef)> {
-        let level = doc.numbering.resolve(num_ref.num_id, num_ref.ilvl)?;
-        let key = (num_ref.num_id, num_ref.ilvl);
-        let entry = self.counters.entry(key).or_insert(level.start - 1);
-        *entry += 1;
-        // Reset deeper levels of the same list.
-        self.counters
-            .retain(|&(nid, lvl), _| !(nid == num_ref.num_id && lvl > num_ref.ilvl));
+    /// and its level definition. `None` if the reference is dangling. Returns
+    /// `ResourceLimit` if the level or next counter is outside the engine range.
+    pub fn advance(
+        &mut self,
+        doc: &WordDoc,
+        num_ref: NumRef,
+    ) -> Result<Option<(String, LevelDef)>> {
+        let level_index = usize::try_from(num_ref.ilvl)
+            .ok()
+            .filter(|index| *index < 9)
+            .ok_or_else(|| {
+                crate::OfficeError::unsupported(
+                    crate::UnsupportedCode::ResourceLimit,
+                    format!("numbering ilvl {} is outside 0..=8", num_ref.ilvl),
+                )
+            })?;
+        let Some(level) = doc.numbering.resolve(num_ref.num_id, num_ref.ilvl) else {
+            return Ok(None);
+        };
+        let levels = self.counters.entry(num_ref.num_id).or_insert([None; 9]);
+        let value = match levels[level_index] {
+            Some(current) => current.checked_add(1).ok_or_else(|| {
+                crate::OfficeError::unsupported(
+                    crate::UnsupportedCode::ResourceLimit,
+                    format!(
+                        "numbering counter overflow for numId {} ilvl {}",
+                        num_ref.num_id, num_ref.ilvl
+                    ),
+                )
+            })?,
+            None => level.start,
+        };
+        levels[level_index] = Some(value);
+        levels[level_index + 1..].fill(None);
 
-        let text = self.build_label_text(doc, num_ref, &level);
-        Some((text, level))
+        let text = self.build_label_text(doc, num_ref, &level)?;
+        Ok(Some((text, level)))
     }
 
-    fn build_label_text(&self, doc: &WordDoc, num_ref: NumRef, level: &LevelDef) -> String {
+    fn build_label_text(&self, doc: &WordDoc, num_ref: NumRef, level: &LevelDef) -> Result<String> {
         if let NumFmt::Bullet = level.num_fmt {
-            return level.lvl_text.clone();
+            return Ok(level.lvl_text.clone());
         }
         let chars: Vec<char> = level.lvl_text.chars().collect();
         let mut out = String::new();
@@ -89,24 +114,22 @@ impl ListCounters {
                     .unwrap_or_else(|| level.clone());
                 let value = self
                     .counters
-                    .get(&(num_ref.num_id, lvl_idx))
-                    .copied()
+                    .get(&num_ref.num_id)
+                    .and_then(|levels| levels[lvl_idx as usize])
                     .unwrap_or(lvl_def.start);
                 let format = if level.legal {
                     &NumFmt::Decimal
                 } else {
                     &lvl_def.num_fmt
                 };
-                if let Ok(s) = format_number(format, value) {
-                    out.push_str(&s);
-                }
+                out.push_str(&format_number(format, value)?);
                 i += 2;
             } else {
                 out.push(chars[i]);
                 i += 1;
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -342,7 +365,7 @@ pub fn resolve_label(
     let text = if let NumFmt::Bullet = level.num_fmt {
         level.lvl_text.clone()
     } else {
-        format_number(&level.num_fmt, level.start).unwrap_or_default() + suffix_of(&level)
+        format_number(&level.num_fmt, level.start)? + suffix_of(&level)
     };
     build_label(doc, warnings, para, &text, &level)
 }
@@ -351,4 +374,74 @@ fn suffix_of(level: &LevelDef) -> &'static str {
     // The lvlText already includes literal punctuation; nothing extra here.
     let _ = level;
     ""
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ConvertOptions;
+    use crate::oxml::numbering::Numbering;
+    use crate::testkit::minimal_docx;
+
+    fn test_doc(levels: &[(i64, u32, LevelDef)]) -> WordDoc {
+        let mut doc = WordDoc::open(&minimal_docx("<w:p/>"), &ConvertOptions::default())
+            .expect("open test document");
+        doc.numbering = Numbering::test_with_levels(levels);
+        doc
+    }
+
+    fn decimal_level(start: i64, text: &str) -> LevelDef {
+        LevelDef {
+            start,
+            lvl_text: text.to_string(),
+            ..LevelDef::default()
+        }
+    }
+
+    #[test]
+    fn advance_returns_resource_limit_after_i64_max() {
+        let doc = test_doc(&[(1, 0, decimal_level(i64::MAX, "%1"))]);
+        let mut counters = ListCounters::default();
+        let num_ref = NumRef { num_id: 1, ilvl: 0 };
+        let first = counters
+            .advance(&doc, num_ref)
+            .expect("advance first item")
+            .expect("level resolves");
+        assert_eq!(first.0, i64::MAX.to_string());
+
+        let error = counters
+            .advance(&doc, num_ref)
+            .expect_err("increment beyond i64::MAX must fail");
+        assert!(matches!(
+            error,
+            crate::OfficeError::Unsupported {
+                code: crate::UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shallower_level_reset_is_isolated_to_its_list() {
+        let doc = test_doc(&[
+            (1, 0, decimal_level(1, "%1")),
+            (1, 1, decimal_level(1, "%2")),
+            (2, 0, decimal_level(1, "%1")),
+            (2, 1, decimal_level(1, "%2")),
+        ]);
+        let mut counters = ListCounters::default();
+        let advance = |counters: &mut ListCounters, num_id, ilvl| {
+            counters
+                .advance(&doc, NumRef { num_id, ilvl })
+                .expect("advance succeeds")
+                .expect("level resolves")
+                .0
+        };
+
+        assert_eq!(advance(&mut counters, 1, 1), "1");
+        assert_eq!(advance(&mut counters, 2, 1), "1");
+        assert_eq!(advance(&mut counters, 1, 0), "1");
+        assert_eq!(advance(&mut counters, 2, 1), "2");
+        assert_eq!(advance(&mut counters, 1, 1), "1");
+    }
 }

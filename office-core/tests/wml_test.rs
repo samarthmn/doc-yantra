@@ -46,6 +46,23 @@ fn para_text(p: &office_core::oxml::wml::Paragraph) -> String {
     output
 }
 
+#[test]
+fn paragraph_numbering_rejects_ilvl_above_eight() {
+    let xml = wrap_document(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="9"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#,
+    );
+
+    let error = parse_document(&xml).expect_err("reject out-of-range paragraph ilvl");
+
+    assert!(matches!(
+        error,
+        OfficeError::Unsupported {
+            code: UnsupportedCode::ResourceLimit,
+            ..
+        }
+    ));
+}
+
 /// Every real mock `.docx` main part parses without error.
 #[test]
 fn parses_every_mock_docx() {

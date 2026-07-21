@@ -1618,7 +1618,7 @@ fn counter_label(
     let Some(num_ref) = eff.numbering else {
         return Ok(None);
     };
-    let Some((text, level)) = counters.advance(doc, num_ref) else {
+    let Some((text, level)) = counters.advance(doc, num_ref)? else {
         return Ok(None);
     };
     build_label(doc, warnings, p, &text, &level)

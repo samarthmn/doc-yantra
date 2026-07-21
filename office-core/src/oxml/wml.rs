@@ -2838,13 +2838,15 @@ pub(crate) fn parse_tabs_checked(node: Node, limit: usize) -> Result<Vec<TabStop
     Ok(tabs)
 }
 
-fn parse_num_pr(node: Node) -> Option<NumRef> {
-    let ilvl = child(node, W, "ilvl")
-        .and_then(|n| parse_i64(attr(n, W, "val")))
-        .unwrap_or(0)
-        .max(0) as u32;
-    let num_id = child(node, W, "numId").and_then(|n| parse_i64(attr(n, W, "val")))?;
-    Some(NumRef { num_id, ilvl })
+fn parse_num_pr(node: Node) -> Result<Option<NumRef>> {
+    let ilvl = super::numbering::parse_numbering_level(
+        child(node, W, "ilvl").and_then(|n| attr(n, W, "val")),
+        "w:numPr/w:ilvl@w:val",
+    )?;
+    let Some(num_id) = child(node, W, "numId").and_then(|n| parse_i64(attr(n, W, "val"))) else {
+        return Ok(None);
+    };
+    Ok(Some(NumRef { num_id, ilvl }))
 }
 
 fn parse_shd_fill(node: Node) -> Option<Rgb> {
@@ -3297,7 +3299,7 @@ pub(crate) fn parse_para_props_checked(ppr: Node, tab_limit: usize) -> Result<Pa
             "spacing" => props.spacing = parse_spacing(c),
             "ind" => props.indent = parse_indent(c),
             "tabs" => props.tabs = parse_tabs_checked(c, tab_limit)?,
-            "numPr" => props.numbering = parse_num_pr(c),
+            "numPr" => props.numbering = parse_num_pr(c)?,
             "keepNext" => props.keep_next = toggle_child(c),
             "keepLines" => props.keep_lines = toggle_child(c),
             "pageBreakBefore" => props.page_break_before = toggle_child(c),
