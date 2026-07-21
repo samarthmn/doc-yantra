@@ -4,7 +4,10 @@
 
 use crate::drawing::chart::Chart;
 use crate::drawing::diagram::{DiagramFallback, DiagramStore};
-use crate::drawing::image::{add_to_budget, decode_required, validate_crop_units};
+use crate::drawing::image::{
+    ImageBudget, decode_required_with_budget, image_resident_bytes, rgba_variant_reservation,
+    validate_crop_units,
+};
 use crate::fonts::FontDb;
 use crate::layout::{DocDates, EncodedImage, ImageId, LinkTarget};
 use crate::opc::Package;
@@ -248,8 +251,9 @@ impl PptxDoc {
         crate::register_runtime_fonts(&mut fonts)?;
         fonts.mark_hash_pinned(&opts.font_hash_pins);
 
-        let (mut images, image_by_part, image_errors_by_part, mut total_image_pixels) =
-            decode_images(&pkg);
+        let mut image_budget = ImageBudget::production();
+        let (mut images, image_by_part, image_errors_by_part) =
+            decode_images(&pkg, &mut image_budget);
         let mut crop_requests = Vec::new();
         for slide in &slides {
             collect_slide_crops(&slide.master, &slide.master_rels, &mut crop_requests);
@@ -262,12 +266,13 @@ impl PptxDoc {
                 .then_with(|| crop_key(left.1).cmp(&crop_key(right.1)))
         });
         crop_requests.dedup();
+        image_budget.ensure_variant_count(crop_requests.len())?;
         let (cropped_image_by_part, cropped_image_errors_by_part) = decode_crops(
             &pkg,
             &crop_requests,
             &image_errors_by_part,
             &mut images,
-            &mut total_image_pixels,
+            &mut image_budget,
         );
         let dates = core_dates(&pkg);
         let mut charts_by_part = HashMap::new();
@@ -570,12 +575,14 @@ type ImageErrors = HashMap<String, (UnsupportedCode, String)>;
 type CroppedImageMap = HashMap<(String, CropRect), usize>;
 type CroppedImageErrors = HashMap<(String, CropRect), (UnsupportedCode, String)>;
 
-fn decode_images(pkg: &Package) -> (Vec<EncodedImage>, HashMap<String, usize>, ImageErrors, u64) {
+fn decode_images(
+    pkg: &Package,
+    budget: &mut ImageBudget,
+) -> (Vec<EncodedImage>, HashMap<String, usize>, ImageErrors) {
     let mut images = Vec::new();
     let mut by_part = HashMap::new();
     let mut errors = HashMap::new();
     let names: Vec<String> = pkg.part_names().map(str::to_string).collect();
-    let mut total_pixels = 0u64;
     for name in names {
         let Some(ct) = pkg.content_type(&name) else {
             continue;
@@ -593,13 +600,7 @@ fn decode_images(pkg: &Package) -> (Vec<EncodedImage>, HashMap<String, usize>, I
             );
             continue;
         };
-        match decode_required(ct, bytes)
-            .and_then(|decoded| {
-                add_to_budget(images.len(), &mut total_pixels, decoded.1)?;
-                Ok(decoded)
-            })
-            .map_err(|error| error.context(&name))
-        {
+        match decode_required_with_budget(ct, bytes, budget).map_err(|error| error.context(&name)) {
             Ok((decoded, _)) => {
                 by_part.insert(name.clone(), images.len());
                 images.push(decoded);
@@ -615,7 +616,7 @@ fn decode_images(pkg: &Package) -> (Vec<EncodedImage>, HashMap<String, usize>, I
             }
         }
     }
-    (images, by_part, errors, total_pixels)
+    (images, by_part, errors)
 }
 
 fn crop_key(crop: CropRect) -> (i32, i32, i32, i32) {
@@ -689,7 +690,7 @@ fn decode_crops(
     requests: &[(String, CropRect)],
     image_errors: &ImageErrors,
     images: &mut Vec<EncodedImage>,
-    total_pixels: &mut u64,
+    budget: &mut ImageBudget,
 ) -> (CroppedImageMap, CroppedImageErrors) {
     let mut cropped = HashMap::new();
     let mut errors = HashMap::new();
@@ -715,7 +716,8 @@ fn decode_crops(
             );
             continue;
         };
-        let Ok(image) = image::load_from_memory(bytes) else {
+        let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+        else {
             errors.insert(
                 key,
                 (
@@ -725,8 +727,16 @@ fn decode_crops(
             );
             continue;
         };
-        let width = image.width();
-        let height = image.height();
+        let Ok((width, height)) = reader.into_dimensions() else {
+            errors.insert(
+                key,
+                (
+                    UnsupportedCode::ImageDecodeFailure,
+                    format!("image {part} dimensions cannot be decoded for cropping"),
+                ),
+            );
+            continue;
+        };
         let left = (u64::from(width) * crop.left as u64 / 100_000) as u32;
         let top = (u64::from(height) * crop.top as u64 / 100_000) as u32;
         let right = (u64::from(width) * crop.right as u64 / 100_000) as u32;
@@ -743,23 +753,42 @@ fn decode_crops(
             );
             continue;
         }
-        let crop_pixels = u64::from(crop_width) * u64::from(crop_height);
-        if let Err(OfficeError::Unsupported { code, detail }) =
-            add_to_budget(images.len(), total_pixels, crop_pixels)
-        {
-            errors.insert(key, (code, detail));
-            continue;
-        }
-        let data = image
-            .crop_imm(left, top, crop_width, crop_height)
-            .into_rgba8()
-            .into_raw();
+        let reservation = match rgba_variant_reservation(width, height, crop_width, crop_height) {
+            Ok(reservation) => reservation,
+            Err(OfficeError::Unsupported { code, detail }) => {
+                errors.insert(key, (code, detail));
+                continue;
+            }
+            Err(_) => continue,
+        };
+        let cropped_image = match budget.admit_variant(reservation, || {
+            let image = image::load_from_memory(bytes).map_err(|error| {
+                OfficeError::unsupported(
+                    UnsupportedCode::ImageDecodeFailure,
+                    format!("image {part} cannot be decoded for cropping: {error}"),
+                )
+            })?;
+            let data = image
+                .crop_imm(left, top, crop_width, crop_height)
+                .into_rgba8()
+                .into_raw();
+            let image = EncodedImage::Rgba8 {
+                width: crop_width,
+                height: crop_height,
+                data: std::sync::Arc::new(data),
+            };
+            let resident = image_resident_bytes(&image);
+            Ok((image, resident))
+        }) {
+            Ok(image) => image,
+            Err(OfficeError::Unsupported { code, detail }) => {
+                errors.insert(key, (code, detail));
+                continue;
+            }
+            Err(_) => continue,
+        };
         cropped.insert(key, images.len());
-        images.push(EncodedImage::Rgba8 {
-            width: crop_width,
-            height: crop_height,
-            data,
-        });
+        images.push(cropped_image);
     }
     (cropped, errors)
 }

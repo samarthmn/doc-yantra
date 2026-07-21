@@ -323,7 +323,7 @@ pub enum EncodedImage {
     /// A JPEG, passed through with `DCTDecode`.
     Jpeg {
         /// Raw JPEG bytes.
-        data: Vec<u8>,
+        data: std::sync::Arc<Vec<u8>>,
         /// Pixel width.
         width: u32,
         /// Pixel height.
@@ -336,7 +336,7 @@ pub enum EncodedImage {
         /// Pixel height.
         height: u32,
         /// `width*height*3` samples.
-        data: Vec<u8>,
+        data: std::sync::Arc<Vec<u8>>,
     },
     /// Decoded RGBA8 samples (alpha becomes an SMask).
     Rgba8 {
@@ -345,7 +345,7 @@ pub enum EncodedImage {
         /// Pixel height.
         height: u32,
         /// `width*height*4` samples.
-        data: Vec<u8>,
+        data: std::sync::Arc<Vec<u8>>,
     },
 }
 

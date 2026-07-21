@@ -8,6 +8,9 @@
 //! [`DocProfile::from_error`].
 
 use crate::drawing::diagram::DiagramStore;
+use crate::drawing::image::{
+    ImageBudget, ImageEncodingKey, ImageSummary, decode_required_with_budget,
+};
 use crate::fonts::{
     FontDb, FontExactness, FontRequest, FontResolution, FontResolutionEvent, FontResolutionSource,
     FontSlot, SelectedFontIdentity, matching,
@@ -25,7 +28,7 @@ use crate::oxml::wml::{
 };
 use crate::text::script::{ScriptScan, scan_scripts};
 use crate::{OfficeError, OfficeFormat, Result, UnsupportedCode};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A stable, non-fatal warning about a documented-lossy conversion.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1733,8 +1736,9 @@ struct Collector<'a> {
     paragraphs: u32,
     tables: u32,
     images: u32,
-    validated_images: BTreeSet<String>,
-    total_image_pixels: u64,
+    validated_images: BTreeMap<String, ImageSummary>,
+    validated_variants: BTreeSet<ImageEncodingKey>,
+    image_budget: ImageBudget,
     has_math: bool,
     has_tab_leaders: bool,
     note_refs: Vec<(wml::NoteKind, i64)>,
@@ -1760,8 +1764,9 @@ impl<'a> Collector<'a> {
             paragraphs: 0,
             tables: 0,
             images: 0,
-            validated_images: BTreeSet::new(),
-            total_image_pixels: 0,
+            validated_images: BTreeMap::new(),
+            validated_variants: BTreeSet::new(),
+            image_budget: ImageBudget::production(),
             has_math: false,
             has_tab_leaders: false,
             note_refs: Vec::new(),
@@ -2031,7 +2036,7 @@ impl<'a> Collector<'a> {
                     }
                     if let Some(rel_id) = &d.drawing.blip_rel_id {
                         self.images += 1;
-                        self.check_image(rel_id, pkg, rels, profile);
+                        self.check_image(rel_id, Some(&d.drawing), pkg, rels, profile);
                     }
                     if d.drawing.graphic_uri.as_deref() == Some(crate::oxml::dml::URI_CHART) {
                         if d.drawing.extent_pt.is_none() {
@@ -2144,7 +2149,7 @@ impl<'a> Collector<'a> {
                     }
                     if let Some(rel_id) = &shape.image_rel_id {
                         self.images += 1;
-                        self.check_image(rel_id, pkg, rels, profile);
+                        self.check_image(rel_id, None, pkg, rels, profile);
                     }
                     for block in &shape.text_box {
                         self.walk_blocks(
@@ -2174,7 +2179,7 @@ impl<'a> Collector<'a> {
                     match pkg.content_type(target) {
                         Some("image/png" | "image/jpeg" | "image/jpg") => {
                             self.images += 1;
-                            self.check_image(rel_id, pkg, rels, profile);
+                            self.check_image(rel_id, None, pkg, rels, profile);
                         }
                         Some("image/x-emf" | "image/emf") => profile.add_reason_deduped(
                             UnsupportedCode::OlePreviewEmf,
@@ -2283,6 +2288,7 @@ impl<'a> Collector<'a> {
     fn check_image(
         &mut self,
         rel_id: &str,
+        drawing: Option<&crate::oxml::dml::Drawing>,
         pkg: &Package,
         rels: &HashMap<String, String>,
         profile: &mut DocProfile,
@@ -2294,46 +2300,55 @@ impl<'a> Collector<'a> {
             );
             return;
         };
-        if self.validated_images.contains(target) {
-            return;
-        }
-        let Some(bytes) = pkg.part(target) else {
-            profile.add_reason_deduped(
-                UnsupportedCode::MissingRelationshipTarget,
-                format!("image relationship target {target} is missing"),
-            );
-            return;
-        };
-        let Some(content_type) = pkg.content_type(target) else {
-            profile.add_reason_deduped(
-                UnsupportedCode::ImageContentTypeMissing,
-                format!("image relationship target {target} has no content type"),
-            );
-            return;
-        };
-        match crate::drawing::image::decode_required(content_type, bytes) {
-            Ok((_, pixels)) => {
-                if let Err(OfficeError::Unsupported { code, detail }) =
-                    crate::drawing::image::add_to_budget(
-                        self.validated_images.len(),
-                        &mut self.total_image_pixels,
-                        pixels,
-                    )
-                {
-                    profile.add_reason_deduped(code, detail);
+        let summary = if let Some(summary) = self.validated_images.get(target).copied() {
+            summary
+        } else {
+            let Some(bytes) = pkg.part(target) else {
+                profile.add_reason_deduped(
+                    UnsupportedCode::MissingRelationshipTarget,
+                    format!("image relationship target {target} is missing"),
+                );
+                return;
+            };
+            let Some(content_type) = pkg.content_type(target) else {
+                profile.add_reason_deduped(
+                    UnsupportedCode::ImageContentTypeMissing,
+                    format!("image relationship target {target} has no content type"),
+                );
+                return;
+            };
+            match decode_required_with_budget(content_type, bytes, &mut self.image_budget) {
+                Ok((image, _)) => {
+                    let summary = ImageSummary::from_image(&image);
+                    self.validated_images.insert(target.clone(), summary);
+                    summary
+                }
+                Err(OfficeError::Unsupported { code, detail }) => {
+                    profile.add_reason_deduped(code, format!("image {target}: {detail}"));
                     return;
                 }
-                self.validated_images.insert(target.clone());
+                Err(error) => {
+                    profile.add_reason_deduped(
+                        UnsupportedCode::ImageDecodeFailure,
+                        format!("image {target}: {error}"),
+                    );
+                    return;
+                }
             }
-            Err(OfficeError::Unsupported { code, detail }) => {
-                profile.add_reason_deduped(code, format!("image {target}: {detail}"));
-            }
-            Err(error) => {
-                profile.add_reason_deduped(
-                    UnsupportedCode::ImageDecodeFailure,
-                    format!("image {target}: {error}"),
-                );
-            }
+        };
+
+        let Some(drawing) = drawing else {
+            return;
+        };
+        let key = ImageEncodingKey::from_drawing(target, drawing);
+        if !self.validated_variants.insert(key.clone()) {
+            return;
+        }
+        let result = summary
+            .variant_reservation(&key)
+            .and_then(|reservation| self.image_budget.admit_variant_estimate(reservation));
+        if let Err(OfficeError::Unsupported { code, detail }) = result {
+            profile.add_reason_deduped(code, detail);
         }
     }
 }

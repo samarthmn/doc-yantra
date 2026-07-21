@@ -5,7 +5,9 @@
 use super::{DocDates, EncodedImage, ImageId};
 use crate::drawing::chart::Chart;
 use crate::drawing::diagram::{DiagramFallback, DiagramStore};
-use crate::drawing::image::{ImageVariantKey, add_to_budget, decode_required, export_variant};
+use crate::drawing::image::{
+    ImageBudget, ImageEncodingKey, decode_required_with_budget, export_variant,
+};
 use crate::fonts::FontDb;
 use crate::fonts::odttf;
 use crate::opc::Package;
@@ -41,7 +43,7 @@ pub struct WordDoc {
     main_part: String,
     part_rels: HashMap<String, HashMap<String, String>>,
     image_by_part: HashMap<String, usize>,
-    image_by_variant: HashMap<ImageVariantKey, usize>,
+    image_by_variant: HashMap<ImageEncodingKey, usize>,
     headers: HashMap<String, Vec<BlockContent>>,
     footnotes: NotesPart,
     endnotes: NotesPart,
@@ -269,7 +271,7 @@ impl WordDoc {
     ) -> Option<ImageId> {
         let rel_id = drawing.blip_rel_id.as_deref()?;
         let target = rels.get(rel_id)?;
-        let key = ImageVariantKey::from_drawing(target, drawing);
+        let key = ImageEncodingKey::from_drawing(target, drawing);
         self.image_by_variant
             .get(&key)
             .or_else(|| self.image_by_part.get(target))
@@ -382,16 +384,18 @@ pub(crate) fn register_embedded_fonts(pkg: &Package, fonts: &mut FontDb) {
 struct DecodedImages {
     images: Vec<EncodedImage>,
     by_part: HashMap<String, usize>,
-    by_variant: HashMap<ImageVariantKey, usize>,
+    by_variant: HashMap<ImageEncodingKey, usize>,
 }
 
 fn decode_images(
     pkg: &Package,
     part_rels: &HashMap<String, HashMap<String, String>>,
-    variant_keys: &[ImageVariantKey],
+    variant_keys: &[ImageEncodingKey],
 ) -> Result<DecodedImages> {
     let mut images = Vec::new();
     let mut by_part: HashMap<String, usize> = HashMap::new();
+    let mut budget = ImageBudget::production();
+    budget.ensure_variant_count(variant_keys.len())?;
 
     let mut targets: Vec<String> = part_rels
         .values()
@@ -399,8 +403,6 @@ fn decode_images(
         .collect();
     targets.sort();
     targets.dedup();
-    let mut total_pixels = 0u64;
-
     for target in targets {
         if by_part.contains_key(&target) {
             continue;
@@ -418,9 +420,8 @@ fn decode_images(
                 format!("image relationship target {target} is missing"),
             )
         })?;
-        let (decoded, pixels) =
-            decode_required(ct, bytes).map_err(|error| error.context(&target))?;
-        add_to_budget(images.len(), &mut total_pixels, pixels)?;
+        let (decoded, _) = decode_required_with_budget(ct, bytes, &mut budget)
+            .map_err(|error| error.context(&target))?;
         by_part.insert(target, images.len());
         images.push(decoded);
     }
@@ -429,15 +430,7 @@ fn decode_images(
         let Some(&source_index) = by_part.get(&key.source_part) else {
             continue;
         };
-        if let Some(variant) = export_variant(&images[source_index], key)? {
-            let pixels = match &variant {
-                EncodedImage::Jpeg { width, height, .. }
-                | EncodedImage::Rgb8 { width, height, .. }
-                | EncodedImage::Rgba8 { width, height, .. } => {
-                    u64::from(*width) * u64::from(*height)
-                }
-            };
-            add_to_budget(images.len(), &mut total_pixels, pixels)?;
+        if let Some(variant) = export_variant(&images[source_index], key, &mut budget)? {
             by_variant.insert(key.clone(), images.len());
             images.push(variant);
         } else {
@@ -454,7 +447,7 @@ fn decode_images(
 fn collect_image_variant_keys(
     pkg: &Package,
     part_rels: &HashMap<String, HashMap<String, String>>,
-) -> Result<Vec<ImageVariantKey>> {
+) -> Result<Vec<ImageEncodingKey>> {
     let mut keys = Vec::new();
     let mut parts: Vec<_> = part_rels.keys().collect();
     parts.sort();
@@ -475,7 +468,7 @@ fn collect_image_variant_keys(
             let Some(target) = drawing.blip_rel_id.as_deref().and_then(|id| rels.get(id)) else {
                 continue;
             };
-            keys.push(ImageVariantKey::from_drawing(target, &drawing));
+            keys.push(ImageEncodingKey::from_drawing(target, &drawing));
         }
     }
     keys.sort();

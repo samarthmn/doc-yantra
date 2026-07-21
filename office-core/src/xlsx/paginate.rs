@@ -2,7 +2,10 @@
 //! shared strings, styles, theme, fonts, and dates.
 
 use crate::drawing::chart::Chart;
-use crate::drawing::image::{add_to_budget, decode_required, validate_crop_units};
+use crate::drawing::image::{
+    ImageBudget, decode_required_with_budget, image_resident_bytes, rgba_variant_reservation,
+    validate_crop_units,
+};
 use crate::fonts::FontDb;
 use crate::layout::{DocDates, EncodedImage, ImageId};
 use crate::opc::Package;
@@ -167,7 +170,7 @@ impl XlsxDoc {
         let mut sheets = Vec::new();
         let mut images = Vec::new();
         let mut image_cache = HashMap::new();
-        let mut total_image_pixels = 0u64;
+        let mut image_budget = ImageBudget::production();
         for (sheet_index, sr) in workbook.sheets.iter().enumerate() {
             if !sr.visible {
                 continue;
@@ -194,7 +197,7 @@ impl XlsxDoc {
                 &sheet,
                 &mut images,
                 &mut image_cache,
-                &mut total_image_pixels,
+                &mut image_budget,
             )?;
             sheets.push(ResolvedSheet {
                 name: sr.name.clone(),
@@ -230,7 +233,7 @@ fn resolve_drawings(
     sheet: &Worksheet,
     images: &mut Vec<EncodedImage>,
     image_cache: &mut HashMap<(String, Option<SourceCrop>), usize>,
-    total_image_pixels: &mut u64,
+    image_budget: &mut ImageBudget,
 ) -> Result<(Vec<XlsxDrawing>, Vec<DrawingReason>)> {
     let Some(rel_id) = &sheet.drawing_rel_id else {
         return Ok((Vec::new(), Vec::new()));
@@ -323,14 +326,10 @@ fn resolve_drawings(
                 });
                 continue;
             };
-            let decoded = decode_required(content_type, bytes)
+            let decoded = decode_required_with_budget(content_type, bytes, image_budget)
                 .and_then(|(image, pixels)| {
-                    let image = crop_xlsx_image(image, bytes, request.crop)?;
+                    let image = crop_xlsx_image(image, bytes, request.crop, image_budget)?;
                     Ok((image, pixels))
-                })
-                .and_then(|decoded| {
-                    add_to_budget(images.len(), total_image_pixels, decoded.1)?;
-                    Ok(decoded)
                 })
                 .map_err(|error| error.context(image_part));
             let (image, _) = match decoded {
@@ -768,17 +767,15 @@ fn crop_xlsx_image(
     image: EncodedImage,
     bytes: &[u8],
     crop: Option<SourceCrop>,
+    budget: &mut ImageBudget,
 ) -> Result<EncodedImage> {
     if let Some(crop) = crop {
         validate_crop_units([crop.left, crop.top, crop.right, crop.bottom])?;
-        let image = image::load_from_memory(bytes).map_err(|error| {
-            OfficeError::unsupported(
-                UnsupportedCode::ImageDecodeFailure,
-                format!("image cannot be decoded for cropping: {error}"),
-            )
-        })?;
-        let width = image.width();
-        let height = image.height();
+        let (width, height) = match &image {
+            EncodedImage::Jpeg { width, height, .. }
+            | EncodedImage::Rgb8 { width, height, .. }
+            | EncodedImage::Rgba8 { width, height, .. } => (*width, *height),
+        };
         let left = (u64::from(width) * crop.left as u64 / 100_000) as u32;
         let top = (u64::from(height) * crop.top as u64 / 100_000) as u32;
         let right = (u64::from(width) * crop.right as u64 / 100_000) as u32;
@@ -791,15 +788,29 @@ fn crop_xlsx_image(
                 "a:srcRect removes the entire xlsx picture",
             ));
         }
-        let data = image
-            .crop_imm(left, top, crop_width, crop_height)
-            .into_rgba8()
-            .into_raw();
-        return Ok(EncodedImage::Rgba8 {
-            width: crop_width,
-            height: crop_height,
-            data,
-        });
+        let reservation = rgba_variant_reservation(width, height, crop_width, crop_height)?;
+        let source_resident = image_resident_bytes(&image);
+        let cropped = budget.admit_variant(reservation, || {
+            let decoded = image::load_from_memory(bytes).map_err(|error| {
+                OfficeError::unsupported(
+                    UnsupportedCode::ImageDecodeFailure,
+                    format!("image cannot be decoded for cropping: {error}"),
+                )
+            })?;
+            let data = decoded
+                .crop_imm(left, top, crop_width, crop_height)
+                .into_rgba8()
+                .into_raw();
+            let cropped = EncodedImage::Rgba8 {
+                width: crop_width,
+                height: crop_height,
+                data: std::sync::Arc::new(data),
+            };
+            let resident = image_resident_bytes(&cropped);
+            Ok((cropped, resident))
+        })?;
+        budget.release_resident(source_resident);
+        return Ok(cropped);
     }
     Ok(image)
 }
