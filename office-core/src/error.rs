@@ -122,6 +122,9 @@ pub enum UnsupportedCode {
     /// envelope miss to route to the compatibility service — legitimate large
     /// documents can trip it, so it must never read as file corruption.
     DecompressionLimit,
+    /// Valid document structure or generated work exceeds an in-process
+    /// cardinality, byte, or page budget.
+    ResourceLimit,
     /// The serialized conversion output exceeds the engine output budget.
     /// The input was valid; a resource refusal, never file corruption.
     OutputLimit,
@@ -178,3 +181,16 @@ impl OfficeError {
 
 /// The crate's result alias.
 pub type Result<T> = std::result::Result<T, OfficeError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_limit_has_stable_snake_case_slug() {
+        assert_eq!(
+            serde_json::to_string(&UnsupportedCode::ResourceLimit).unwrap(),
+            r#""resource_limit""#,
+        );
+    }
+}

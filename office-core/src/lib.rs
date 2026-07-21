@@ -28,6 +28,7 @@ pub mod output_limit;
 pub mod oxml;
 pub mod pptx;
 pub mod profile;
+pub mod resource_limits;
 pub mod text;
 pub mod xlsx;
 

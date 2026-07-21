@@ -21,33 +21,40 @@ pub const MAX_XML_DEPTH: usize = 256;
 
 /// Parses one size-capped OPC part and applies structural DOM budgets.
 pub fn parse_xml<'a>(xml: &'a str, label: &str) -> Result<roxmltree::Document<'a>> {
-    guard_xml_budget(xml, label)?;
-    let doc = roxmltree::Document::parse(xml)
-        .map_err(|error| OfficeError::Invalid(format!("{label} XML: {error}")))?;
-    Ok(doc)
+    parse_xml_with_limits(xml, label, MAX_XML_NODES, MAX_XML_DEPTH)
 }
 
-/// Checks budgets without claiming malformed auxiliary XML; callers that know
-/// part context remain responsible for producing the eventual parse error.
+/// Parses and discards an auxiliary XML part so syntax, depth, and node limits
+/// are enforced before format-specific traversal can skip the part.
 pub(crate) fn guard_xml_budget(xml: &str, label: &str) -> Result<()> {
-    guard_xml_depth(xml.as_bytes(), label)?;
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
-        return Ok(());
-    };
-    let mut nodes = 0usize;
-    for _node in doc.descendants() {
-        nodes += 1;
-        if nodes > MAX_XML_NODES {
-            return Err(OfficeError::unsupported(
-                UnsupportedCode::DecompressionLimit,
-                format!("{label} XML node count exceeds limit {MAX_XML_NODES}"),
-            ));
-        }
-    }
-    Ok(())
+    parse_xml(xml, label).map(|_| ())
 }
 
-fn guard_xml_depth(bytes: &[u8], label: &str) -> Result<()> {
+fn parse_xml_with_limits<'a>(
+    xml: &'a str,
+    label: &str,
+    node_limit: usize,
+    depth_limit: usize,
+) -> Result<roxmltree::Document<'a>> {
+    guard_xml_depth(xml.as_bytes(), label, depth_limit)?;
+    let nodes_limit = u32::try_from(node_limit).unwrap_or(u32::MAX);
+    roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            nodes_limit,
+            ..roxmltree::ParsingOptions::default()
+        },
+    )
+    .map_err(|error| match error {
+        roxmltree::Error::NodesLimitReached => OfficeError::unsupported(
+            UnsupportedCode::DecompressionLimit,
+            format!("{label} XML node count exceeds limit {node_limit}"),
+        ),
+        _ => OfficeError::Invalid(format!("{label} XML: {error}")),
+    })
+}
+
+fn guard_xml_depth(bytes: &[u8], label: &str, limit: usize) -> Result<()> {
     let mut depth = 0usize;
     let mut cursor = 0usize;
     while let Some(relative) = bytes[cursor..].iter().position(|byte| *byte == b'<') {
@@ -82,10 +89,10 @@ fn guard_xml_depth(bytes: &[u8], label: &str) -> Result<()> {
                 .is_none_or(|byte| *byte != b'/')
         {
             depth += 1;
-            if depth > MAX_XML_DEPTH {
+            if depth > limit {
                 return Err(OfficeError::unsupported(
                     UnsupportedCode::DecompressionLimit,
-                    format!("{label} XML depth exceeds limit {MAX_XML_DEPTH}"),
+                    format!("{label} XML depth exceeds limit {limit}"),
                 ));
             }
         }
@@ -134,10 +141,9 @@ mod resource_budget_tests {
     use super::*;
 
     #[test]
-    fn deeply_nested_xml_fails_with_typed_limit() {
-        let started = std::time::Instant::now();
-        let xml = format!("{}x{}", "<n>".repeat(5_000), "</n>".repeat(5_000));
-        let error = parse_xml(&xml, "hostile").expect_err("depth limit");
+    fn injectable_depth_limit_fails_with_typed_limit() {
+        let xml = "<a><b><c><d></d></c></b></a>";
+        let error = parse_xml_with_limits(xml, "hostile", 100, 3).expect_err("depth limit");
         assert!(matches!(
             error,
             OfficeError::Unsupported {
@@ -145,7 +151,25 @@ mod resource_budget_tests {
                 ..
             }
         ));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn injectable_node_limit_refuses_during_dom_construction() {
+        let xml = "<a><b/><c/><d/></a>";
+        let error = parse_xml_with_limits(xml, "hostile", 4, 20).expect_err("node limit");
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::DecompressionLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_xml_remains_invalid() {
+        let error = parse_xml_with_limits("<a>", "bad", 100, 20).expect_err("syntax");
+        assert!(matches!(error, OfficeError::Invalid(_)));
     }
 
     #[test]

@@ -55,6 +55,7 @@ fn taxonomy_code(code: UnsupportedCode) -> &'static str {
         UnsupportedCode::FontUnresolved => "missing_asset",
         UnsupportedCode::InputTooLarge
         | UnsupportedCode::DecompressionLimit
+        | UnsupportedCode::ResourceLimit
         | UnsupportedCode::ImageDimensionsExceedLimit
         | UnsupportedCode::ImageAllocationExceedsLimit
         | UnsupportedCode::OutputLimit => "resource_limit",
@@ -311,6 +312,27 @@ fn code_slug(code: UnsupportedCode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_error_classes_map_to_the_complete_wasm_taxonomy() {
+        assert_eq!(taxonomy_code(UnsupportedCode::ResourceLimit), "resource_limit");
+        assert_eq!(taxonomy_code(UnsupportedCode::MissingGlyph), "missing_glyph");
+        assert_eq!(taxonomy_code(UnsupportedCode::FontUnresolved), "missing_asset");
+        assert_eq!(taxonomy_code(UnsupportedCode::Encrypted), "password_protected");
+        assert_eq!(
+            taxonomy_code(UnsupportedCode::InvalidFile),
+            "malformed_container"
+        );
+        assert_eq!(
+            taxonomy_code(UnsupportedCode::LegacyFormat),
+            "unsupported_format"
+        );
+        assert_eq!(
+            taxonomy_code(UnsupportedCode::FormulaCacheMissing),
+            "unsupported_feature"
+        );
+        assert_eq!(code_slug(UnsupportedCode::ResourceLimit), "resource_limit");
+    }
 
     #[test]
     fn unsupported_envelope_carries_reason_and_context_in_detail() {
