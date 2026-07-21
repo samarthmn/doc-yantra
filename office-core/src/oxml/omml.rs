@@ -299,9 +299,8 @@ fn parse_node(node: Node, depth: usize) -> MathNode {
             // else in the math-paragraph properties stays out of envelope.
             if children(node).all(|property| {
                 is(property, M, "jc")
-                    && attr(property, M, "val").is_some_and(|value| {
-                        MathJustification::parse(value).is_some()
-                    })
+                    && attr(property, M, "val")
+                        .is_some_and(|value| MathJustification::parse(value).is_some())
             }) {
                 MathNode::Sequence(Vec::new())
             } else {
@@ -341,15 +340,12 @@ fn has_element_children(node: Node) -> bool {
 /// proofing metadata never change the engine-styled math rendering; any
 /// other run formatting stays out of envelope.
 fn benign_math_run_props(props: Node) -> bool {
-    children(props).all(|child| {
-        matches!(child.tag_name().name(), "rFonts" | "lang" | "noProof")
-    })
+    children(props).all(|child| matches!(child.tag_name().name(), "rFonts" | "lang" | "noProof"))
 }
 
 fn properties_beyond_ctrl(node: Node, name: &str) -> bool {
-    child_m(node, name).is_some_and(|properties| {
-        children(properties).any(|property| !is(property, M, "ctrlPr"))
-    })
+    child_m(node, name)
+        .is_some_and(|properties| children(properties).any(|property| !is(property, M, "ctrlPr")))
 }
 
 fn boxed_child(node: Node, name: &str, depth: usize) -> Box<MathNode> {

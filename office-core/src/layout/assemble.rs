@@ -61,8 +61,7 @@ impl WordDoc {
         let styles = optional(&pkg, "word/styles.xml", StyleResolver::parse)?.unwrap_or_default();
         let numbering = optional(&pkg, "word/numbering.xml", Numbering::parse)?.unwrap_or_default();
         let settings = optional(&pkg, "word/settings.xml", Settings::parse)?.unwrap_or_default();
-        let mut theme =
-            optional(&pkg, "word/theme/theme1.xml", Theme::parse)?.unwrap_or_default();
+        let mut theme = optional(&pkg, "word/theme/theme1.xml", Theme::parse)?.unwrap_or_default();
         theme.east_asia_lang = settings.theme_font_lang_east_asia.clone();
         let font_table = optional(&pkg, "word/fontTable.xml", FontTable::parse)?;
 
@@ -153,8 +152,11 @@ impl WordDoc {
 
         // Decode every image part referenced anywhere.
         let image_variant_keys = collect_image_variant_keys(&pkg, &part_rels)?;
-        let (images, image_by_part, image_by_variant) =
-            decode_images(&pkg, &part_rels, &image_variant_keys)?;
+        let DecodedImages {
+            images,
+            by_part: image_by_part,
+            by_variant: image_by_variant,
+        } = decode_images(&pkg, &part_rels, &image_variant_keys)?;
         let dates = core_dates(&pkg);
         let diagrams = DiagramStore::load(&pkg)?;
         let mut chart_parts: Vec<_> = part_rels
@@ -377,15 +379,17 @@ pub(crate) fn register_embedded_fonts(pkg: &Package, fonts: &mut FontDb) {
     }
 }
 
+struct DecodedImages {
+    images: Vec<EncodedImage>,
+    by_part: HashMap<String, usize>,
+    by_variant: HashMap<ImageVariantKey, usize>,
+}
+
 fn decode_images(
     pkg: &Package,
     part_rels: &HashMap<String, HashMap<String, String>>,
     variant_keys: &[ImageVariantKey],
-) -> Result<(
-    Vec<EncodedImage>,
-    HashMap<String, usize>,
-    HashMap<ImageVariantKey, usize>,
-)> {
+) -> Result<DecodedImages> {
     let mut images = Vec::new();
     let mut by_part: HashMap<String, usize> = HashMap::new();
 
@@ -440,7 +444,11 @@ fn decode_images(
             by_variant.insert(key.clone(), source_index);
         }
     }
-    Ok((images, by_part, by_variant))
+    Ok(DecodedImages {
+        images,
+        by_part,
+        by_variant,
+    })
 }
 
 fn collect_image_variant_keys(

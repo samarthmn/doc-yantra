@@ -1450,7 +1450,7 @@ pub(crate) fn embedded_font_program_from_document(
     let font = resolve(document, fonts.get(resource_name.as_bytes())?)?.as_dict()?;
     let descriptor_owner = if font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Type0")
     {
-        let descendants = resolve(&document, font.get(b"DescendantFonts")?)?.as_array()?;
+        let descendants = resolve(document, font.get(b"DescendantFonts")?)?.as_array()?;
         resolve(
             document,
             descendants

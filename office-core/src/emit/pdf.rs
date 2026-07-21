@@ -543,9 +543,10 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) {
         } else {
             f.cid_widths.clone()
         };
-        if let (Some(&min), Some(&max)) =
-            (widths_by_cid.keys().next(), widths_by_cid.keys().next_back())
-        {
+        if let (Some(&min), Some(&max)) = (
+            widths_by_cid.keys().next(),
+            widths_by_cid.keys().next_back(),
+        ) {
             let widths: Vec<f32> = (min..=max)
                 .map(|c| widths_by_cid.get(&c).copied().unwrap_or(0.0))
                 .collect();

@@ -129,9 +129,9 @@ fn layout_node(
                 .map_or(0.0, |s| SUP_SHIFT_UP_EM * size + s.baseline);
             let ascent = base.baseline.max(sup_rise);
             let base_y = ascent - base.baseline;
-            let sub_drop = sub.as_ref().map_or(0.0, |s| {
-                SUB_SHIFT_DOWN_EM * size + (s.height - s.baseline)
-            });
+            let sub_drop = sub
+                .as_ref()
+                .map_or(0.0, |s| SUB_SHIFT_DOWN_EM * size + (s.height - s.baseline));
             let descent = (base.height - base.baseline).max(sub_drop);
             let script_x = base.width + 0.4;
             let script_width = sub
@@ -142,11 +142,21 @@ fn layout_node(
             append(&mut items, base.items, 0.0, base_y);
             if let Some(sup) = sup {
                 let sup_baseline_y = ascent - SUP_SHIFT_UP_EM * size;
-                append(&mut items, sup.items, script_x, sup_baseline_y - sup.baseline);
+                append(
+                    &mut items,
+                    sup.items,
+                    script_x,
+                    sup_baseline_y - sup.baseline,
+                );
             }
             if let Some(sub) = sub {
                 let sub_baseline_y = ascent + SUB_SHIFT_DOWN_EM * size;
-                append(&mut items, sub.items, script_x, sub_baseline_y - sub.baseline);
+                append(
+                    &mut items,
+                    sub.items,
+                    script_x,
+                    sub_baseline_y - sub.baseline,
+                );
             }
             let height = items_height(&items).max(ascent + descent);
             Ok(EquationBox {
@@ -341,7 +351,7 @@ fn text_box(doc: &WordDoc, text: &str, size: f64, upright: bool) -> Result<Equat
     // to the italic-styled face with plain letters.
     let mut resolved = matching::resolve(&doc.fonts, "Cambria Math", 400, false);
     let mut italic = false;
-    let mut owned;
+    let owned;
     let mut text = text;
     if wants_italic {
         let mapped = resolved

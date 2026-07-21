@@ -2503,7 +2503,11 @@ fn fixture_omml_nobar_fraction_suppresses_the_rule_but_keeps_the_stack() {
         r#"<w:p><m:oMath><m:f><m:fPr><m:type m:val="noBar"/><m:ctrlPr/></m:fPr><m:num><m:r><m:t>n</m:t></m:r></m:num><m:den><m:r><m:t>k</m:t></m:r></m:den></m:f></m:oMath></w:p>"#,
     );
     assert_eq!(count_lines(&barred), 1, "plain fraction draws its rule");
-    assert_eq!(count_lines(&binomial), 0, "noBar fraction must not draw a rule");
+    assert_eq!(
+        count_lines(&binomial),
+        0,
+        "noBar fraction must not draw a rule"
+    );
     let doc = WordDoc::open(&binomial, &ConvertOptions::default()).unwrap();
     let laid = layout_docx(&doc).unwrap().0;
     let text = laid.pages.iter().map(page_text).collect::<String>();

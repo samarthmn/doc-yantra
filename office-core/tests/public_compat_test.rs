@@ -51,6 +51,8 @@ fn laid_out_document_keeps_the_legacy_struct_literal_shape() {
         images: Vec::new(),
         outline: Vec::new(),
         dates: DocDates::default(),
+        #[cfg(feature = "fidelity-diagnostics")]
+        diagnostics: Default::default(),
     };
     assert!(laid.pages.is_empty());
 }

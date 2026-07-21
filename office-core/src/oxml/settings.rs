@@ -68,8 +68,7 @@ impl Settings {
                 }
                 "evenAndOddHeaders" => settings.even_and_odd_headers = toggle(c),
                 "themeFontLang" => {
-                    settings.theme_font_lang_east_asia =
-                        attr(c, W, "eastAsia").map(str::to_string)
+                    settings.theme_font_lang_east_asia = attr(c, W, "eastAsia").map(str::to_string)
                 }
                 "autoHyphenation" => settings.auto_hyphenation = toggle(c),
                 "rsids" => settings.word_authored = true,

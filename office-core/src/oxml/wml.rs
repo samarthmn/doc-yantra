@@ -378,6 +378,10 @@ pub struct Run {
 }
 
 /// A single piece of run content.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing WmlDrawing would break the stable public run-content AST"
+)]
 #[derive(Debug, Clone)]
 pub enum RunContent {
     /// Literal text.

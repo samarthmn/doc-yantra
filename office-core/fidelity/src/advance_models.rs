@@ -453,7 +453,7 @@ fn collect_evidence(
                 else {
                     continue;
                 };
-                let face = match ttf_parser::Face::parse(&program, 0) {
+                let face = match ttf_parser::Face::parse(program, 0) {
                     Ok(face) => face,
                     Err(_) => continue,
                 };

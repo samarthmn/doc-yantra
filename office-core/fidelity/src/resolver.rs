@@ -26,7 +26,6 @@ enum HintedSourceLocation {
         archive_sha256: &'static str,
         member_suffix: &'static str,
     },
-    SystemFile(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +154,10 @@ const LOCAL_LEGACY_FONTS: &[(&[&str], &[&str])] = &[
             "ＭＳ Ｐゴシック",
         ],
     ),
-    (&["mingliu.ttc"], &["MingLiU", "PMingLiU", "細明體", "新細明體"]),
+    (
+        &["mingliu.ttc"],
+        &["MingLiU", "PMingLiU", "細明體", "新細明體"],
+    ),
     (
         &["batang.ttc"],
         &[
@@ -171,7 +173,14 @@ const LOCAL_LEGACY_FONTS: &[(&[&str], &[&str])] = &[
     (
         &["gulim.ttc"],
         &[
-            "Gulim", "GulimChe", "Dotum", "DotumChe", "굴림", "굴림체", "돋움", "돋움체",
+            "Gulim",
+            "GulimChe",
+            "Dotum",
+            "DotumChe",
+            "굴림",
+            "굴림체",
+            "돋움",
+            "돋움체",
         ],
     ),
     (
@@ -179,7 +188,12 @@ const LOCAL_LEGACY_FONTS: &[(&[&str], &[&str])] = &[
         &["Arial"],
     ),
     (
-        &["Cambria.ttc", "Cambriab.ttf", "Cambriai.ttf", "Cambriaz.ttf"],
+        &[
+            "Cambria.ttc",
+            "Cambriab.ttf",
+            "Cambriai.ttf",
+            "Cambriaz.ttf",
+        ],
         &["Cambria", "Cambria Math"],
     ),
     // Supplemental Arial above is the pinned regular face. Keep Word's local
@@ -488,18 +502,12 @@ fn load_pinned_harness_font(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("read pinned font cache entry {}", cache_path.display())
-            });
+            return Err(error)
+                .with_context(|| format!("read pinned font cache entry {}", cache_path.display()));
         }
     }
 
     let bytes = match source.location {
-        HintedSourceLocation::SystemFile(path) => fs::read(path).with_context(|| {
-            format!(
-                "read pinned hinted fidelity source {path}; Task 5 requires macOS Supplemental Arial"
-            )
-        })?,
         HintedSourceLocation::Ubuntu083Archive {
             url,
             archive_sha256,
@@ -561,10 +569,7 @@ fn extract_tar_gz_member(archive: &[u8], member_suffix: &str) -> Result<Vec<u8>>
 /// they satisfy. The pan-CJK substitutes still attach afterwards: exact
 /// family resolution prefers the real face, while the Noto faces stay
 /// registered as the wide-coverage fallback net.
-fn attach_local_legacy_faces(
-    requests: &[FontRequest],
-    resolved: &mut ResolvedFonts,
-) -> Result<()> {
+fn attach_local_legacy_faces(requests: &[FontRequest], resolved: &mut ResolvedFonts) -> Result<()> {
     let dir = Path::new(LOCAL_LEGACY_FONT_DIR);
     if !dir.is_dir() {
         return Ok(());
@@ -729,8 +734,7 @@ fn fetch_pinned_serif_face(fetcher: &HttpFetcher, file: &str, pinned: &str) -> R
     }
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create fidelity font cache {}", cache_dir.display()))?;
-    fs::write(&cache_path, &bytes)
-        .with_context(|| format!("seed fidelity cache for {url}"))?;
+    fs::write(&cache_path, &bytes).with_context(|| format!("seed fidelity cache for {url}"))?;
     Ok(bytes)
 }
 
@@ -1343,9 +1347,7 @@ mod tests {
         assert_eq!(resolved.options.font_bytes.len(), 1);
         assert_eq!(
             resolved.options.font_hash_pins,
-            vec![
-                "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a".to_string()
-            ]
+            vec!["6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a".to_string()]
         );
         assert_eq!(
             sha256_hex(&resolved.options.font_bytes[0]),

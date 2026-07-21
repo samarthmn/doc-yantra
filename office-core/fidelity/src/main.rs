@@ -280,12 +280,8 @@ fn main() -> Result<()> {
         } => {
             ensure_diagnostic_output_outside_corpus(&output_dir)?;
             ensure_diagnostic_output_outside_corpus(&json)?;
-            let report = font_form_experiment::run(
-                &output_dir,
-                &ubuntu_font,
-                &dfonts_dir,
-                &python,
-            )?;
+            let report =
+                font_form_experiment::run(&output_dir, &ubuntu_font, &dfonts_dir, &python)?;
             print_or_write_json(&report, Some(&json))?;
         }
         Cmd::ImageProbe { pdfs, extract_dir } => run_image_probe(&pdfs, extract_dir.as_deref())?,
@@ -1380,9 +1376,9 @@ fn score_case(
             report.our_pages = out.page_count;
             #[cfg(feature = "layout-trace")]
             {
-                report.layout_trace = out
-                    .diagnostics
-                    .map(|trace| serde_json::to_value(trace).expect("layout trace is serializable"));
+                report.layout_trace = out.diagnostics.map(|trace| {
+                    serde_json::to_value(trace).expect("layout trace is serializable")
+                });
             }
             out.pdf
         }

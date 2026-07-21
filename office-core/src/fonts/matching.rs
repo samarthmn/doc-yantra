@@ -419,10 +419,19 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
         // Localized names alias the classic Windows face first (registered by
         // hosts with the real fonts, e.g. the fidelity harness on a machine
         // with Office), then the free substitution chain.
-        "simsun" | "宋体" => &["SimSun", "FandolSong", "Noto Serif CJK SC", "Noto Sans CJK SC"],
-        "nsimsun" | "simsun-extb" | "新宋体" => {
-            &["NSimSun", "SimSun", "FandolSong", "Noto Serif CJK SC", "Noto Sans CJK SC"]
-        }
+        "simsun" | "宋体" => &[
+            "SimSun",
+            "FandolSong",
+            "Noto Serif CJK SC",
+            "Noto Sans CJK SC",
+        ],
+        "nsimsun" | "simsun-extb" | "新宋体" => &[
+            "NSimSun",
+            "SimSun",
+            "FandolSong",
+            "Noto Serif CJK SC",
+            "Noto Sans CJK SC",
+        ],
         "kaiti" | "楷体" => &["KaiTi", "Noto Serif CJK SC", "Noto Sans CJK SC"],
         "fangsong" | "仿宋" => &["FangSong", "Noto Serif CJK SC", "Noto Sans CJK SC"],
         "simhei" | "黑体" => &["SimHei", "Noto Sans CJK SC"],
@@ -433,9 +442,14 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
         "mingliu" | "mingliu-extb" | "細明體" => {
             &["MingLiU", "細明體", "Noto Serif CJK TC", "Noto Sans CJK TC"]
         }
-        "pmingliu" | "pmingliu-extb" | "新細明體" => {
-            &["PMingLiU", "新細明體", "MingLiU", "細明體", "Noto Serif CJK TC", "Noto Sans CJK TC"]
-        }
+        "pmingliu" | "pmingliu-extb" | "新細明體" => &[
+            "PMingLiU",
+            "新細明體",
+            "MingLiU",
+            "細明體",
+            "Noto Serif CJK TC",
+            "Noto Sans CJK TC",
+        ],
         "dfkai-sb" | "標楷體" => &["DFKai-SB", "Noto Serif CJK TC", "Noto Sans CJK TC"],
         "microsoft jhenghei" | "microsoft jhenghei ui" | "微軟正黑體" => {
             &["Microsoft JhengHei", "Noto Sans CJK TC"]
@@ -443,9 +457,12 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
         "ms mincho" | "ms 明朝" | "ＭＳ 明朝" => {
             &["MS Mincho", "Noto Serif CJK JP", "Noto Sans CJK JP"]
         }
-        "ms pmincho" | "ms ｐ明朝" | "ＭＳ Ｐ明朝" => {
-            &["MS PMincho", "MS Mincho", "Noto Serif CJK JP", "Noto Sans CJK JP"]
-        }
+        "ms pmincho" | "ms ｐ明朝" | "ＭＳ Ｐ明朝" => &[
+            "MS PMincho",
+            "MS Mincho",
+            "Noto Serif CJK JP",
+            "Noto Sans CJK JP",
+        ],
         "yu mincho" | "游明朝" => &["Yu Mincho", "Noto Serif CJK JP", "Noto Sans CJK JP"],
         "ms gothic" | "ms ui gothic" | "ms ゴシック" | "ＭＳ ゴシック" => {
             &["MS Gothic", "IPAexGothic", "Noto Sans CJK JP"]
@@ -457,7 +474,12 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
             &["Noto Sans CJK JP"]
         }
         "batang" | "바탕" => &["Batang", "Noto Serif CJK KR", "Noto Sans CJK KR"],
-        "batangche" | "바탕체" => &["BatangChe", "Batang", "Noto Serif CJK KR", "Noto Sans CJK KR"],
+        "batangche" | "바탕체" => &[
+            "BatangChe",
+            "Batang",
+            "Noto Serif CJK KR",
+            "Noto Sans CJK KR",
+        ],
         "gungsuh" | "궁서" => &["Gungsuh", "Batang", "Noto Serif CJK KR", "Noto Sans CJK KR"],
         "gulim" | "굴림" => &["Gulim", "Noto Sans CJK KR"],
         "gulimche" | "굴림체" => &["GulimChe", "Gulim", "Noto Sans CJK KR"],
@@ -756,7 +778,12 @@ mod tests {
     fn substitution_map_covers_common_cjk_families() {
         assert_eq!(
             substitution_targets("SimSun"),
-            &["SimSun", "FandolSong", "Noto Serif CJK SC", "Noto Sans CJK SC"]
+            &[
+                "SimSun",
+                "FandolSong",
+                "Noto Serif CJK SC",
+                "Noto Sans CJK SC"
+            ]
         );
         assert_eq!(
             substitution_targets("Microsoft YaHei"),

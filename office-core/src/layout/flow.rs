@@ -1643,8 +1643,8 @@ fn paginate(
         if run_index == 0 {
             y = geo.content_top_pt;
         } else if section_run.sect.sect_type != SectType::Continuous {
-            let collapses_into_break_page = page.from_explicit_break
-                && !work_page_has_visible_content(&page);
+            let collapses_into_break_page =
+                page.from_explicit_break && !work_page_has_visible_content(&page);
             if work_page_is_empty(&page) || collapses_into_break_page {
                 // Word treats an explicit page break directly followed by a
                 // section break as one transition: a page holding only

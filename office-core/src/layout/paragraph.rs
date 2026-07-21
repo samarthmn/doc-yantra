@@ -2551,10 +2551,6 @@ fn shape_text(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "tab leader candidates use the surrounding run's complete shaping context"
-)]
-#[expect(
-    clippy::too_many_arguments,
     reason = "leader shaping mirrors resolved Word run properties"
 )]
 fn tab_atom(
@@ -3035,9 +3031,9 @@ fn place_line(
                 )
             })
     });
-    if let Some(label) = label.filter(|label| {
-        label.contributes_to_line_box && !inherited_label_overridden_by_body
-    }) {
+    if let Some(label) =
+        label.filter(|label| label.contributes_to_line_box && !inherited_label_overridden_by_body)
+    {
         natural_h = natural_h.max(label.line_height_pt);
         text_natural_h = text_natural_h.max(label.line_height_pt);
         ascent = ascent.max(label.ascent_pt);
