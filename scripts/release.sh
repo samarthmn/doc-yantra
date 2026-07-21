@@ -24,6 +24,14 @@ set -euo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 PACKAGES=(pdf-core office-core)
+WASM_PACK_VERSION="0.15.0"
+CARGO_LOCKS=(
+  pdf-core/Cargo.lock
+  pdf-core/wasm/Cargo.lock
+  office-core/Cargo.lock
+  office-core/wasm/Cargo.lock
+  text-core/Cargo.lock
+)
 
 version=""
 tag=""
@@ -41,6 +49,22 @@ preflight_git() {
   git fetch origin main --tags --quiet
   if ! git merge-base --is-ancestor origin/main HEAD; then
     echo "error: local main is behind or diverged from origin/main; update it before releasing." >&2
+    exit 1
+  fi
+}
+
+preflight_tools() {
+  if ! command -v wasm-pack >/dev/null 2>&1; then
+    echo "error: releases require a preinstalled wasm-pack ${WASM_PACK_VERSION}." >&2
+    echo "       Refusing a release-time network installer." >&2
+    exit 1
+  fi
+  if [[ "$(wasm-pack --version)" != "wasm-pack ${WASM_PACK_VERSION}" ]]; then
+    echo "error: expected wasm-pack ${WASM_PACK_VERSION}; found $(wasm-pack --version)." >&2
+    exit 1
+  fi
+  if ! command -v cargo-audit >/dev/null 2>&1; then
+    echo "error: releases require cargo-audit on PATH." >&2
     exit 1
   fi
 }
@@ -125,6 +149,17 @@ build_packages() {
 }
 
 # ─── Gates (R2-Y1): every release-blocking test, run locally ─────────────────
+gate_security() {
+  echo "  auditing Rust dependency locks ..."
+  local lockfile
+  for lockfile in "${CARGO_LOCKS[@]}"; do
+    # ttf-parser is marked unmaintained with no patched release. Keep this
+    # single documented exception while failing on every vulnerability and
+    # every other informational advisory discovered at release time.
+    cargo audit --file "${lockfile}" --ignore RUSTSEC-2026-0192
+  done
+}
+
 gate_pdf_core() {
   if [[ ! -d pdf-core/pdfium ]]; then
     echo "error: pdf-core/pdfium/ is missing — cargo's default (pdfium) tests need it." >&2
@@ -153,6 +188,7 @@ gate_package_suite() {
 }
 
 run_gates() {
+  gate_security
   gate_pdf_core
   gate_office_core
   gate_package_suite
@@ -170,6 +206,7 @@ ship() {
 
 main() {
   preflight_git
+  preflight_tools
   pick_version "$@"
   if [[ -n "${DRY_RUN:-}" ]]; then
     dry_run_report

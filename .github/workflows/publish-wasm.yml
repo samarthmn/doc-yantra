@@ -9,7 +9,8 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write # lets the built-in GITHUB_TOKEN publish to GitHub Packages
@@ -17,12 +18,13 @@ jobs:
       run:
         working-directory: pdf-core/wasm
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node + GitHub Packages registry
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           package-manager-cache: false
@@ -52,6 +54,10 @@ jobs:
             echo "Tag ${TAG_VERSION} does not match Office package ${OFFICE_VERSION}." >&2
             exit 1
           }
+          node scripts/source-fingerprint.mjs pdf --verify pdf-core/wasm/pkg/build-fingerprint.json
+          node scripts/source-fingerprint.mjs office --verify office-core/wasm/pkg/build-fingerprint.json
+          node scripts/wasm-version.mjs verify pdf-core/wasm/Cargo.toml pdf-core/wasm/pkg
+          node scripts/wasm-version.mjs verify office-core/wasm/Cargo.toml office-core/wasm/pkg
 
       - name: Publish PDF package to GitHub Packages
         working-directory: pdf-core/wasm/pkg
@@ -60,7 +66,7 @@ jobs:
           if npm view "@samarthmn/doc-yantra@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
             echo "@samarthmn/doc-yantra@${VERSION} already published — skipping."
           else
-            npm publish
+            npm publish --ignore-scripts
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -74,7 +80,7 @@ jobs:
           if npm view "@samarthmn/doc-yantra-office@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
             echo "@samarthmn/doc-yantra-office@${VERSION} already published — skipping."
           else
-            npm publish
+            npm publish --ignore-scripts
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

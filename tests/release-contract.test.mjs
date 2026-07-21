@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -85,6 +91,17 @@ function runWasmVersionGuard(...args) {
   });
 }
 
+function runSourceFingerprintGuard(...args) {
+  return spawnSync(
+    process.execPath,
+    [join(root, "scripts", "source-fingerprint.mjs"), ...args],
+    {
+      cwd: root,
+      encoding: "utf8",
+    },
+  );
+}
+
 test("wasm version guard detects and rejects a stale embedded engine version", () => {
   const scratch = join(root, "tmp", `wasm-version-guard-${process.pid}`);
   const packageRoot = join(scratch, "pkg");
@@ -127,6 +144,83 @@ test("both wasm build scripts invalidate stale versioned artifacts before buildi
     }
     assert.match(source, /wasm-version\.mjs verify Cargo\.toml pkg/u, relativePath);
   }
+});
+
+test("source fingerprint guard verifies committed packages and rejects a forged stamp", () => {
+  for (const [target, stamp] of [
+    ["pdf", "pdf-core/wasm/pkg/build-fingerprint.json"],
+    ["office", "office-core/wasm/pkg/build-fingerprint.json"],
+  ]) {
+    const accepted = runSourceFingerprintGuard(target, "--verify", stamp);
+    assert.equal(accepted.status, 0, accepted.stderr);
+  }
+
+  const scratch = join(root, "tmp", `source-fingerprint-guard-${process.pid}.json`);
+  mkdirSync(dirname(scratch), { recursive: true });
+  try {
+    writeFileSync(
+      scratch,
+      `${JSON.stringify({
+        target: "pdf",
+        sourceHash: "0".repeat(64),
+        fileCount: 0,
+        builtAt: "1970-01-01T00:00:00.000Z",
+      })}\n`,
+    );
+    const rejected = runSourceFingerprintGuard("pdf", "--verify", scratch);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /source fingerprint mismatch/u);
+  } finally {
+    rmSync(scratch, { force: true });
+  }
+});
+
+test("publish workflow pins its execution surface and validates committed artifacts", () => {
+  const workflow = readFileSync(join(root, ".github/workflows/publish-wasm.yml"), "utf8");
+  assert.match(workflow, /runs-on:\s*ubuntu-24\.04/u);
+
+  const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+).*$/gmu)].map(
+    (match) => match[1],
+  );
+  assert.ok(actionUses.length > 0, "publish workflow must use at least one action");
+  for (const action of actionUses) {
+    assert.match(action, /@[\da-f]{40}$/u, `unpinned action: ${action}`);
+  }
+
+  for (const command of [
+    "node scripts/source-fingerprint.mjs pdf --verify pdf-core/wasm/pkg/build-fingerprint.json",
+    "node scripts/source-fingerprint.mjs office --verify office-core/wasm/pkg/build-fingerprint.json",
+    "node scripts/wasm-version.mjs verify pdf-core/wasm/Cargo.toml pdf-core/wasm/pkg",
+    "node scripts/wasm-version.mjs verify office-core/wasm/Cargo.toml office-core/wasm/pkg",
+  ]) {
+    assert.ok(workflow.includes(command), `publish workflow is missing: ${command}`);
+  }
+  assert.doesNotMatch(workflow, /\bnpm publish\s*$/mu);
+  assert.match(workflow, /\bnpm publish --ignore-scripts\b/u);
+});
+
+test("release gate requires a pinned builder and audits every Rust lockfile", () => {
+  const release = readFileSync(join(root, "scripts/release.sh"), "utf8");
+  assert.match(release, /command -v wasm-pack/u);
+  assert.match(release, /WASM_PACK_VERSION="0\.15\.0"/u);
+  assert.match(release, /wasm-pack \$\{WASM_PACK_VERSION\}/u);
+  assert.match(release, /command -v cargo-audit/u);
+  for (const lockfile of [
+    "pdf-core/Cargo.lock",
+    "pdf-core/wasm/Cargo.lock",
+    "office-core/Cargo.lock",
+    "office-core/wasm/Cargo.lock",
+    "text-core/Cargo.lock",
+  ]) {
+    assert.ok(release.includes(lockfile), `release audit is missing ${lockfile}`);
+  }
+  assert.match(release, /--ignore RUSTSEC-2026-0192/u);
+
+  const toolchainPath = join(root, "rust-toolchain.toml");
+  assert.ok(existsSync(toolchainPath), "release builds must pin the Rust toolchain");
+  const toolchain = readFileSync(toolchainPath, "utf8");
+  assert.match(toolchain, /channel\s*=\s*"1\.89\.0"/u);
+  assert.match(toolchain, /"wasm32-unknown-unknown"/u);
 });
 
 test("all release surfaces carry one immutable version", () => {

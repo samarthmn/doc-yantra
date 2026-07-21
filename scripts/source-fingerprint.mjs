@@ -7,6 +7,8 @@
 // Usage:
 //   node scripts/source-fingerprint.mjs <pdf|office>              print the hash
 //   node scripts/source-fingerprint.mjs <pdf|office> --out FILE   write the JSON stamp
+//   node scripts/source-fingerprint.mjs <pdf|office> --verify FILE
+//                                                            verify a saved stamp
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -103,7 +105,22 @@ function sourceHash(target) {
 
 const [target, flag, outFile] = process.argv.slice(2);
 const { hash, fileCount } = sourceHash(target);
-if (flag === "--out" && outFile) {
+if (flag === "--verify" && outFile) {
+  const stamp = JSON.parse(readFileSync(outFile, "utf8"));
+  if (
+    stamp.target !== target ||
+    stamp.sourceHash !== hash ||
+    stamp.fileCount !== fileCount
+  ) {
+    console.error(
+      `error: source fingerprint mismatch for ${target}: ` +
+        `stamp=${stamp.sourceHash ?? "missing"}/${stamp.fileCount ?? "missing"}, ` +
+        `source=${hash}/${fileCount}`,
+    );
+    process.exit(1);
+  }
+  console.log(`verified fingerprint ${target}: ${hash} (${fileCount} files)`);
+} else if (flag === "--out" && outFile) {
   const stamp = {
     target,
     sourceHash: hash,
@@ -112,6 +129,11 @@ if (flag === "--out" && outFile) {
   };
   writeFileSync(outFile, JSON.stringify(stamp, null, 2) + "\n");
   console.log(`fingerprint ${target}: ${hash} (${fileCount} files) -> ${outFile}`);
-} else {
+} else if (!flag) {
   process.stdout.write(hash + "\n");
+} else {
+  console.error(
+    "usage: source-fingerprint.mjs <pdf|office> [--out FILE|--verify FILE]",
+  );
+  process.exit(2);
 }
