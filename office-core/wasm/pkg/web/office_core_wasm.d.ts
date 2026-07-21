@@ -54,14 +54,14 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly office_font_requests: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly version: () => [number, number];
     readonly office_profile: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly office_profile_with_options: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly office_register_font: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly office_font_requests: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly office_to_pdf: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly office_profile_with_options: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly office_to_pdf_with_options: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly register_font: (a: number, b: number) => [number, number];
-    readonly version: () => [number, number];
+    readonly office_register_font: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly init: () => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

@@ -74,17 +74,17 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly apply_watermark: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly csv_to_pdf: (a: number, b: number) => [number, number, number, number];
-    readonly markdown_to_pdf: (a: number, b: number) => [number, number, number, number];
+    readonly version: () => [number, number];
+    readonly register_font: (a: number, b: number) => [number, number];
     readonly merge_pdfs: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly page_count: (a: number, b: number) => [number, number, number];
+    readonly apply_watermark: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly redact_pdf: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly redact_pdf_with_report: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly register_font: (a: number, b: number) => [number, number];
+    readonly csv_to_pdf: (a: number, b: number) => [number, number, number, number];
+    readonly markdown_to_pdf: (a: number, b: number) => [number, number, number, number];
     readonly text_to_pdf: (a: number, b: number) => [number, number, number, number];
+    readonly page_count: (a: number, b: number) => [number, number, number];
     readonly validate_pdf: (a: number, b: number) => [number, number, number, number];
-    readonly version: () => [number, number];
     readonly init: () => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_exn_store: (a: number) => void;
