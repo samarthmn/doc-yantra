@@ -373,6 +373,18 @@ impl Package {
     }
 
     fn open_with_limits(bytes: &[u8], limits: PackageLimits) -> Result<Package> {
+        let package = Self::open_with_deferred_xml_validation(bytes, limits)?;
+        package.validate_xml_parts(|_| None)?;
+        Ok(package)
+    }
+
+    /// Opens a bounded package while allowing a format assembler to attach
+    /// human-readable part context before the mandatory all-XML validation.
+    pub(crate) fn open_deferred_xml_validation(bytes: &[u8]) -> Result<Package> {
+        Self::open_with_deferred_xml_validation(bytes, PackageLimits::for_input(bytes.len()))
+    }
+
+    fn open_with_deferred_xml_validation(bytes: &[u8], limits: PackageLimits) -> Result<Package> {
         if bytes.len() >= 4 && bytes[0..4] == CFB_MAGIC {
             return Err(if looks_encrypted(bytes) {
                 OfficeError::unsupported(UnsupportedCode::Encrypted, "encrypted OOXML package")
@@ -424,20 +436,28 @@ impl Package {
         }
 
         let (ct_defaults, ct_overrides) = parse_content_types(&parts)?;
-        // Validate every XML-bearing part once before format-specific code can
-        // silently skip or deeply walk an auxiliary part.
-        for (name, bytes) in &parts {
-            if name.ends_with(".xml") || name.ends_with(".rels") {
-                let text = std::str::from_utf8(bytes)
-                    .map_err(|_| OfficeError::Invalid(format!("`{name}` is not UTF-8")))?;
-                oxml::guard_xml_budget(text, name)?;
-            }
-        }
         Ok(Package {
             parts,
             ct_defaults,
             ct_overrides,
         })
+    }
+
+    /// Validates every XML-bearing part, optionally replacing its package path
+    /// with format-specific display context in diagnostics.
+    pub(crate) fn validate_xml_parts(
+        &self,
+        mut contextual_label: impl FnMut(&str) -> Option<String>,
+    ) -> Result<()> {
+        for (name, bytes) in &self.parts {
+            if name.ends_with(".xml") || name.ends_with(".rels") {
+                let label = contextual_label(name).unwrap_or_else(|| name.clone());
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| OfficeError::Invalid(format!("`{label}` is not UTF-8")))?;
+                oxml::guard_xml_budget(text, &label)?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns the bytes of a part by name (case-insensitive; leading `/` optional).

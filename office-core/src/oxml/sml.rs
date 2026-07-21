@@ -1181,16 +1181,17 @@ pub(crate) fn parse_required_range(value: &str, label: &str) -> Result<CellRange
     let first = endpoints
         .next()
         .ok_or_else(|| OfficeError::Invalid(format!("{label} is empty")))?;
-    let (first_col, first_row) = parse_required_a1(first, label)?;
-    let (last_col, last_row) = match endpoints.next() {
-        Some(last) => parse_required_a1(last, label)?,
-        None => (first_col, first_row),
-    };
+    let last = endpoints.next();
     if endpoints.next().is_some() {
         return Err(OfficeError::Invalid(format!(
             "{label} contains more than two endpoints"
         )));
     }
+    let (first_col, first_row) = parse_required_a1(first, label)?;
+    let (last_col, last_row) = match last {
+        Some(last) => parse_required_a1(last, label)?,
+        None => (first_col, first_row),
+    };
     Ok(CellRange {
         first_row: first_row.min(last_row),
         first_col: first_col.min(last_col),
@@ -1415,6 +1416,14 @@ mod tests {
         let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><mergeCells><mergeCell ref="A1:not-a-cell"/></mergeCells></worksheet>"#;
         assert!(matches!(
             Worksheet::parse(xml, &shared).expect_err("malformed merge reference"),
+            OfficeError::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn required_range_arity_is_invalid_before_endpoint_limits() {
+        assert!(matches!(
+            parse_required_range("XFE1:A1:A1", "test range").expect_err("three endpoints"),
             OfficeError::Invalid(_)
         ));
     }

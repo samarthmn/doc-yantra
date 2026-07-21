@@ -369,10 +369,13 @@ fn corrupt_sheet_profile_and_convert_name_sheet() {
         profile(&bytes, OfficeFormat::Xlsx).unwrap_err(),
         convert(&bytes, OfficeFormat::Xlsx, &opts()).unwrap_err(),
     ] {
-        assert!(matches!(
-            error,
-            office_core::OfficeError::Invalid(detail) if detail.contains("Sheet2")
-        ));
+        assert!(
+            matches!(
+                &error,
+                office_core::OfficeError::Invalid(detail) if detail.contains("Sheet2")
+            ),
+            "unexpected corrupt-sheet error: {error:?}"
+        );
     }
 }
 

@@ -126,7 +126,7 @@ pub struct XlsxDoc {
 impl XlsxDoc {
     /// Opens and resolves a `.xlsx`/`.xlsm` package.
     pub fn open(bytes: &[u8], opts: &ConvertOptions) -> Result<XlsxDoc> {
-        let pkg = Package::open(bytes)?;
+        let pkg = Package::open_deferred_xml_validation(bytes)?;
         let wb_part = pkg
             .relationships("")?
             .into_iter()
@@ -144,6 +144,16 @@ impl XlsxDoc {
         }
         let workbook = parse(&pkg, &wb_part, Workbook::parse)?;
         let wb_rels = rel_map(&pkg, &wb_part);
+        let sheet_labels: HashMap<_, _> = workbook
+            .sheets
+            .iter()
+            .filter_map(|sheet| {
+                wb_rels
+                    .get(&sheet.rel_id)
+                    .map(|part| (part.clone(), format!("sheet {}", sheet.name)))
+            })
+            .collect();
+        pkg.validate_xml_parts(|part| sheet_labels.get(part).cloned())?;
 
         let shared =
             optional(&pkg, "xl/sharedStrings.xml", SharedStrings::parse)?.unwrap_or_default();
@@ -363,20 +373,19 @@ fn parse_drawing(xml: &str) -> Result<(Vec<DrawingRequest>, Vec<DrawingReason>)>
         }
         let parsed_anchor = match anchor.tag_name().name() {
             "twoCellAnchor" if anchor.tag_name().namespace() == Some(XDR) => {
-                let from = xdr_child(anchor, "from").map(parse_marker).transpose()?;
-                let to = xdr_child(anchor, "to").map(parse_marker).transpose()?;
-                from.zip(to)
-                    .map(|(from, to)| DrawingAnchor::TwoCell { from, to })
+                let from = parse_marker(required_xdr_child(anchor, "from", "twoCellAnchor")?)?;
+                let to = parse_marker(required_xdr_child(anchor, "to", "twoCellAnchor")?)?;
+                Some(DrawingAnchor::TwoCell { from, to })
             }
             "oneCellAnchor" if anchor.tag_name().namespace() == Some(XDR) => {
-                let from = xdr_child(anchor, "from").map(parse_marker).transpose()?;
-                let ext = xdr_child(anchor, "ext").map(parse_ext);
-                from.zip(ext)
-                    .map(|(from, (width_pt, height_pt))| DrawingAnchor::OneCell {
-                        from,
-                        width_pt,
-                        height_pt,
-                    })
+                let from = parse_marker(required_xdr_child(anchor, "from", "oneCellAnchor")?)?;
+                let (width_pt, height_pt) =
+                    parse_ext(required_xdr_child(anchor, "ext", "oneCellAnchor")?);
+                Some(DrawingAnchor::OneCell {
+                    from,
+                    width_pt,
+                    height_pt,
+                })
             }
             "absoluteAnchor" if anchor.tag_name().namespace() == Some(XDR) => {
                 let pos =
@@ -658,15 +667,18 @@ fn xdr_child<'a>(node: roxmltree::Node<'a, 'a>, name: &str) -> Option<roxmltree:
     })
 }
 
+fn required_xdr_child<'a>(
+    node: roxmltree::Node<'a, 'a>,
+    name: &str,
+    parent: &str,
+) -> Result<roxmltree::Node<'a, 'a>> {
+    xdr_child(node, name)
+        .ok_or_else(|| OfficeError::Invalid(format!("xlsx {parent} lacks required {name}")))
+}
+
 fn parse_marker(node: roxmltree::Node<'_, '_>) -> Result<DrawingMarker> {
-    let col = xdr_text_u32(node, "col")?;
-    let row = xdr_text_u32(node, "row")?;
-    if col >= MAX_XLSX_COLUMNS || row >= MAX_XLSX_ROWS {
-        return Err(OfficeError::unsupported(
-            UnsupportedCode::ResourceLimit,
-            format!("xlsx drawing marker ({col}, {row}) exceeds Excel worksheet bounds"),
-        ));
-    }
+    let col = xdr_required_bounded_decimal(node, "col", MAX_XLSX_COLUMNS - 1)?;
+    let row = xdr_required_bounded_decimal(node, "row", MAX_XLSX_ROWS - 1)?;
     Ok(DrawingMarker {
         col,
         col_off_pt: crate::oxml::emu_to_pt(i64::from(xdr_optional_u32(node, "colOff")?)),
@@ -684,12 +696,43 @@ fn xdr_optional_u32(node: roxmltree::Node<'_, '_>, name: &str) -> Result<u32> {
     }
 }
 
-fn xdr_text_u32(node: roxmltree::Node<'_, '_>, name: &str) -> Result<u32> {
-    xdr_child(node, name)
+fn xdr_required_bounded_decimal(
+    node: roxmltree::Node<'_, '_>,
+    name: &str,
+    limit: u32,
+) -> Result<u32> {
+    let raw = xdr_child(node, name)
         .and_then(|child| child.text())
-        .ok_or_else(|| OfficeError::Invalid(format!("xlsx drawing marker lacks {name}")))?
-        .parse()
-        .map_err(|_| OfficeError::Invalid(format!("xlsx drawing marker {name} is malformed")))
+        .ok_or_else(|| OfficeError::Invalid(format!("xlsx drawing marker lacks {name}")))?;
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(OfficeError::Invalid(format!(
+            "xlsx drawing marker {name} is malformed"
+        )));
+    }
+    let mut parsed = 0u64;
+    for digit in raw.bytes().map(|byte| u64::from(byte - b'0')) {
+        parsed = parsed
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(digit))
+            .ok_or_else(|| {
+                OfficeError::unsupported(
+                    UnsupportedCode::ResourceLimit,
+                    format!("xlsx drawing marker {name} exceeds its numeric envelope"),
+                )
+            })?;
+    }
+    if parsed > u64::from(limit) {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::ResourceLimit,
+            format!("xlsx drawing marker {name} {parsed} exceeds limit {limit}"),
+        ));
+    }
+    u32::try_from(parsed).map_err(|_| {
+        OfficeError::unsupported(
+            UnsupportedCode::ResourceLimit,
+            format!("xlsx drawing marker {name} does not fit u32"),
+        )
+    })
 }
 
 fn parse_ext(node: roxmltree::Node<'_, '_>) -> (f64, f64) {
@@ -958,5 +1001,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn drawing_error(xml: &str) -> OfficeError {
+        match parse_drawing(xml) {
+            Err(error) => error,
+            Ok(_) => panic!("malformed drawing anchor was accepted"),
+        }
+    }
+
+    #[test]
+    fn drawing_marker_decimal_errors_preserve_invalid_vs_resource_limit() {
+        let drawing = |col: &str| {
+            format!(
+                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><xdr:twoCellAnchor><xdr:from><xdr:col>{col}</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:row>1</xdr:row></xdr:to><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
+            )
+        };
+
+        assert!(matches!(
+            drawing_error(&drawing("12x")),
+            OfficeError::Invalid(_)
+        ));
+        assert!(matches!(
+            drawing_error(&drawing("4294967296")),
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn required_drawing_anchor_pieces_are_invalid_when_missing() {
+        let wrapper = |anchor: &str| {
+            format!(
+                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing">{anchor}</xdr:wsDr>"#
+            )
+        };
+        let marker = r#"<xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from>"#;
+        let end = r#"<xdr:to><xdr:col>1</xdr:col><xdr:row>1</xdr:row></xdr:to>"#;
+
+        for anchor in [
+            format!(r#"<xdr:twoCellAnchor>{end}<xdr:clientData/></xdr:twoCellAnchor>"#),
+            format!(r#"<xdr:twoCellAnchor>{marker}<xdr:clientData/></xdr:twoCellAnchor>"#),
+            r#"<xdr:oneCellAnchor><xdr:ext cx="1" cy="1"/><xdr:clientData/></xdr:oneCellAnchor>"#
+                .to_string(),
+            format!(r#"<xdr:oneCellAnchor>{marker}<xdr:clientData/></xdr:oneCellAnchor>"#),
+        ] {
+            assert!(matches!(
+                drawing_error(&wrapper(&anchor)),
+                OfficeError::Invalid(_)
+            ));
+        }
     }
 }
