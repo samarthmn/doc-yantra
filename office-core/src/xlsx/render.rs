@@ -20,7 +20,7 @@ use crate::oxml::sml::{
 use crate::oxml::{Rgb, Rgba};
 use crate::pptx::geometry::{Contour, evaluate_shape, resolve_colorspec};
 use crate::profile::Warning;
-use crate::resource_limits::try_reserve;
+use crate::resource_limits::{PageBudget, try_reserve};
 use crate::text::shape;
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
@@ -69,6 +69,14 @@ fn page_geometry(ws: &Worksheet) -> PageGeometry {
 
 /// Renders all sheets into a laid-out document.
 pub fn render_xlsx(doc: &XlsxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
+    let mut page_budget = PageBudget::production();
+    render_xlsx_with_page_budget(doc, &mut page_budget)
+}
+
+fn render_xlsx_with_page_budget(
+    doc: &XlsxDoc,
+    page_budget: &mut PageBudget,
+) -> Result<(LaidOutDocument, Vec<Warning>)> {
     let mut warnings = Vec::new();
     let mut pages = Vec::new();
     for sheet in &doc.sheets {
@@ -85,9 +93,11 @@ pub fn render_xlsx(doc: &XlsxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
             &sheet.drawings,
             &mut pages,
             &mut warnings,
+            page_budget,
         )?;
     }
     if pages.is_empty() {
+        page_budget.consume("XLSX empty fallback page")?;
         pages.push(Page {
             width_pt: PAGE_W,
             height_pt: PAGE_H,
@@ -112,6 +122,7 @@ fn render_sheet(
     drawings: &[XlsxDrawing],
     pages: &mut Vec<Page>,
     warnings: &mut Vec<Warning>,
+    page_budget: &mut PageBudget,
 ) -> Result<()> {
     let first_page = pages.len();
     let geometry = page_geometry(ws);
@@ -180,6 +191,7 @@ fn render_sheet(
         // Row pages within this band.
         let mut r = min_row;
         while r <= max_row {
+            page_budget.consume("XLSX worksheet page")?;
             let page_row_start = r;
             let mut page = Page {
                 width_pt: geometry.width,
@@ -1762,4 +1774,43 @@ fn split_bands_range(
     }
     bands.push((start, last));
     bands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource_limits::PageBudget;
+    use crate::testkit::zip_package;
+    use crate::{ConvertOptions, OfficeError, UnsupportedCode};
+
+    fn three_page_fixture() -> Vec<u8> {
+        let content_types = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+        let root_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+        let workbook = br#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let workbook_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let sheet = br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row><row r="3"><c r="A3"><v>3</v></c></row></sheetData><rowBreaks count="2" manualBreakCount="2"><brk id="1" man="1"/><brk id="2" man="1"/></rowBreaks></worksheet>"#;
+        zip_package(&[
+            ("[Content_Types].xml", content_types),
+            ("_rels/.rels", root_rels),
+            ("xl/workbook.xml", workbook),
+            ("xl/_rels/workbook.xml.rels", workbook_rels),
+            ("xl/worksheets/sheet1.xml", sheet),
+        ])
+    }
+
+    #[test]
+    fn page_budget_refuses_third_worksheet_page_before_building_it() {
+        let bytes = three_page_fixture();
+        let doc = XlsxDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let mut budget = PageBudget::new(2);
+        let error = render_xlsx_with_page_budget(&doc, &mut budget).unwrap_err();
+        assert_eq!(budget.used(), 2);
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
 }

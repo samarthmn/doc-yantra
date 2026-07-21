@@ -12,16 +12,26 @@ use crate::oxml::pml::{
 };
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
+use crate::resource_limits::PageBudget;
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
 
 /// Renders all slides into a laid-out document.
 pub fn render_pptx(doc: &PptxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
+    let mut page_budget = PageBudget::production();
+    render_pptx_with_page_budget(doc, &mut page_budget)
+}
+
+fn render_pptx_with_page_budget(
+    doc: &PptxDoc,
+    page_budget: &mut PageBudget,
+) -> Result<(LaidOutDocument, Vec<Warning>)> {
     let mut warnings = Vec::new();
     let size = doc.presentation.size;
     let mut pages = Vec::new();
 
     for rs in &doc.slides {
+        page_budget.consume("PPTX slide")?;
         let mut page = Page {
             width_pt: size.w_pt,
             height_pt: size.h_pt,
@@ -1200,4 +1210,45 @@ fn render_table(
         y += row_h;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource_limits::PageBudget;
+    use crate::testkit::zip_package;
+    use crate::{ConvertOptions, OfficeError, UnsupportedCode};
+
+    fn three_slide_fixture() -> Vec<u8> {
+        let content_types = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/></Types>"#;
+        let root_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
+        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/></p:sldIdLst></p:presentation>"#;
+        let presentation_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide3.xml"/></Relationships>"#;
+        let slide = br#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#;
+        zip_package(&[
+            ("[Content_Types].xml", content_types),
+            ("_rels/.rels", root_rels),
+            ("ppt/presentation.xml", presentation),
+            ("ppt/_rels/presentation.xml.rels", presentation_rels),
+            ("ppt/slides/slide1.xml", slide),
+            ("ppt/slides/slide2.xml", slide),
+            ("ppt/slides/slide3.xml", slide),
+        ])
+    }
+
+    #[test]
+    fn page_budget_refuses_third_slide_before_rendering_it() {
+        let bytes = three_slide_fixture();
+        let doc = PptxDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let mut budget = PageBudget::new(2);
+        let error = render_pptx_with_page_budget(&doc, &mut budget).unwrap_err();
+        assert_eq!(budget.used(), 2);
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
 }

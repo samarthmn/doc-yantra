@@ -28,6 +28,7 @@ use crate::oxml::wml::{
 };
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
+use crate::resource_limits::PageBudget;
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::{BTreeMap, HashMap};
 
@@ -381,13 +382,23 @@ fn wrap_remaining(wrap: WrapExclusion) -> f64 {
 
 /// Lays out a resolved document into pages plus emitter resources.
 pub fn layout_docx(doc: &WordDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
-    let (laid, warnings, _) = layout_docx_with_internal_links(doc)?;
+    let mut page_budget = PageBudget::production();
+    let (laid, warnings, _) =
+        layout_docx_with_internal_links_and_page_budget(doc, &mut page_budget)?;
     Ok((laid, warnings))
 }
 
 /// DOCX conversion-only layout path retaining private resolved internal links.
 pub(crate) fn layout_docx_with_internal_links(
     doc: &WordDoc,
+) -> Result<(LaidOutDocument, Vec<Warning>, Vec<ResolvedInternalLink>)> {
+    let mut page_budget = PageBudget::production();
+    layout_docx_with_internal_links_and_page_budget(doc, &mut page_budget)
+}
+
+fn layout_docx_with_internal_links_and_page_budget(
+    doc: &WordDoc,
+    page_budget: &mut PageBudget,
 ) -> Result<(LaidOutDocument, Vec<Warning>, Vec<ResolvedInternalLink>)> {
     let boundaries: Vec<(usize, &SectPr)> = doc
         .document
@@ -415,19 +426,24 @@ pub(crate) fn layout_docx_with_internal_links(
         }
     }
 
-    let initial_pass = run_document_pass(doc, &section_runs, None, None)?;
+    let initial_pass = run_document_pass(doc, &section_runs, None, None, page_budget)?;
     let note_sequence = build_note_sequence(&initial_pass.units);
     let mut pass = if note_sequence.is_empty() {
         initial_pass
     } else {
-        run_document_pass(doc, &section_runs, Some(&note_sequence), None)?
+        run_document_pass(doc, &section_runs, Some(&note_sequence), None, page_budget)?
     };
     if pass.units.iter().any(|unit| !unit.page_floats.is_empty()) {
         let mut schedule = page_band_schedule(&pass.units, &pass.pages, &pass.runs);
         let mut converged = false;
         for _ in 0..PAGE_FLOAT_REFLOW_LIMIT {
-            let next =
-                run_document_pass(doc, &section_runs, Some(&note_sequence), Some(&schedule))?;
+            let next = run_document_pass(
+                doc,
+                &section_runs,
+                Some(&note_sequence),
+                Some(&schedule),
+                page_budget,
+            )?;
             let next_schedule = page_band_schedule(&next.units, &next.pages, &next.runs);
             let stable = page_band_schedules_equivalent(&schedule, &next_schedule);
             pass = next;
@@ -459,6 +475,7 @@ pub(crate) fn layout_docx_with_internal_links(
         &run_layouts,
         &note_sequence,
         &mut pages,
+        page_budget,
     )?;
 
     let mut endnote_refs = Vec::new();
@@ -477,6 +494,7 @@ pub(crate) fn layout_docx_with_internal_links(
             &endnote_refs,
             &note_sequence,
             &mut pages,
+            page_budget,
         )?;
     }
 
@@ -798,6 +816,7 @@ fn run_document_pass(
     section_runs: &[SectionRun<'_>],
     note_sequence: Option<&NoteSequence>,
     schedule: Option<&PageBandSchedule>,
+    page_budget: &mut PageBudget,
 ) -> Result<DocumentPass> {
     let mut warnings = Vec::new();
     let mut counters = ListCounters::default();
@@ -838,6 +857,7 @@ fn run_document_pass(
             column_offsets,
         });
     }
+    reset_page_budget(page_budget);
     let pages = paginate_with_footnote_reservations(
         doc,
         &units,
@@ -845,6 +865,7 @@ fn run_document_pass(
         &runs,
         &table_headers,
         note_sequence,
+        page_budget,
     )?;
     for page in &pages {
         validate_page_bands(
@@ -1632,7 +1653,8 @@ fn paginate(
     run_layouts: &[RunLayout],
     table_headers: &HashMap<usize, Vec<Unit>>,
     footnote_reservations: &BTreeMap<usize, f64>,
-) -> Vec<WorkPage> {
+    page_budget: &mut PageBudget,
+) -> Result<Vec<WorkPage>> {
     let first_geo = &run_layouts[0].geo;
     let mut pages: Vec<WorkPage> = Vec::new();
     let mut page = new_page(first_geo, 0);
@@ -1656,10 +1678,12 @@ fn paginate(
                 page = new_page(geo, run_index);
                 page.bookmarks = bookmarks;
             } else {
+                page_budget.consume("DOCX section page")?;
                 pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
             }
             let next_page_number = pages.len() + 1;
             if parity_blank_needed(next_page_number, section_run.sect.sect_type) {
+                page_budget.consume("DOCX section parity page")?;
                 pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
             }
             y = geo.content_top_pt;
@@ -1748,6 +1772,7 @@ fn paginate(
                     .flatten()
                     .filter(|unit| unit.items.is_empty())
                     .map_or(0.0, |unit| unit.height);
+                page_budget.consume("DOCX explicit-break page")?;
                 pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
                 page.from_explicit_break = true;
                 y = geo.content_top_pt + carried_break_line;
@@ -1787,6 +1812,7 @@ fn paginate(
                     fragment_table = None;
                     advanced = true;
                 } else if y > band_top + 0.01 || column > 0 {
+                    page_budget.consume("DOCX overflow page")?;
                     pages.push(std::mem::replace(&mut page, new_page(geo, run_index)));
                     y = geo.content_top_pt;
                     band_top = y;
@@ -1878,9 +1904,10 @@ fn paginate(
         && final_run.unit_start == final_run.unit_end
         && section_runs[section_runs.len() - 1].sect.sect_type != SectType::Continuous;
     if !work_page_is_empty(&page) || pages.is_empty() || empty_final_run_starts_page {
+        page_budget.consume("DOCX body page")?;
         pages.push(page);
     }
-    pages
+    Ok(pages)
 }
 
 fn paginate_with_footnote_reservations(
@@ -1890,25 +1917,29 @@ fn paginate_with_footnote_reservations(
     run_layouts: &[RunLayout],
     table_headers: &HashMap<usize, Vec<Unit>>,
     note_sequence: Option<&NoteSequence>,
+    page_budget: &mut PageBudget,
 ) -> Result<Vec<WorkPage>> {
     let mut reservations = BTreeMap::new();
     let Some(note_sequence) = note_sequence else {
-        return Ok(paginate(
+        return paginate(
             units,
             section_runs,
             run_layouts,
             table_headers,
             &reservations,
-        ));
+            page_budget,
+        );
     };
     for _ in 0..FOOTNOTE_REFLOW_LIMIT {
+        reset_page_budget(page_budget);
         let pages = paginate(
             units,
             section_runs,
             run_layouts,
             table_headers,
             &reservations,
-        );
+            page_budget,
+        )?;
         let measured =
             measure_footnote_reservations(doc, units, &pages, run_layouts, note_sequence)?;
         if measured == reservations {
@@ -2979,6 +3010,7 @@ fn place_footnotes(
     run_layouts: &[RunLayout],
     note_sequence: &NoteSequence,
     pages: &mut Vec<WorkPage>,
+    page_budget: &mut PageBudget,
 ) -> Result<()> {
     let mut page_index = 0usize;
     while page_index < pages.len() {
@@ -3019,6 +3051,7 @@ fn place_footnotes(
                 };
             if y + needed > geo.content_bottom_pt && y > note_top {
                 target += 1;
+                page_budget.consume("DOCX footnote continuation page")?;
                 pages.insert(target, new_page(geo, governing_run));
                 let continuation_separator_y = geo.content_top_pt;
                 y = continuation_separator_y + NOTE_SEPARATOR_GAP_PT;
@@ -3069,6 +3102,7 @@ fn append_endnotes(
     refs: &[(NoteKind, i64)],
     note_sequence: &NoteSequence,
     pages: &mut Vec<WorkPage>,
+    page_budget: &mut PageBudget,
 ) -> Result<()> {
     let governing_run = run_layouts.len() - 1;
     let geo = &run_layouts[governing_run].geo;
@@ -3128,6 +3162,7 @@ fn append_endnotes(
             > geo.content_bottom_pt
             && !work_page_is_empty(&page)
         {
+            page_budget.consume("DOCX endnote continuation page")?;
             pages.push(std::mem::replace(&mut page, new_page(geo, governing_run)));
             y = geo.content_top_pt;
             fragment_table = None;
@@ -3148,8 +3183,13 @@ fn append_endnotes(
             unit.table_id
         };
     }
+    page_budget.consume("DOCX endnote page")?;
     pages.push(page);
     Ok(())
+}
+
+fn reset_page_budget(page_budget: &mut PageBudget) {
+    *page_budget = PageBudget::new(page_budget.limit());
 }
 
 // --- Headers / footers ------------------------------------------------------
@@ -3460,6 +3500,83 @@ fn resolve_internal_links(pages: &[WorkPage]) -> Vec<ResolvedInternalLink> {
 mod tests {
     use super::*;
     use crate::layout::paragraph::Line;
+    use crate::resource_limits::PageBudget;
+    use crate::testkit::{DOC_NAMESPACES, minimal_docx, zip_package};
+    use crate::{ConvertOptions, OfficeError, UnsupportedCode};
+
+    fn docx_with_notes(body: &str, parts: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
+        let document = format!(
+            r#"<?xml version="1.0"?><w:document{DOC_NAMESPACES}><w:body>{body}</w:body></w:document>"#
+        );
+        let mut owned = vec![
+            ("[Content_Types].xml", br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels", br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml", document.into_bytes()),
+        ];
+        owned.extend(parts);
+        let borrowed = owned
+            .iter()
+            .map(|(name, bytes)| (*name, bytes.as_slice()))
+            .collect::<Vec<_>>();
+        zip_package(&borrowed)
+    }
+
+    fn assert_resource_limit(error: OfficeError) {
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn page_budget_refuses_third_docx_pagination_page() {
+        let bytes = minimal_docx(
+            r#"<w:p><w:r><w:t>One</w:t><w:br w:type="page"/><w:t>Two</w:t><w:br w:type="page"/><w:t>Three</w:t></w:r></w:p>"#,
+        );
+        let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let mut budget = PageBudget::new(2);
+        let error = layout_docx_with_internal_links_and_page_budget(&doc, &mut budget).unwrap_err();
+        assert_eq!(budget.used(), 2);
+        assert_resource_limit(error);
+    }
+
+    #[test]
+    fn page_budget_refuses_footnote_continuation_page() {
+        let note_body = (0..80)
+            .map(|index| format!("<w:p><w:r><w:t>Footnote {index}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let footnotes = format!(
+            r#"<?xml version="1.0"?><w:footnotes{DOC_NAMESPACES}><w:footnote w:id="1">{note_body}</w:footnote></w:footnotes>"#
+        );
+        let bytes = docx_with_notes(
+            r#"<w:p><w:r><w:t>Body</w:t><w:footnoteReference w:id="1"/></w:r></w:p>"#,
+            vec![("word/footnotes.xml", footnotes.into_bytes())],
+        );
+        let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let mut budget = PageBudget::new(1);
+        let error = layout_docx_with_internal_links_and_page_budget(&doc, &mut budget).unwrap_err();
+        assert_eq!(budget.used(), 1);
+        assert_resource_limit(error);
+    }
+
+    #[test]
+    fn page_budget_refuses_endnote_page() {
+        let endnotes = format!(
+            r#"<?xml version="1.0"?><w:endnotes{DOC_NAMESPACES}><w:endnote w:id="1"><w:p><w:r><w:t>Endnote</w:t></w:r></w:p></w:endnote></w:endnotes>"#
+        );
+        let bytes = docx_with_notes(
+            r#"<w:p><w:r><w:t>Body</w:t><w:endnoteReference w:id="1"/></w:r></w:p>"#,
+            vec![("word/endnotes.xml", endnotes.into_bytes())],
+        );
+        let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let mut budget = PageBudget::new(1);
+        let error = layout_docx_with_internal_links_and_page_budget(&doc, &mut budget).unwrap_err();
+        assert_eq!(budget.used(), 1);
+        assert_resource_limit(error);
+    }
 
     fn table_unit(table_id: usize, group: usize, is_last: bool) -> Unit {
         Unit {

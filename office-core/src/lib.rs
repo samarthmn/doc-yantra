@@ -53,14 +53,14 @@ struct RuntimeFont {
 static RUNTIME_FONTS: LazyLock<RwLock<Vec<RuntimeFont>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
-/// Output and layout work grows at least linearly per emitted page.
-const MAX_EMITTED_PAGES: usize = 2_000;
-
 fn guard_page_count(count: usize) -> Result<()> {
-    if count > MAX_EMITTED_PAGES {
+    if count > resource_limits::MAX_PAGES {
         return Err(OfficeError::unsupported(
-            UnsupportedCode::DecompressionLimit,
-            format!("page emission count {count} exceeds limit {MAX_EMITTED_PAGES}"),
+            UnsupportedCode::ResourceLimit,
+            format!(
+                "page emission count {count} exceeds limit {}",
+                resource_limits::MAX_PAGES
+            ),
         ));
     }
     Ok(())
@@ -394,5 +394,17 @@ mod runtime_font_tests {
             "../fonts/liberation/LiberationSans-Regular.ttf"
         ))
         .expect("register a valid runtime face");
+    }
+
+    #[test]
+    fn final_page_guard_uses_shared_resource_limit() {
+        let error = guard_page_count(resource_limits::MAX_PAGES + 1).unwrap_err();
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
     }
 }
