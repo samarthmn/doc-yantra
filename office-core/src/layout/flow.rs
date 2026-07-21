@@ -3531,7 +3531,9 @@ mod tests {
     use super::*;
     use crate::layout::paragraph::Line;
     use crate::resource_limits::PageBudget;
-    use crate::testkit::{DOC_NAMESPACES, minimal_docx, zip_package};
+    #[cfg(feature = "bundled-fonts")]
+    use crate::testkit::minimal_docx;
+    use crate::testkit::{DOC_NAMESPACES, zip_package};
     use crate::{ConvertOptions, OfficeError, UnsupportedCode};
 
     fn docx_with_notes(body: &str, parts: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
@@ -3575,6 +3577,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn page_budget_refuses_third_docx_pagination_page() {
         let bytes = minimal_docx(
             r#"<w:p><w:r><w:t>One</w:t><w:br w:type="page"/><w:t>Two</w:t><w:br w:type="page"/><w:t>Three</w:t></w:r></w:p>"#,

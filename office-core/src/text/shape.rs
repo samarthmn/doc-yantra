@@ -157,11 +157,15 @@ pub fn require_glyphs(run: ShapedRun) -> Result<ShapedRun> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "bundled-fonts")]
     use super::*;
+    #[cfg(feature = "bundled-fonts")]
     use crate::fonts::db::FontDb;
+    #[cfg(feature = "bundled-fonts")]
     use crate::fonts::metrics::FaceMetrics;
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn shapes_latin_with_bundled_face() {
         let db = FontDb::with_bundled();
         let face = db.faces().first().expect("bundled font");
@@ -172,6 +176,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn shapes_hebrew_in_visual_order_with_liberation() {
         let db = FontDb::with_bundled();
         let face = db
@@ -188,6 +193,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn bundled_superscript_subscript_coverage_boundary_is_pinned() {
         let db = FontDb::with_bundled();
         let faces: Vec<_> = db.faces().iter().collect();
@@ -209,6 +215,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn kern_false_matches_word_un_kerned_advances() {
         let db = FontDb::with_bundled();
         let face = db

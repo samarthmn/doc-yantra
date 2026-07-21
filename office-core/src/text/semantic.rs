@@ -236,7 +236,9 @@ fn map_shaped_run_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fonts::{FontDb, matching};
+    use crate::fonts::FontDb;
+    #[cfg(feature = "bundled-fonts")]
+    use crate::fonts::matching;
     use crate::text::shape;
 
     #[test]
@@ -373,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn decomposed_latin_stays_on_the_metric_compatible_primary_face() {
         let db = FontDb::with_bundled();
         let primary = matching::resolve(&db, "Calibri", 400, false)

@@ -2423,7 +2423,9 @@ fn header_footer_refs(document: &wml::Document) -> Vec<&wml::HdrFtrRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{gdocs_paragraph_docx, minimal_docx, wrap_document};
+    #[cfg(feature = "bundled-fonts")]
+    use crate::testkit::gdocs_paragraph_docx;
+    use crate::testkit::{minimal_docx, wrap_document};
 
     fn profile_body(body: &str) -> DocProfile {
         let bytes = minimal_docx(body);
@@ -2431,6 +2433,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn plain_docx_is_supported() {
         let p = profile_body(r#"<w:p><w:r><w:t>Hello world</w:t></w:r></w:p>"#);
         assert!(p.supported, "reasons: {:?}", p.reasons);
@@ -2444,6 +2447,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn google_docs_conformance_battery_is_supported() {
         let p = run(&gdocs_paragraph_docx(), OfficeFormat::Docx).expect("profile battery");
         assert!(p.supported, "unexpected reasons: {:?}", p.reasons);
@@ -2500,6 +2504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn complex_field_cached_hyperlink_across_paragraphs_is_supported() {
         let p = profile_body(
             r#"
@@ -2560,6 +2565,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn text_box_field_state_is_isolated_from_an_open_body_field() {
         let p = profile_body(
             r#"
@@ -2615,6 +2621,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn multicolumn_section_is_supported() {
         let body = r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>
             <w:sectPr><w:cols w:num="2"/></w:sectPr>"#;
@@ -2642,6 +2649,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn bundled_subscript_tail_profile_and_layout_boundaries_both_fail_closed() {
         let db = FontDb::with_bundled();
         let mut requests = Vec::new();
@@ -2703,6 +2711,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bundled-fonts")]
     fn convert_rejects_mismatched_format_content() {
         // A docx handed to the pptx/xlsx path used to open with zero slides/sheets
         // and emit an invalid 0-page PDF. It must now fail closed: the document

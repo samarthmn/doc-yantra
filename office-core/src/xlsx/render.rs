@@ -1776,7 +1776,7 @@ fn split_bands_range(
     bands
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bundled-fonts"))]
 mod tests {
     use super::*;
     use crate::resource_limits::PageBudget;
