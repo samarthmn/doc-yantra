@@ -421,6 +421,13 @@ fn parse_num_instance(node: Node) -> Result<Option<NumInstance>> {
             inst.start_overrides.insert(ilvl, start);
         }
         if let Some(lvl) = child(ov, W, "lvl") {
+            let nested_ilvl =
+                parse_numbering_level(attr(lvl, W, "ilvl"), "w:lvlOverride/w:lvl@w:ilvl")?;
+            if nested_ilvl != ilvl {
+                return Err(OfficeError::Invalid(format!(
+                    "w:lvlOverride/w:lvl@w:ilvl {nested_ilvl} does not match w:lvlOverride@w:ilvl {ilvl}"
+                )));
+            }
             inst.level_overrides
                 .insert(ilvl, parse_level(lvl, LevelPropertyOrigin::LevelOverride)?);
         }
@@ -760,6 +767,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn numbering_rejects_out_of_range_nested_override_level() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="9"/></w:lvlOverride></w:num></w:numbering>"#;
+
+        let error = Numbering::parse(xml).expect_err("reject out-of-range nested override level");
+
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn numbering_rejects_mismatched_nested_override_level() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="1"/></w:lvlOverride></w:num></w:numbering>"#;
+
+        let error = Numbering::parse(xml).expect_err("reject mismatched nested override level");
+
+        assert!(matches!(error, OfficeError::Invalid(_)));
     }
 
     #[test]
