@@ -6,8 +6,9 @@
 //! → character style chain → direct properties.
 
 use super::wml::{
-    CellProps, ParaProps, RowProps, RunProps, TblProps, parse_cell_props, parse_para_props,
-    parse_row_props, parse_run_props, parse_tbl_props,
+    CellProps, MAX_AUTHORED_TAB_STOPS, ParaProps, RowProps, RunProps, TblProps,
+    parse_cell_props_checked, parse_para_props_checked, parse_row_props_checked, parse_run_props,
+    parse_tbl_props,
 };
 use super::{W, attr, child, children};
 use crate::Result;
@@ -159,10 +160,11 @@ impl TableStyleFormat {
         }
     }
 
-    fn parse(node: super::Node) -> TableStyleFormat {
-        TableStyleFormat {
+    fn parse(node: super::Node) -> Result<TableStyleFormat> {
+        Ok(TableStyleFormat {
             ppr: child(node, W, "pPr")
-                .map(parse_para_props)
+                .map(|ppr| parse_para_props_checked(ppr, MAX_AUTHORED_TAB_STOPS))
+                .transpose()?
                 .unwrap_or_default(),
             rpr: child(node, W, "rPr")
                 .map(parse_run_props)
@@ -171,12 +173,14 @@ impl TableStyleFormat {
                 .map(parse_tbl_props)
                 .unwrap_or_default(),
             row: child(node, W, "trPr")
-                .map(parse_row_props)
+                .map(parse_row_props_checked)
+                .transpose()?
                 .unwrap_or_default(),
             cell: child(node, W, "tcPr")
-                .map(parse_cell_props)
+                .map(parse_cell_props_checked)
+                .transpose()?
                 .unwrap_or_default(),
-        }
+        })
     }
 }
 
@@ -237,7 +241,7 @@ impl StyleResolver {
                 resolver.default_rpr = parse_run_props(rpr);
             }
             if let Some(ppr) = child(defaults, W, "pPrDefault").and_then(|d| child(d, W, "pPr")) {
-                resolver.default_ppr = parse_para_props(ppr);
+                resolver.default_ppr = parse_para_props_checked(ppr, MAX_AUTHORED_TAB_STOPS)?;
             }
         }
 
@@ -253,7 +257,8 @@ impl StyleResolver {
                 .and_then(|b| attr(b, W, "val"))
                 .map(str::to_string);
             let ppr = child(node, W, "pPr")
-                .map(parse_para_props)
+                .map(|ppr| parse_para_props_checked(ppr, MAX_AUTHORED_TAB_STOPS))
+                .transpose()?
                 .unwrap_or_default();
             let rpr = child(node, W, "rPr")
                 .map(parse_run_props)
@@ -266,7 +271,7 @@ impl StyleResolver {
             }
             let mut table = TableStyle::default();
             if style_type == StyleType::Table {
-                table.whole = TableStyleFormat::parse(node);
+                table.whole = TableStyleFormat::parse(node)?;
                 for block in children(node) {
                     if !super::is(block, W, "tblStylePr") {
                         continue;
@@ -276,7 +281,7 @@ impl StyleResolver {
                     };
                     table
                         .conditional
-                        .push((slot, TableStyleFormat::parse(block)));
+                        .push((slot, TableStyleFormat::parse(block)?));
                 }
                 table.conditional.sort_by_key(|(slot, _)| *slot);
             }

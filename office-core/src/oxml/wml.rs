@@ -11,8 +11,74 @@ use super::{
     eighth_point_to_pt, is, measure_twip_to_pt, on_off, parse_i64, parse_measure, twip_to_pt,
     unknown_child, wml_ignorable,
 };
-use crate::{OfficeError, Result};
+use crate::resource_limits::{checked_count_add, ensure_cardinality, try_reserve};
+use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::BTreeMap;
+
+/// Existing supported fixtures top out at two section columns; 32 leaves 16x
+/// headroom while preventing document-controlled layout fan-out.
+pub const MAX_SECTION_COLUMNS: usize = 32;
+/// Existing supported fixtures top out at 15 columns in one table grid and a
+/// span of 13; 256 leaves more than 17x/19x headroom respectively.
+pub const MAX_TABLE_COLUMNS: usize = 256;
+/// Existing supported fixtures author at most one stop in a single `w:tabs`;
+/// 64 leaves 64x headroom while bounding style/list overlay work.
+pub const MAX_AUTHORED_TAB_STOPS: usize = 64;
+
+fn resource_limit(detail: impl Into<String>) -> OfficeError {
+    OfficeError::unsupported(UnsupportedCode::ResourceLimit, detail)
+}
+
+fn parse_bounded_cardinality(
+    value: Option<&str>,
+    default: usize,
+    minimum: usize,
+    limit: usize,
+    label: &str,
+) -> Result<usize> {
+    let Some(raw) = value else {
+        return Ok(default);
+    };
+    let digits = raw.strip_prefix('+').unwrap_or(raw);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(OfficeError::Invalid(format!(
+            "{label} is not a non-negative integer: {raw}"
+        )));
+    }
+    let mut parsed = 0usize;
+    for digit in digits.bytes().map(|byte| usize::from(byte - b'0')) {
+        parsed = parsed
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(digit))
+            .ok_or_else(|| resource_limit(format!("{label} exceeds the platform range")))?;
+        if parsed > limit {
+            return Err(resource_limit(format!(
+                "{label} {parsed} exceeds limit {limit}"
+            )));
+        }
+    }
+    if parsed < minimum {
+        return Err(OfficeError::Invalid(format!(
+            "{label} {parsed} is below minimum {minimum}"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn checked_row_column_count(props: &RowProps, cells: &[Cell]) -> Result<usize> {
+    let mut columns = usize::try_from(props.grid_before)
+        .map_err(|_| resource_limit("w:gridBefore does not fit usize"))?;
+    for cell in cells {
+        let span = usize::try_from(cell.props.grid_span.max(1))
+            .map_err(|_| resource_limit("w:gridSpan does not fit usize"))?;
+        columns = checked_count_add("Word table columns", columns, span)?;
+    }
+    let after = usize::try_from(props.grid_after)
+        .map_err(|_| resource_limit("w:gridAfter does not fit usize"))?;
+    columns = checked_count_add("Word table columns", columns, after)?;
+    ensure_cardinality("Word table columns", columns, MAX_TABLE_COLUMNS)?;
+    Ok(columns)
+}
 
 /// A fully-parsed word document (main body + final section + profile flags).
 #[derive(Debug, Clone)]
@@ -1676,7 +1742,7 @@ impl WmlParser {
     }
 
     fn para_props(&mut self, ppr: Node) -> Result<(ParaProps, Option<SectPr>)> {
-        let props = parse_para_props(ppr);
+        let props = parse_para_props_checked(ppr, MAX_AUTHORED_TAB_STOPS)?;
         let mut sect = None;
         for c in children(ppr) {
             if c.tag_name().name() == "sectPr" {
@@ -2052,6 +2118,11 @@ impl WmlParser {
             match name {
                 "tblPr" => table.props = parse_tbl_props(c),
                 "tblGrid" => {
+                    let grid_columns = children(c).filter(|node| is(*node, W, "gridCol")).count();
+                    let total_grid_columns =
+                        checked_count_add("w:tblGrid columns", table.grid.len(), grid_columns)?;
+                    ensure_cardinality("w:tblGrid columns", total_grid_columns, MAX_TABLE_COLUMNS)?;
+                    try_reserve(&mut table.grid, grid_columns, "w:tblGrid columns")?;
                     for gc in children(c) {
                         if is(gc, W, "gridCol") {
                             let width = measure_twip_to_pt(attr(gc, W, "w")).unwrap_or(0.0);
@@ -2084,7 +2155,7 @@ impl WmlParser {
         for c in children(node) {
             let name = c.tag_name().name();
             match name {
-                "trPr" => row.props = parse_row_props(c),
+                "trPr" => row.props = parse_row_props_checked(c)?,
                 "tc" => row.cells.push(self.cell(c)?),
                 "sdt" => {
                     if let Some(sc) = child(c, W, "sdtContent") {
@@ -2103,6 +2174,7 @@ impl WmlParser {
                     .push(format!("w:{} in w:tr", c.tag_name().name())),
             }
         }
+        checked_row_column_count(&row.props, &row.cells)?;
         Ok(row)
     }
 
@@ -2111,7 +2183,7 @@ impl WmlParser {
         cell.props.grid_span = 1;
         for c in children(node) {
             if is(c, W, "tcPr") {
-                cell.props = parse_cell_props(c);
+                cell.props = parse_cell_props_checked(c)?;
             } else if !self.block_child(c, "w:tc", &mut cell.content)? {
                 return Err(unknown_child("w:tc", c));
             }
@@ -2146,7 +2218,7 @@ impl WmlParser {
                             .visible_unsupported
                             .push("w:cols@sep".to_string());
                     }
-                    sect.cols = parse_cols(c);
+                    sect.cols = parse_cols(c)?;
                 }
                 "headerReference" => {
                     if !matches!(
@@ -2726,7 +2798,16 @@ fn parse_indent(node: Node) -> Indent {
 }
 
 pub(crate) fn parse_tabs(node: Node) -> Vec<TabStop> {
+    parse_tabs_checked(node, usize::MAX).unwrap_or_default()
+}
+
+pub(crate) fn parse_tabs_checked(node: Node, limit: usize) -> Result<Vec<TabStop>> {
+    let authored = children(node)
+        .filter(|candidate| is(*candidate, W, "tab"))
+        .count();
+    ensure_cardinality("authored tab stops", authored, limit)?;
     let mut tabs = Vec::new();
+    try_reserve(&mut tabs, authored, "authored tab stops")?;
     for c in children(node) {
         if !is(c, W, "tab") {
             continue;
@@ -2754,7 +2835,7 @@ pub(crate) fn parse_tabs(node: Node) -> Vec<TabStop> {
             leader,
         });
     }
-    tabs
+    Ok(tabs)
 }
 
 fn parse_num_pr(node: Node) -> Option<NumRef> {
@@ -2996,15 +3077,29 @@ pub fn parse_tbl_props(node: Node) -> TblProps {
 }
 
 /// Parses `w:trPr` — a row's direct properties or a table style's row block.
-pub fn parse_row_props(node: Node) -> RowProps {
+pub(crate) fn parse_row_props_checked(node: Node) -> Result<RowProps> {
     let mut props = RowProps::default();
     for c in children(node) {
         match c.tag_name().name() {
             "gridBefore" => {
-                props.grid_before = parse_i64(attr(c, W, "val")).unwrap_or(0).max(0) as u32
+                props.grid_before = u32::try_from(parse_bounded_cardinality(
+                    attr(c, W, "val"),
+                    0,
+                    0,
+                    MAX_TABLE_COLUMNS,
+                    "w:gridBefore",
+                )?)
+                .map_err(|_| resource_limit("w:gridBefore does not fit u32"))?
             }
             "gridAfter" => {
-                props.grid_after = parse_i64(attr(c, W, "val")).unwrap_or(0).max(0) as u32
+                props.grid_after = u32::try_from(parse_bounded_cardinality(
+                    attr(c, W, "val"),
+                    0,
+                    0,
+                    MAX_TABLE_COLUMNS,
+                    "w:gridAfter",
+                )?)
+                .map_err(|_| resource_limit("w:gridAfter does not fit u32"))?
             }
             "wBefore" => {
                 props.width_before = Some(TblWidth::parse(attr(c, W, "w"), attr(c, W, "type")))
@@ -3045,11 +3140,17 @@ pub fn parse_row_props(node: Node) -> RowProps {
                 .push(format!("w:{} in w:trPr", c.tag_name().name())),
         }
     }
-    props
+    Ok(props)
+}
+
+/// Parses row properties for legacy style callers. Document stories use the
+/// fallible checked variant above.
+pub fn parse_row_props(node: Node) -> RowProps {
+    parse_row_props_checked(node).unwrap_or_default()
 }
 
 /// Parses `w:tcPr` — a cell's direct properties or a table style's cell block.
-pub fn parse_cell_props(node: Node) -> CellProps {
+pub(crate) fn parse_cell_props_checked(node: Node) -> Result<CellProps> {
     let mut props = CellProps {
         grid_span: 1,
         ..Default::default()
@@ -3057,7 +3158,16 @@ pub fn parse_cell_props(node: Node) -> CellProps {
     for c in children(node) {
         match c.tag_name().name() {
             "tcW" => props.width = Some(TblWidth::parse(attr(c, W, "w"), attr(c, W, "type"))),
-            "gridSpan" => props.grid_span = parse_i64(attr(c, W, "val")).unwrap_or(1).max(1) as u32,
+            "gridSpan" => {
+                props.grid_span = u32::try_from(parse_bounded_cardinality(
+                    attr(c, W, "val"),
+                    1,
+                    1,
+                    MAX_TABLE_COLUMNS,
+                    "w:gridSpan",
+                )?)
+                .map_err(|_| resource_limit("w:gridSpan does not fit u32"))?
+            }
             "vMerge" => {
                 props.v_merge = Some(match attr(c, W, "val") {
                     Some("restart") => VMerge::Restart,
@@ -3095,7 +3205,16 @@ pub fn parse_cell_props(node: Node) -> CellProps {
                 .push(format!("w:{} in w:tcPr", c.tag_name().name())),
         }
     }
-    props
+    Ok(props)
+}
+
+/// Parses cell properties for legacy style callers. Document stories use the
+/// fallible checked variant above.
+pub fn parse_cell_props(node: Node) -> CellProps {
+    parse_cell_props_checked(node).unwrap_or_else(|_| CellProps {
+        grid_span: 1,
+        ..Default::default()
+    })
 }
 
 fn parse_margins(node: Node) -> Margins {
@@ -3111,11 +3230,23 @@ fn parse_margins(node: Node) -> Margins {
     }
 }
 
-fn parse_cols(node: Node) -> ColumnSpec {
-    let num = parse_i64(attr(node, W, "num")).unwrap_or(1).max(0) as u32;
+fn parse_cols(node: Node) -> Result<ColumnSpec> {
+    let num = parse_bounded_cardinality(
+        attr(node, W, "num"),
+        1,
+        0,
+        MAX_SECTION_COLUMNS,
+        "w:cols@num",
+    )?;
     let space_pt = measure_twip_to_pt(attr(node, W, "space"));
     let mut cols = Vec::new();
     let mut spaces = Vec::new();
+    let authored = children(node)
+        .filter(|candidate| is(*candidate, W, "col"))
+        .count();
+    ensure_cardinality("w:cols children", authored, MAX_SECTION_COLUMNS)?;
+    try_reserve(&mut cols, authored, "w:cols children")?;
+    try_reserve(&mut spaces, authored, "w:cols spaces")?;
     for c in children(node) {
         if is(c, W, "col")
             && let Some(width) = measure_twip_to_pt(attr(c, W, "w"))
@@ -3128,12 +3259,12 @@ fn parse_cols(node: Node) -> ColumnSpec {
             );
         }
     }
-    ColumnSpec {
-        num,
+    Ok(ColumnSpec {
+        num: u32::try_from(num).map_err(|_| resource_limit("w:cols@num does not fit u32"))?,
         cols,
         space_pt,
         spaces,
-    }
+    })
 }
 
 fn parse_hdr_ftr_ref(node: Node) -> Option<HdrFtrRef> {
@@ -3150,7 +3281,7 @@ fn parse_hdr_ftr_ref(node: Node) -> Option<HdrFtrRef> {
 ///
 /// Ignores `w:sectPr` (handled by the section walker) and does not raise the
 /// text-box flag for `w:framePr` (styles are not document content).
-pub fn parse_para_props(ppr: Node) -> ParaProps {
+pub(crate) fn parse_para_props_checked(ppr: Node, tab_limit: usize) -> Result<ParaProps> {
     let mut props = ParaProps::default();
     for c in children(ppr) {
         match c.tag_name().name() {
@@ -3165,7 +3296,7 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
             "bidi" => props.bidi = Some(toggle_child(c)),
             "spacing" => props.spacing = parse_spacing(c),
             "ind" => props.indent = parse_indent(c),
-            "tabs" => props.tabs = parse_tabs(c),
+            "tabs" => props.tabs = parse_tabs_checked(c, tab_limit)?,
             "numPr" => props.numbering = parse_num_pr(c),
             "keepNext" => props.keep_next = toggle_child(c),
             "keepLines" => props.keep_lines = toggle_child(c),
@@ -3207,7 +3338,14 @@ pub fn parse_para_props(ppr: Node) -> ParaProps {
                 .push(format!("w:{} in w:pPr", c.tag_name().name())),
         }
     }
-    props
+    Ok(props)
+}
+
+/// Parses paragraph properties for source compatibility. Fallible document and
+/// style parsing uses [`parse_para_props_checked`] so resource refusal is not
+/// erased at an admission boundary.
+pub fn parse_para_props(ppr: Node) -> ParaProps {
+    parse_para_props_checked(ppr, usize::MAX).unwrap_or_default()
 }
 
 fn parse_frame_props(node: Node) -> FrameProps {

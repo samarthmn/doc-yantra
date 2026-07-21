@@ -6,6 +6,15 @@ use super::{Rgb, S, attr, child, children, parse_f64, parse_i64};
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
 
+/// Excel's fixed worksheet envelope (XFD is the 16,384th column).
+pub const MAX_XLSX_COLUMNS: u32 = 16_384;
+/// Excel's fixed worksheet envelope (rows are one-based in authored XML).
+pub const MAX_XLSX_ROWS: u32 = 1_048_576;
+
+fn reference_resource_limit(detail: impl Into<String>) -> OfficeError {
+    OfficeError::unsupported(UnsupportedCode::ResourceLimit, detail)
+}
+
 /// A reference to a sheet in the workbook.
 #[derive(Debug, Clone)]
 pub struct SheetRef {
@@ -823,8 +832,23 @@ impl Worksheet {
                 if !super::is(c, S, "col") {
                     continue;
                 }
-                let min = parse_i64(attr(c, S, "min")).unwrap_or(1).max(1) as u32 - 1;
-                let max = parse_i64(attr(c, S, "max")).unwrap_or(1).max(1) as u32 - 1;
+                let min = parse_required_one_based_index(
+                    attr(c, S, "min"),
+                    MAX_XLSX_COLUMNS,
+                    "worksheet column min",
+                )?;
+                let max = parse_required_one_based_index(
+                    attr(c, S, "max"),
+                    MAX_XLSX_COLUMNS,
+                    "worksheet column max",
+                )?;
+                if min > max {
+                    return Err(OfficeError::Invalid(format!(
+                        "worksheet column range {}..{} is reversed",
+                        min + 1,
+                        max + 1
+                    )));
+                }
                 let width_chars = parse_f64(attr(c, S, "width")).unwrap_or(8.43);
                 let hidden = matches!(attr(c, S, "hidden"), Some("1") | Some("true"));
                 ws.cols.push(ColInfo {
@@ -929,7 +953,12 @@ impl Worksheet {
                 if !super::is(row, S, "row") {
                     continue;
                 }
-                let r_idx = parse_i64(attr(row, S, "r")).unwrap_or(1).max(1) as u32 - 1;
+                let r_idx = match attr(row, S, "r") {
+                    Some(value) => {
+                        parse_required_one_based_index(Some(value), MAX_XLSX_ROWS, "worksheet row")?
+                    }
+                    None => 0,
+                };
                 if let Some(h) = parse_f64(attr(row, S, "ht")) {
                     ws.row_heights.insert(r_idx, h);
                 }
@@ -940,8 +969,12 @@ impl Worksheet {
                     if !super::is(c, S, "c") {
                         continue;
                     }
-                    let (col, row_n) =
-                        parse_a1(attr(c, S, "r").unwrap_or("A1")).unwrap_or((0, r_idx));
+                    let reference = attr(c, S, "r").ok_or_else(|| {
+                        OfficeError::Invalid(
+                            "worksheet cell is missing required r reference".into(),
+                        )
+                    })?;
+                    let (col, row_n) = parse_required_a1(reference, "worksheet cell reference")?;
                     let style_idx = parse_i64(attr(c, S, "s")).unwrap_or(0).max(0) as usize;
                     let value = parse_cell_value(c, attr(c, S, "t"), shared);
                     max_row = max_row.max(row_n);
@@ -957,17 +990,16 @@ impl Worksheet {
         }
         if let Some(merges) = child(root, S, "mergeCells") {
             for merge in children(merges).filter(|node| super::is(*node, S, "mergeCell")) {
-                let Some(reference) = attr(merge, S, "ref") else {
-                    continue;
-                };
-                let mut endpoints = reference.split(':');
-                let Some((first_col, first_row)) = endpoints.next().and_then(parse_a1) else {
-                    continue;
-                };
-                let (last_col, last_row) = endpoints
-                    .next()
-                    .and_then(parse_a1)
-                    .unwrap_or((first_col, first_row));
+                let reference = attr(merge, S, "ref").ok_or_else(|| {
+                    OfficeError::Invalid("mergeCell is missing required ref".into())
+                })?;
+                let range = parse_required_range(reference, "merged-cell reference")?;
+                let (first_col, first_row, last_col, last_row) = (
+                    range.first_col,
+                    range.first_row,
+                    range.last_col,
+                    range.last_row,
+                );
                 ws.merges.push(MergeRange {
                     first_row: first_row.min(last_row),
                     first_col: first_col.min(last_col),
@@ -1138,14 +1170,28 @@ fn parse_ranges(value: &str) -> Vec<CellRange> {
 /// Parses a single A1 rectangular range. Sheet prefixes are discarded because
 /// Workbook-level names are matched to their local sheet before this call.
 pub fn parse_range(value: &str) -> Option<CellRange> {
-    let value = value.rsplit('!').next()?.trim_matches('\'');
+    parse_required_range(value, "cell range").ok()
+}
+
+pub(crate) fn parse_required_range(value: &str, label: &str) -> Result<CellRange> {
+    let value = value.rsplit('!').next().ok_or_else(|| {
+        OfficeError::Invalid(format!("{label} has no A1 range after sheet prefix"))
+    })?;
     let mut endpoints = value.split(':');
-    let (first_col, first_row) = endpoints.next().and_then(parse_a1)?;
-    let (last_col, last_row) = endpoints
+    let first = endpoints
         .next()
-        .and_then(parse_a1)
-        .unwrap_or((first_col, first_row));
-    Some(CellRange {
+        .ok_or_else(|| OfficeError::Invalid(format!("{label} is empty")))?;
+    let (first_col, first_row) = parse_required_a1(first, label)?;
+    let (last_col, last_row) = match endpoints.next() {
+        Some(last) => parse_required_a1(last, label)?,
+        None => (first_col, first_row),
+    };
+    if endpoints.next().is_some() {
+        return Err(OfficeError::Invalid(format!(
+            "{label} contains more than two endpoints"
+        )));
+    }
+    Ok(CellRange {
         first_row: first_row.min(last_row),
         first_col: first_col.min(last_col),
         last_row: first_row.max(last_row),
@@ -1221,21 +1267,86 @@ fn missing_formula_cache_or_empty(has_formula: bool) -> CellValue {
 
 /// Parses an A1 reference (e.g. `AB12`, `$C$5`) into zero-based `(col, row)`.
 pub fn parse_a1(s: &str) -> Option<(u32, u32)> {
-    let s: String = s.trim().chars().filter(|c| *c != '$').collect();
-    let split = s.find(|c: char| c.is_ascii_digit())?;
-    let (letters, digits) = s.split_at(split);
-    if letters.is_empty() || digits.is_empty() {
-        return None;
+    parse_required_a1(s, "A1 reference").ok()
+}
+
+pub(crate) fn parse_required_a1(s: &str, label: &str) -> Result<(u32, u32)> {
+    let value = s.trim();
+    let bytes = value.as_bytes();
+    let mut cursor = usize::from(bytes.first() == Some(&b'$'));
+    let letters_start = cursor;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
+        cursor += 1;
     }
-    let mut col = 0u32;
-    for ch in letters.chars() {
-        if !ch.is_ascii_alphabetic() {
-            return None;
+    if cursor == letters_start {
+        return Err(OfficeError::Invalid(format!(
+            "{label} has no column letters: {value}"
+        )));
+    }
+    let letters_end = cursor;
+    if bytes.get(cursor) == Some(&b'$') {
+        cursor += 1;
+    }
+    let digits_start = cursor;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+        cursor += 1;
+    }
+    if cursor != bytes.len() || cursor == digits_start {
+        return Err(OfficeError::Invalid(format!(
+            "{label} is not valid A1 syntax: {value}"
+        )));
+    }
+
+    let mut column = 0u32;
+    for byte in &bytes[letters_start..letters_end] {
+        let digit = u32::from(byte.to_ascii_uppercase() - b'A' + 1);
+        column = column
+            .checked_mul(26)
+            .and_then(|current| current.checked_add(digit))
+            .ok_or_else(|| {
+                reference_resource_limit(format!("{label} column exceeds Excel bounds"))
+            })?;
+        if column > MAX_XLSX_COLUMNS {
+            return Err(reference_resource_limit(format!(
+                "{label} column exceeds XFD"
+            )));
         }
-        col = col * 26 + (ch.to_ascii_uppercase() as u32 - 'A' as u32 + 1);
     }
-    let row: u32 = digits.parse().ok()?;
-    Some((col - 1, row - 1))
+
+    let row = parse_decimal_u32(&value[digits_start..], label)?;
+    if row == 0 || row > MAX_XLSX_ROWS {
+        return Err(reference_resource_limit(format!(
+            "{label} row {row} is outside 1..={MAX_XLSX_ROWS}"
+        )));
+    }
+    Ok((column - 1, row - 1))
+}
+
+fn parse_decimal_u32(value: &str, label: &str) -> Result<u32> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(OfficeError::Invalid(format!(
+            "{label} is not an unsigned integer: {value}"
+        )));
+    }
+    let mut parsed = 0u32;
+    for digit in value.bytes().map(|byte| u32::from(byte - b'0')) {
+        parsed = parsed
+            .checked_mul(10)
+            .and_then(|current| current.checked_add(digit))
+            .ok_or_else(|| reference_resource_limit(format!("{label} exceeds u32")))?;
+    }
+    Ok(parsed)
+}
+
+fn parse_required_one_based_index(value: Option<&str>, limit: u32, label: &str) -> Result<u32> {
+    let raw = value.ok_or_else(|| OfficeError::Invalid(format!("{label} is missing")))?;
+    let parsed = parse_decimal_u32(raw, label)?;
+    if parsed == 0 || parsed > limit {
+        return Err(reference_resource_limit(format!(
+            "{label} {parsed} is outside 1..={limit}"
+        )));
+    }
+    Ok(parsed - 1)
 }
 
 #[cfg(test)]
@@ -1250,5 +1361,61 @@ mod tests {
         assert_eq!(parse_a1("AA1"), Some((26, 0)));
         assert_eq!(parse_a1("$C$5"), Some((2, 4)));
         assert_eq!(parse_a1("AB100"), Some((27, 99)));
+    }
+
+    #[test]
+    fn a1_parsing_enforces_excel_bounds_without_panicking() {
+        assert_eq!(parse_a1("XFD1048576"), Some((16_383, 1_048_575)));
+        for invalid in ["A0", "XFE1", "A1048577", "AAAAAAAAAAAAAAAAAAAAAAAA1"] {
+            assert_eq!(parse_a1(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn worksheet_required_references_distinguish_invalid_from_resource_limits() {
+        let shared = SharedStrings::default();
+        let worksheet = |body: &str| {
+            format!(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{body}</worksheet>"#
+            )
+        };
+
+        let malformed = Worksheet::parse(
+            &worksheet(r#"<sheetData><row r="1"><c r="not-a-cell"/></row></sheetData>"#),
+            &shared,
+        )
+        .expect_err("malformed cell reference");
+        assert!(matches!(malformed, OfficeError::Invalid(_)));
+
+        for body in [
+            r#"<sheetData><row r="1"><c r="XFE1"/></row></sheetData>"#,
+            r#"<cols><col min="1" max="16385"/></cols>"#,
+            r#"<sheetData/><mergeCells><mergeCell ref="A1:XFE1"/></mergeCells>"#,
+        ] {
+            let error = Worksheet::parse(&worksheet(body), &shared).expect_err("Excel limit");
+            assert!(matches!(
+                error,
+                OfficeError::Unsupported {
+                    code: UnsupportedCode::ResourceLimit,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn worksheet_does_not_silently_default_malformed_required_references() {
+        let shared = SharedStrings::default();
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c/></row></sheetData></worksheet>"#;
+        assert!(matches!(
+            Worksheet::parse(xml, &shared).expect_err("missing cell reference"),
+            OfficeError::Invalid(_)
+        ));
+
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><mergeCells><mergeCell ref="A1:not-a-cell"/></mergeCells></worksheet>"#;
+        assert!(matches!(
+            Worksheet::parse(xml, &shared).expect_err("malformed merge reference"),
+            OfficeError::Invalid(_)
+        ));
     }
 }

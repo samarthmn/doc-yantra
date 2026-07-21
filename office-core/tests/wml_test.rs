@@ -4,9 +4,11 @@ use office_core::opc::Package;
 use office_core::oxml::numbering::{NumFmt, Numbering};
 use office_core::oxml::styles::StyleResolver;
 use office_core::oxml::wml::{
-    BlockContent, InlineContent, ParaProps, RunContent, RunProps, VMerge, parse_document,
+    BlockContent, InlineContent, NoteKind, ParaProps, RunContent, RunProps, VMerge, parse_document,
+    parse_hdr_ftr, parse_notes,
 };
 use office_core::testkit::{minimal_docx, wrap_document, wrap_numbering, wrap_styles};
+use office_core::{OfficeError, UnsupportedCode};
 use std::path::Path;
 
 /// Concatenates all text across a run's content.
@@ -200,6 +202,57 @@ fn table_gridspan_vmerge() {
 
     let r1c0 = &table.rows[1].cells[0];
     assert_eq!(r1c0.props.v_merge, Some(VMerge::Continue));
+}
+
+fn assert_resource_limit(error: OfficeError) {
+    assert!(
+        matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ),
+        "expected resource limit, got {error}"
+    );
+}
+
+#[test]
+fn rejects_excessive_word_structure_before_layout() {
+    let cases = [
+        r#"<w:p/><w:sectPr><w:cols w:num="4294967295"/></w:sectPr>"#.to_string(),
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val="4294967295"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#.to_string(),
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:trPr><w:gridBefore w:val="200"/><w:gridAfter w:val="200"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val="200"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#.to_string(),
+        format!(
+            "<w:tbl><w:tblGrid>{}</w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
+            r#"<w:gridCol w:w="100"/>"#.repeat(257)
+        ),
+    ];
+
+    for body in cases {
+        let error = parse_document(&wrap_document(&body)).expect_err("structure limit");
+        assert_resource_limit(error);
+    }
+}
+
+#[test]
+fn rejects_authored_tab_limit_plus_one_in_every_word_story() {
+    let tabs = r#"<w:tab w:val="left" w:pos="720"/>"#.repeat(65);
+    let paragraph = format!("<w:p><w:pPr><w:tabs>{tabs}</w:tabs></w:pPr></w:p>");
+
+    assert_resource_limit(
+        parse_document(&wrap_document(&paragraph)).expect_err("document tab limit"),
+    );
+
+    let header = format!(
+        r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{paragraph}</w:hdr>"#
+    );
+    assert_resource_limit(parse_hdr_ftr(&header).expect_err("header tab limit"));
+
+    let notes = format!(
+        r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1">{paragraph}</w:footnote></w:footnotes>"#
+    );
+    assert_resource_limit(parse_notes(&notes, NoteKind::Footnote).expect_err("note tab limit"));
 }
 
 #[test]

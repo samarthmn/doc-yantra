@@ -7,7 +7,10 @@ use crate::fonts::FontDb;
 use crate::layout::{DocDates, EncodedImage, ImageId};
 use crate::opc::Package;
 use crate::oxml::pml::ColorSpec;
-use crate::oxml::sml::{SharedStrings, Styles, Workbook, Worksheet, parse_a1, parse_range};
+use crate::oxml::sml::{
+    MAX_XLSX_COLUMNS, MAX_XLSX_ROWS, SharedStrings, Styles, Workbook, Worksheet, parse_required_a1,
+    parse_required_range,
+};
 use crate::oxml::theme::{Theme, parse_color_element};
 use crate::{ConvertOptions, OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
@@ -174,7 +177,7 @@ impl XlsxDoc {
                 Worksheet::parse_with_colors(xml, &shared, &theme, &styles.indexed_colors)
             })
             .map_err(|error| error.context(format_args!("sheet {}", sr.name)))?;
-            apply_print_names(&mut sheet, &workbook, &sr.name, sheet_index);
+            apply_print_names(&mut sheet, &workbook, &sr.name, sheet_index)?;
             let (drawings, drawing_reasons) = resolve_drawings(
                 &pkg,
                 part,
@@ -360,13 +363,13 @@ fn parse_drawing(xml: &str) -> Result<(Vec<DrawingRequest>, Vec<DrawingReason>)>
         }
         let parsed_anchor = match anchor.tag_name().name() {
             "twoCellAnchor" if anchor.tag_name().namespace() == Some(XDR) => {
-                let from = xdr_child(anchor, "from").map(parse_marker);
-                let to = xdr_child(anchor, "to").map(parse_marker);
+                let from = xdr_child(anchor, "from").map(parse_marker).transpose()?;
+                let to = xdr_child(anchor, "to").map(parse_marker).transpose()?;
                 from.zip(to)
                     .map(|(from, to)| DrawingAnchor::TwoCell { from, to })
             }
             "oneCellAnchor" if anchor.tag_name().namespace() == Some(XDR) => {
-                let from = xdr_child(anchor, "from").map(parse_marker);
+                let from = xdr_child(anchor, "from").map(parse_marker).transpose()?;
                 let ext = xdr_child(anchor, "ext").map(parse_ext);
                 from.zip(ext)
                     .map(|(from, (width_pt, height_pt))| DrawingAnchor::OneCell {
@@ -655,20 +658,38 @@ fn xdr_child<'a>(node: roxmltree::Node<'a, 'a>, name: &str) -> Option<roxmltree:
     })
 }
 
-fn parse_marker(node: roxmltree::Node<'_, '_>) -> DrawingMarker {
-    DrawingMarker {
-        col: xdr_text_u32(node, "col"),
-        col_off_pt: crate::oxml::emu_to_pt(i64::from(xdr_text_u32(node, "colOff"))),
-        row: xdr_text_u32(node, "row"),
-        row_off_pt: crate::oxml::emu_to_pt(i64::from(xdr_text_u32(node, "rowOff"))),
+fn parse_marker(node: roxmltree::Node<'_, '_>) -> Result<DrawingMarker> {
+    let col = xdr_text_u32(node, "col")?;
+    let row = xdr_text_u32(node, "row")?;
+    if col >= MAX_XLSX_COLUMNS || row >= MAX_XLSX_ROWS {
+        return Err(OfficeError::unsupported(
+            UnsupportedCode::ResourceLimit,
+            format!("xlsx drawing marker ({col}, {row}) exceeds Excel worksheet bounds"),
+        ));
+    }
+    Ok(DrawingMarker {
+        col,
+        col_off_pt: crate::oxml::emu_to_pt(i64::from(xdr_optional_u32(node, "colOff")?)),
+        row,
+        row_off_pt: crate::oxml::emu_to_pt(i64::from(xdr_optional_u32(node, "rowOff")?)),
+    })
+}
+
+fn xdr_optional_u32(node: roxmltree::Node<'_, '_>, name: &str) -> Result<u32> {
+    match xdr_child(node, name).and_then(|child| child.text()) {
+        Some(value) => value
+            .parse()
+            .map_err(|_| OfficeError::Invalid(format!("xlsx drawing marker {name} is malformed"))),
+        None => Ok(0),
     }
 }
 
-fn xdr_text_u32(node: roxmltree::Node<'_, '_>, name: &str) -> u32 {
+fn xdr_text_u32(node: roxmltree::Node<'_, '_>, name: &str) -> Result<u32> {
     xdr_child(node, name)
         .and_then(|child| child.text())
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
+        .ok_or_else(|| OfficeError::Invalid(format!("xlsx drawing marker lacks {name}")))?
+        .parse()
+        .map_err(|_| OfficeError::Invalid(format!("xlsx drawing marker {name} is malformed")))
 }
 
 fn parse_ext(node: roxmltree::Node<'_, '_>) -> (f64, f64) {
@@ -747,7 +768,7 @@ fn apply_print_names(
     workbook: &Workbook,
     sheet_name: &str,
     sheet_index: usize,
-) {
+) -> Result<()> {
     for name in &workbook.defined_names {
         if name.local_sheet_id.is_some_and(|id| id != sheet_index) {
             continue;
@@ -760,9 +781,17 @@ fn apply_print_names(
         }
         match name.name.as_str() {
             "_xlnm.Print_Area" | "Print_Area" => {
-                let mut areas = name.value.split(',').filter_map(parse_range);
-                sheet.print_area = areas.next();
-                if areas.next().is_some() {
+                let mut areas = name.value.split(',');
+                let first = areas
+                    .next()
+                    .ok_or_else(|| OfficeError::Invalid("xlsx print area is empty".into()))?;
+                sheet.print_area = Some(parse_required_range(first, "xlsx print area")?);
+                let mut multiple = false;
+                for area in areas {
+                    parse_required_range(area, "xlsx print area")?;
+                    multiple = true;
+                }
+                if multiple {
                     sheet
                         .visible_unsupported
                         .push(crate::oxml::sml::WorksheetUnsupported {
@@ -771,52 +800,40 @@ fn apply_print_names(
                         });
                 }
             }
-            "_xlnm.Print_Titles" | "Print_Titles" => parse_print_titles(sheet, &name.value),
+            "_xlnm.Print_Titles" | "Print_Titles" => parse_print_titles(sheet, &name.value)?,
             _ => {}
         }
     }
+    Ok(())
 }
 
-fn parse_print_titles(sheet: &mut Worksheet, value: &str) {
+fn parse_print_titles(sheet: &mut Worksheet, value: &str) -> Result<()> {
     for part in value.split(',') {
         let reference = part.rsplit('!').next().unwrap_or(part).trim();
-        if let Some(rows) = reference.strip_prefix('$').and_then(|r| r.split_once(':'))
-            && rows.0.chars().all(|c| c.is_ascii_digit())
-            && rows
-                .1
-                .trim_start_matches('$')
-                .chars()
-                .all(|c| c.is_ascii_digit())
+        let (first, last) = reference.split_once(':').ok_or_else(|| {
+            OfficeError::Invalid(format!("xlsx print title is not a range: {reference}"))
+        })?;
+        let first_clean = first.trim_matches('$');
+        let last_clean = last.trim_matches('$');
+        if first_clean.bytes().all(|byte| byte.is_ascii_digit())
+            && last_clean.bytes().all(|byte| byte.is_ascii_digit())
         {
-            let first = rows
-                .0
-                .parse::<u32>()
-                .ok()
-                .and_then(|row| row.checked_sub(1));
-            let last = rows
-                .1
-                .trim_start_matches('$')
-                .parse::<u32>()
-                .ok()
-                .and_then(|row| row.checked_sub(1));
-            if let (Some(first), Some(last)) = (first, last) {
-                sheet.print_title_rows = Some((first.min(last), first.max(last)));
-            }
-        } else if let Some((first, last)) = reference.split_once(':') {
-            let first = first
-                .trim_matches('$')
-                .trim_end_matches(|c: char| c.is_ascii_digit());
-            let last = last
-                .trim_matches('$')
-                .trim_end_matches(|c: char| c.is_ascii_digit());
-            if let (Some((first, _)), Some((last, _))) = (
-                parse_a1(&format!("{first}1")),
-                parse_a1(&format!("{last}1")),
-            ) {
-                sheet.print_title_cols = Some((first.min(last), first.max(last)));
-            }
+            let first = parse_required_a1(&format!("A{first_clean}"), "xlsx print-title row")?.1;
+            let last = parse_required_a1(&format!("A{last_clean}"), "xlsx print-title row")?.1;
+            sheet.print_title_rows = Some((first.min(last), first.max(last)));
+        } else if first_clean.bytes().all(|byte| byte.is_ascii_alphabetic())
+            && last_clean.bytes().all(|byte| byte.is_ascii_alphabetic())
+        {
+            let first = parse_required_a1(&format!("{first_clean}1"), "xlsx print-title column")?.0;
+            let last = parse_required_a1(&format!("{last_clean}1"), "xlsx print-title column")?.0;
+            sheet.print_title_cols = Some((first.min(last), first.max(last)));
+        } else {
+            return Err(OfficeError::Invalid(format!(
+                "xlsx print title has malformed endpoints: {reference}"
+            )));
         }
     }
+    Ok(())
 }
 
 fn parse<T>(pkg: &Package, part: &str, f: impl Fn(&str) -> Result<T>) -> Result<T> {
@@ -883,4 +900,63 @@ fn iso_to_pdf_date(s: &str) -> Option<String> {
     }
     out.push('Z');
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oxml::sml::DefinedName;
+
+    #[test]
+    fn print_names_use_fallible_bounded_references() {
+        let workbook = |value: &str, name: &str| Workbook {
+            defined_names: vec![DefinedName {
+                name: name.to_string(),
+                local_sheet_id: Some(0),
+                value: value.to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let mut sheet = Worksheet::default();
+        let error = apply_print_names(
+            &mut sheet,
+            &workbook("'Sheet1'!$XFE$1:$XFE$2", "_xlnm.Print_Area"),
+            "Sheet1",
+            0,
+        )
+        .expect_err("print area beyond XFD");
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+
+        let error = apply_print_names(
+            &mut sheet,
+            &workbook("'Sheet1'!not-a-range", "_xlnm.Print_Titles"),
+            "Sheet1",
+            0,
+        )
+        .expect_err("malformed print title");
+        assert!(matches!(error, OfficeError::Invalid(_)));
+    }
+
+    #[test]
+    fn drawing_markers_refuse_coordinates_beyond_excel_bounds() {
+        let xml = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><xdr:twoCellAnchor><xdr:from><xdr:col>16384</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>16384</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
+        let error = match parse_drawing(xml) {
+            Err(error) => error,
+            Ok(_) => panic!("drawing column beyond XFD was accepted"),
+        };
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
 }

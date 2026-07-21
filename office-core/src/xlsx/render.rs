@@ -20,6 +20,7 @@ use crate::oxml::sml::{
 use crate::oxml::{Rgb, Rgba};
 use crate::pptx::geometry::{Contour, evaluate_shape, resolve_colorspec};
 use crate::profile::Warning;
+use crate::resource_limits::try_reserve;
 use crate::text::shape;
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::HashMap;
@@ -134,7 +135,7 @@ fn render_sheet(
     if ws.cells.is_empty() && drawings.is_empty() {
         return Ok(());
     }
-    let col_w = column_widths(ws, max_col);
+    let col_w = column_widths(ws, max_col)?;
 
     // Cell lookup.
     let cells: HashMap<(u32, u32), &Cell> = ws.cells.iter().map(|c| ((c.row, c.col), c)).collect();
@@ -914,7 +915,16 @@ fn render_row(
             let height = row_heights[merge.first_row as usize..=merge.last_row as usize]
                 .iter()
                 .sum();
-            (width, height, last_col - col + 1)
+            let span = last_col
+                .checked_sub(col)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| {
+                    OfficeError::unsupported(
+                        UnsupportedCode::ResourceLimit,
+                        "xlsx merged-cell column span overflow",
+                    )
+                })?;
+            (width, height, span)
         } else {
             (w, h, 1)
         };
@@ -1575,14 +1585,23 @@ fn effective_row_heights(
     col_widths: &[f64],
     max_row: u32,
 ) -> Result<Vec<f64>> {
-    let mut heights: Vec<f64> = (0..=max_row)
-        .map(|row| {
-            ws.row_heights
-                .get(&row)
-                .copied()
-                .unwrap_or(ws.default_row_height)
-        })
-        .collect();
+    let height_count = usize::try_from(max_row)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            OfficeError::unsupported(
+                UnsupportedCode::ResourceLimit,
+                "xlsx row-height allocation overflows usize",
+            )
+        })?;
+    let mut heights = Vec::new();
+    try_reserve(&mut heights, height_count, "xlsx row heights")?;
+    heights.extend((0..=max_row).map(|row| {
+        ws.row_heights
+            .get(&row)
+            .copied()
+            .unwrap_or(ws.default_row_height)
+    }));
     for (&(row, col), cell) in cells {
         let style = doc.styles.cell(cell.style_idx);
         if !style.wrap || ws.row_heights.contains_key(&row) {
@@ -1676,8 +1695,19 @@ fn resolve_code(doc: &XlsxDoc, num_fmt_id: u32) -> String {
 }
 
 /// Per-column widths (points) for columns `0..=max_col`, from `<cols>` or default.
-fn column_widths(ws: &Worksheet, max_col: u32) -> Vec<f64> {
-    let mut widths = vec![default_width_pt(); (max_col + 1) as usize];
+fn column_widths(ws: &Worksheet, max_col: u32) -> Result<Vec<f64>> {
+    let width_count = usize::try_from(max_col)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            OfficeError::unsupported(
+                UnsupportedCode::ResourceLimit,
+                "xlsx column-width allocation overflows usize",
+            )
+        })?;
+    let mut widths = Vec::new();
+    try_reserve(&mut widths, width_count, "xlsx column widths")?;
+    widths.resize(width_count, default_width_pt());
     for info in &ws.cols {
         let w = if info.hidden {
             0.0
@@ -1690,7 +1720,7 @@ fn column_widths(ws: &Worksheet, max_col: u32) -> Vec<f64> {
             }
         }
     }
-    widths
+    Ok(widths)
 }
 
 /// Splits a print-area column slice. Manual `colBreaks` begin a fresh band

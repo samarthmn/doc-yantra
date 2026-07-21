@@ -15,9 +15,12 @@ use super::paragraph::{
 use super::{FillRule, Item, PathCommand, Positioned, Stroke};
 use crate::Result;
 use crate::oxml::TblWidth;
-use crate::oxml::wml::{BlockContent, Border, Cell, Jc, Row, RowHeight, Table, VAlign, VMerge};
+use crate::oxml::wml::{
+    BlockContent, Border, Cell, Jc, MAX_TABLE_COLUMNS, Row, RowHeight, Table, VAlign, VMerge,
+};
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
+use crate::resource_limits::{checked_count_add, ensure_cardinality, try_reserve};
 use std::collections::HashMap;
 
 /// Default cell side margin (108 twips = 5.4pt) when unset.
@@ -723,35 +726,51 @@ fn resolve_columns(
         // spans every column IS the rendered layout. Other producers
         // (converters, generators) store speculative grids, so intrinsic
         // measurement stays authoritative for them.
-        let columns = table_column_count(table);
+        let columns = table_column_count(table)?;
         if doc.settings.word_authored
             && columns > 0
             && table.grid.len() == columns
             && table.grid.iter().all(|w| *w > 0.0)
         {
-            return Ok(resolve_stored_columns(table, avail));
+            return resolve_stored_columns(table, avail);
         }
         return autofit_columns(doc, warnings, table, rels, avail, note_sequence);
     }
-    Ok(resolve_stored_columns(table, avail))
+    resolve_stored_columns(table, avail)
 }
 
-fn table_column_count(table: &Table) -> usize {
-    table
-        .rows
-        .iter()
-        .map(|row| {
-            row.props.grid_before as usize
-                + row
-                    .cells
-                    .iter()
-                    .map(|cell| cell.props.grid_span.max(1) as usize)
-                    .sum::<usize>()
-                + row.props.grid_after as usize
-        })
-        .max()
-        .unwrap_or(1)
-        .max(1)
+fn table_column_count(table: &Table) -> Result<usize> {
+    let mut maximum = 1usize;
+    for row in &table.rows {
+        let mut columns = usize::try_from(row.props.grid_before).map_err(|_| {
+            crate::OfficeError::unsupported(
+                crate::UnsupportedCode::ResourceLimit,
+                "w:gridBefore does not fit usize",
+            )
+        })?;
+        for cell in &row.cells {
+            let span = usize::try_from(cell.props.grid_span.max(1)).map_err(|_| {
+                crate::OfficeError::unsupported(
+                    crate::UnsupportedCode::ResourceLimit,
+                    "w:gridSpan does not fit usize",
+                )
+            })?;
+            columns = checked_count_add("Word table columns", columns, span)?;
+        }
+        columns = checked_count_add(
+            "Word table columns",
+            columns,
+            usize::try_from(row.props.grid_after).map_err(|_| {
+                crate::OfficeError::unsupported(
+                    crate::UnsupportedCode::ResourceLimit,
+                    "w:gridAfter does not fit usize",
+                )
+            })?,
+        )?;
+        ensure_cardinality("Word table columns", columns, MAX_TABLE_COLUMNS)?;
+        maximum = maximum.max(columns);
+    }
+    Ok(maximum)
 }
 
 fn should_autofit(table: &Table) -> bool {
@@ -820,7 +839,7 @@ fn autofit_intrinsic_columns(
     rels: &HashMap<String, String>,
     note_sequence: Option<&NoteSequence>,
 ) -> Result<(Vec<f64>, Vec<f64>)> {
-    let column_count = table_column_count(table);
+    let column_count = table_column_count(table)?;
     let mut requirements = Vec::new();
     for row in table.rows.iter().filter(|row| !row.props.hidden) {
         let mut column = row.props.grid_before as usize;
@@ -840,7 +859,7 @@ fn autofit_intrinsic_columns(
                     },
                 });
             }
-            column += span;
+            column = checked_count_add("Word table column cursor", column, span)?;
         }
     }
     requirements.sort_by_key(|requirement| requirement.span);
@@ -853,14 +872,16 @@ fn autofit_intrinsic_columns(
             requirement.start,
             requirement.span,
             requirement.widths.min_content_pt,
-        );
+        )?;
         apply_required_width(
             &mut column_max,
             requirement.start,
             requirement.span,
             requirement.widths.max_content_pt,
-        );
-        for index in requirement.start..(requirement.start + requirement.span).min(column_count) {
+        )?;
+        let end = checked_count_add("Word table span end", requirement.start, requirement.span)?
+            .min(column_count);
+        for index in requirement.start..end {
             column_max[index] = column_max[index].max(column_min[index]);
         }
     }
@@ -905,7 +926,7 @@ fn measure_table_intrinsics(
             max_content_pt: maximums.iter().sum(),
         });
     }
-    let columns = resolve_stored_columns(table, f64::MAX / 4.0);
+    let columns = resolve_stored_columns(table, f64::MAX / 4.0)?;
     let total: f64 = columns.iter().sum();
     Ok(IntrinsicWidths {
         min_content_pt: total,
@@ -913,26 +934,32 @@ fn measure_table_intrinsics(
     })
 }
 
-fn apply_required_width(columns: &mut [f64], start: usize, span: usize, required: f64) {
+fn apply_required_width(
+    columns: &mut [f64],
+    start: usize,
+    span: usize,
+    required: f64,
+) -> Result<()> {
     if span == 0 || start >= columns.len() || !required.is_finite() {
-        return;
+        return Ok(());
     }
-    let end = (start + span).min(columns.len());
+    let end = checked_count_add("Word table span end", start, span)?.min(columns.len());
     let current: f64 = columns[start..end].iter().sum();
     let deficit = (required - current).max(0.0);
     if deficit <= f64::EPSILON {
-        return;
+        return Ok(());
     }
     let share = deficit / (end - start) as f64;
     for column in &mut columns[start..end] {
         *column += share;
     }
+    Ok(())
 }
 
 /// Resolves the calibrated non-AutoFit path from the stored grid and authored
 /// widths, scaled to the available width.
-fn resolve_stored_columns(table: &Table, avail: f64) -> Vec<f64> {
-    let column_count = table_column_count(table);
+fn resolve_stored_columns(table: &Table, avail: f64) -> Result<Vec<f64>> {
+    let column_count = table_column_count(table)?;
     let target_width = table
         .props
         .width
@@ -943,6 +970,8 @@ fn resolve_stored_columns(table: &Table, avail: f64) -> Vec<f64> {
         table.grid.clone()
     };
     if cols.len() < column_count {
+        let additional = column_count.saturating_sub(cols.len());
+        try_reserve(&mut cols, additional, "Word table columns")?;
         cols.resize(column_count, 0.0);
     }
 
@@ -954,12 +983,12 @@ fn resolve_stored_columns(table: &Table, avail: f64) -> Vec<f64> {
                 row.props.grid_before as usize,
                 row.props.width_before,
                 avail,
-            );
+            )?;
             let mut column = row.props.grid_before as usize;
             for cell in &row.cells {
                 let span = cell.props.grid_span.max(1) as usize;
-                apply_aggregate_width(&mut cols, column, span, cell.props.width, avail);
-                column += span;
+                apply_aggregate_width(&mut cols, column, span, cell.props.width, avail)?;
+                column = checked_count_add("Word table column cursor", column, span)?;
             }
             apply_aggregate_width(
                 &mut cols,
@@ -967,7 +996,7 @@ fn resolve_stored_columns(table: &Table, avail: f64) -> Vec<f64> {
                 row.props.grid_after as usize,
                 row.props.width_after,
                 avail,
-            );
+            )?;
         }
     }
 
@@ -994,7 +1023,7 @@ fn resolve_stored_columns(table: &Table, avail: f64) -> Vec<f64> {
             *c *= scale;
         }
     }
-    cols
+    Ok(cols)
 }
 
 fn apply_aggregate_width(
@@ -1003,23 +1032,24 @@ fn apply_aggregate_width(
     span: usize,
     width: Option<TblWidth>,
     available: f64,
-) {
+) -> Result<()> {
     let Some(total) = width.and_then(|width| width_points(width, available)) else {
-        return;
+        return Ok(());
     };
     if span == 0 || start >= columns.len() {
-        return;
+        return Ok(());
     }
-    let end = (start + span).min(columns.len());
+    let end = checked_count_add("Word table span end", start, span)?.min(columns.len());
     let current: f64 = columns[start..end].iter().sum();
     let deficit = (total - current).max(0.0);
     if deficit <= f64::EPSILON {
-        return;
+        return Ok(());
     }
     let each = deficit / (end - start) as f64;
     for column in &mut columns[start..end] {
         *column += each;
     }
+    Ok(())
 }
 
 fn width_points(width: TblWidth, available: f64) -> Option<f64> {
