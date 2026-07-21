@@ -158,6 +158,14 @@ impl FontDb {
 
     /// Registers only one validated face from an SFNT collection.
     pub fn register_face(&mut self, bytes: Vec<u8>, face_index: u32) -> Result<()> {
+        self.register_shared_face(Arc::new(bytes), face_index)
+    }
+
+    pub(crate) fn register_shared_face(
+        &mut self,
+        bytes: Arc<Vec<u8>>,
+        face_index: u32,
+    ) -> Result<()> {
         let identity = super::registration::validate_font_index(&bytes, face_index)?;
         if self.faces.len() >= MAX_FONT_FACES {
             return Err(OfficeError::unsupported(
@@ -165,8 +173,7 @@ impl FontDb {
                 format!("font face count exceeds limit {MAX_FONT_FACES}"),
             ));
         }
-        let data = Arc::new(bytes);
-        let face = ttf_parser::Face::parse(&data, face_index)
+        let face = ttf_parser::Face::parse(&bytes, face_index)
             .map_err(|_| OfficeError::Font("unparseable font bytes".into()))?;
         let family = face_name(&face, ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
             .or_else(|| face_name(&face, ttf_parser::name_id::FAMILY))
@@ -183,7 +190,7 @@ impl FontDb {
             sha256: identity.sha256,
             hash_pinned: false,
             embedding_permission: identity.fs_type,
-            data,
+            data: bytes,
             index: face_index,
         });
         Ok(())

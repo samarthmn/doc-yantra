@@ -14,7 +14,7 @@
 //!    the router can decide cheaply before converting.
 #![deny(missing_docs)]
 
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 #[cfg(feature = "fidelity-diagnostics")]
 pub mod diagnostics;
@@ -44,14 +44,106 @@ pub use profile::DocProfile;
 
 #[derive(Clone)]
 struct RuntimeFont {
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     face_index: u32,
     hash_pinned: bool,
     sha256: String,
 }
 
-static RUNTIME_FONTS: LazyLock<RwLock<Vec<RuntimeFont>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
+// The supported host boot set is six ~16.5 MiB pan-CJK/Symbols faces plus the
+// much smaller metric-compatible Office families. 128 MiB admits that reviewed
+// set while excluding a Wasm working set that the package cannot safely serve.
+const MAX_RUNTIME_FONT_BYTES: usize = 128 * 1024 * 1024;
+// 256 selected faces leaves ample room for all supported weights/styles while
+// keeping every profile/conversion's matching scan bounded.
+const MAX_RUNTIME_FONT_FACES: usize = 256;
+
+struct RuntimeFontRegistry {
+    fonts: Vec<RuntimeFont>,
+    aggregate_bytes: usize,
+    max_faces: usize,
+    max_bytes: usize,
+}
+
+impl RuntimeFontRegistry {
+    const fn with_limits(max_faces: usize, max_bytes: usize) -> Self {
+        Self {
+            fonts: Vec::new(),
+            aggregate_bytes: 0,
+            max_faces,
+            max_bytes,
+        }
+    }
+
+    const fn production() -> Self {
+        Self::with_limits(MAX_RUNTIME_FONT_FACES, MAX_RUNTIME_FONT_BYTES)
+    }
+
+    fn insert(
+        &mut self,
+        bytes: &[u8],
+        face_index: u32,
+        hash_pinned: bool,
+        sha256: &str,
+    ) -> Result<bool> {
+        if let Some(existing) = self
+            .fonts
+            .iter_mut()
+            .find(|font| font.sha256 == sha256 && font.face_index == face_index)
+        {
+            existing.hash_pinned |= hash_pinned;
+            return Ok(false);
+        }
+
+        let next_face_count =
+            resource_limits::checked_count_add("runtime font faces", self.fonts.len(), 1)?;
+        resource_limits::ensure_cardinality("runtime font faces", next_face_count, self.max_faces)?;
+
+        let shared_bytes = self
+            .fonts
+            .iter()
+            .find(|font| font.sha256 == sha256)
+            .map(|font| font.bytes.clone());
+        let next_aggregate_bytes = if shared_bytes.is_some() {
+            self.aggregate_bytes
+        } else {
+            let next = resource_limits::checked_bytes_add(
+                "runtime fonts",
+                self.aggregate_bytes,
+                bytes.len(),
+            )?;
+            if next > self.max_bytes {
+                return Err(OfficeError::unsupported(
+                    UnsupportedCode::ResourceLimit,
+                    format!("runtime font bytes {next} exceeds limit {}", self.max_bytes),
+                ));
+            }
+            next
+        };
+
+        resource_limits::try_reserve(&mut self.fonts, 1, "runtime font registry")?;
+        let stored_bytes = match shared_bytes {
+            Some(bytes) => bytes,
+            None => {
+                let mut owned = Vec::new();
+                resource_limits::try_reserve(&mut owned, bytes.len(), "runtime font bytes")?;
+                owned.extend_from_slice(bytes);
+                Arc::new(owned)
+            }
+        };
+        self.fonts.push(RuntimeFont {
+            bytes: stored_bytes,
+            face_index,
+            hash_pinned,
+            sha256: sha256.to_owned(),
+        });
+        self.aggregate_bytes = next_aggregate_bytes;
+        Ok(true)
+    }
+}
+
+static RUNTIME_FONTS: LazyLock<RwLock<RuntimeFontRegistry>> =
+    LazyLock::new(|| RwLock::new(RuntimeFontRegistry::production()));
 
 fn guard_page_count(count: usize) -> Result<()> {
     if count > resource_limits::MAX_PAGES {
@@ -87,19 +179,7 @@ pub fn register_font_validated(
     let mut registry = RUNTIME_FONTS
         .write()
         .map_err(|_| OfficeError::Internal("font registry lock is poisoned".into()))?;
-    if let Some(existing) = registry
-        .iter_mut()
-        .find(|font| font.sha256 == identity.sha256 && font.face_index == identity.face_index)
-    {
-        existing.hash_pinned |= hash_pinned;
-        return Ok(identity);
-    }
-    registry.push(RuntimeFont {
-        bytes: bytes.to_vec(),
-        face_index: identity.face_index,
-        hash_pinned,
-        sha256: identity.sha256.clone(),
-    });
+    registry.insert(bytes, identity.face_index, hash_pinned, &identity.sha256)?;
     Ok(identity)
 }
 
@@ -111,10 +191,11 @@ pub(crate) fn register_runtime_fonts(db: &mut fonts::FontDb) -> Result<()> {
     let registry = RUNTIME_FONTS
         .read()
         .map_err(|_| OfficeError::Internal("font registry lock is poisoned".into()))?;
-    for font in registry.iter() {
-        db.register_face(font.bytes.clone(), font.face_index)?;
+    for font in &registry.fonts {
+        db.register_shared_face(font.bytes.clone(), font.face_index)?;
     }
     let pinned = registry
+        .fonts
         .iter()
         .filter(|font| font.hash_pinned)
         .map(|font| font.sha256.clone())
@@ -375,6 +456,94 @@ pub fn font_requests(
 #[cfg(test)]
 mod runtime_font_tests {
     use super::*;
+
+    fn assert_resource_limit(error: OfficeError) {
+        assert!(matches!(
+            error,
+            OfficeError::Unsupported {
+                code: UnsupportedCode::ResourceLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn local_runtime_font_registry_accepts_exact_face_and_byte_boundaries() {
+        let mut registry = RuntimeFontRegistry::with_limits(2, 5);
+
+        assert!(
+            registry
+                .insert(b"ab", 0, false, "first")
+                .expect("first face")
+        );
+        assert!(
+            registry
+                .insert(b"cde", 0, false, "second")
+                .expect("second face at exact limits")
+        );
+
+        assert_eq!(registry.fonts.len(), 2);
+        assert_eq!(registry.aggregate_bytes, 5);
+    }
+
+    #[test]
+    fn local_runtime_font_registry_refuses_one_face_over_limit_without_mutation() {
+        let mut registry = RuntimeFontRegistry::with_limits(1, 8);
+        registry.insert(b"abc", 0, false, "first").unwrap();
+
+        let error = registry
+            .insert(b"def", 0, false, "second")
+            .expect_err("second face must exceed the face budget");
+
+        assert_resource_limit(error);
+        assert_eq!(registry.fonts.len(), 1);
+        assert_eq!(registry.aggregate_bytes, 3);
+    }
+
+    #[test]
+    fn local_runtime_font_registry_refuses_one_byte_over_limit_without_mutation() {
+        let mut registry = RuntimeFontRegistry::with_limits(2, 5);
+        registry.insert(b"abcd", 0, false, "first").unwrap();
+
+        let error = registry
+            .insert(b"ef", 0, false, "second")
+            .expect_err("aggregate bytes must not exceed the byte budget");
+
+        assert_resource_limit(error);
+        assert_eq!(registry.fonts.len(), 1);
+        assert_eq!(registry.aggregate_bytes, 4);
+    }
+
+    #[test]
+    fn local_runtime_font_registry_maps_byte_accounting_overflow_to_resource_limit() {
+        let mut registry = RuntimeFontRegistry::with_limits(2, usize::MAX);
+        registry.aggregate_bytes = usize::MAX;
+
+        let error = registry
+            .insert(b"x", 0, false, "overflow")
+            .expect_err("checked byte addition must refuse overflow");
+
+        assert_resource_limit(error);
+        assert!(registry.fonts.is_empty());
+        assert_eq!(registry.aggregate_bytes, usize::MAX);
+    }
+
+    #[test]
+    fn local_runtime_font_registry_deduplicates_before_charging_or_copying() {
+        let mut registry = RuntimeFontRegistry::with_limits(1, 3);
+        assert!(registry.insert(b"abc", 0, false, "same").unwrap());
+        let original_bytes = registry.fonts[0].bytes.clone();
+
+        assert!(!registry.insert(b"abc", 0, true, "same").unwrap());
+
+        assert_eq!(registry.fonts.len(), 1);
+        assert_eq!(registry.aggregate_bytes, 3);
+        assert!(registry.fonts[0].hash_pinned);
+        assert!(std::sync::Arc::ptr_eq(
+            &original_bytes,
+            &registry.fonts[0].bytes
+        ));
+    }
 
     #[test]
     fn document_id_is_stable_across_package_patch_releases() {
