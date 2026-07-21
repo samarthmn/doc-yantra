@@ -744,6 +744,32 @@ fn corrupt_second_of_three_slides_names_slide_two() {
     }
 }
 
+#[test]
+fn corrupt_unreferenced_xml_part_is_still_rejected() {
+    let base = minimal_pptx("");
+    let package = office_core::opc::Package::open(&base).unwrap();
+    let mut entries: Vec<(String, Vec<u8>)> = package
+        .part_names()
+        .map(|name| (name.to_string(), package.part(name).unwrap().to_vec()))
+        .collect();
+    entries.push(("ppt/unused.xml".to_string(), b"<not-xml".to_vec()));
+    let references: Vec<_> = entries
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let bytes = zip_package(&references);
+
+    for error in [
+        profile(&bytes, OfficeFormat::Pptx).unwrap_err(),
+        convert(&bytes, OfficeFormat::Pptx, &opts()).unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            office_core::OfficeError::Invalid(detail) if detail.contains("ppt/unused.xml")
+        ));
+    }
+}
+
 /// Common geometry renders; unknown presets retain a named fail-closed reason.
 #[test]
 fn pptx_geometry_profile_accepts_supported_and_names_unknown() {

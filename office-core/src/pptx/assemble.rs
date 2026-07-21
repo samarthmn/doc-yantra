@@ -112,7 +112,7 @@ pub struct PptxDoc {
 impl PptxDoc {
     /// Opens and resolves a `.pptx` package.
     pub fn open(bytes: &[u8], opts: &ConvertOptions) -> Result<PptxDoc> {
-        let pkg = Package::open(bytes)?;
+        let pkg = Package::open_deferred_xml_validation(bytes)?;
         let pres_part = pkg
             .relationships("")?
             .into_iter()
@@ -133,6 +133,17 @@ impl PptxDoc {
         let presentation = parse_str(&pkg, &pres_part, Presentation::parse)?;
 
         let pres_rels = rel_map(&pkg, &pres_part);
+        let slide_labels: HashMap<_, _> = presentation
+            .slide_rel_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rel_id)| {
+                pres_rels
+                    .get(rel_id)
+                    .map(|part| (part.clone(), format!("slide {}", index + 1)))
+            })
+            .collect();
+        pkg.validate_xml_parts(|part| slide_labels.get(part).cloned())?;
 
         let fallback_master_part = pres_rels
             .values()
