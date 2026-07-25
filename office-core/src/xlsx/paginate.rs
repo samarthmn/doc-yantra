@@ -138,11 +138,14 @@ impl XlsxDoc {
             .unwrap_or_else(|| "xl/workbook.xml".to_string());
         // Reject a mismatched-format package (e.g. a .docx routed here): without
         // this the main part parses to zero sheets and we emit an invalid 0-page
-        // PDF. The main part's content type must be spreadsheetml.
-        if !pkg
-            .content_type(&wb_part)
-            .is_some_and(|ct| ct.contains("spreadsheetml"))
-        {
+        // PDF. The main part must carry a workbook content type — either the
+        // spreadsheetml family (.xlsx) or the macro-enabled type Excel writes
+        // for .xlsm/.xltm main parts (macros themselves are ignored).
+        if !pkg.content_type(&wb_part).is_some_and(|ct| {
+            ct.contains("spreadsheetml")
+                || ct == "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
+                || ct == "application/vnd.ms-excel.template.macroEnabled.main+xml"
+        }) {
             return Err(OfficeError::Invalid("main part is not a workbook".into()));
         }
         let workbook = parse(&pkg, &wb_part, Workbook::parse)?;

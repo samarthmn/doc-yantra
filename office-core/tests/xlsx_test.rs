@@ -75,6 +75,62 @@ fn minimal_xlsx(sheet: &str, styles: Option<&str>) -> Vec<u8> {
     zip_package(&parts)
 }
 
+/// A macro-enabled workbook exactly as Excel writes it: the main part's
+/// content type is `application/vnd.ms-excel.sheet.macroEnabled.main+xml`
+/// (NOT the spreadsheetml one) and a vbaProject.bin part is declared.
+fn minimal_real_xlsm(sheet: &str) -> Vec<u8> {
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+    let workbook = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let workbook_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>"#;
+    zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+        ("xl/vbaProject.bin", b"\xd0\xcf\x11\xe0stub"),
+    ])
+}
+
+/// Excel-authored .xlsm files declare the macroEnabled workbook content type;
+/// the mismatched-format guard must accept them (macros are simply ignored)
+/// while still rejecting non-spreadsheet main parts.
+#[test]
+fn real_excel_xlsm_content_type_converts() {
+    let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>macro workbook cell</t></is></c></row></sheetData></worksheet>"#;
+    let bytes = minimal_real_xlsm(sheet);
+
+    let profile =
+        office_core::profile(&bytes, OfficeFormat::Xlsx).expect("profile real xlsm container");
+    assert!(profile.supported, "reasons: {:?}", profile.reasons);
+
+    let output = convert(&bytes, OfficeFormat::Xlsx, &ConvertOptions::default())
+        .expect("real-Excel macroEnabled workbook converts");
+    assert_eq!(output.page_count, 1);
+}
+
+#[test]
+fn non_spreadsheet_main_part_stays_rejected() {
+    let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+    // A wordprocessingml main-part type must still be rejected.
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+    let workbook = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let workbook_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let bad = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+    ]);
+    assert!(
+        convert(&bad, OfficeFormat::Xlsx, &ConvertOptions::default()).is_err(),
+        "a non-spreadsheet main part must stay rejected"
+    );
+}
+
 fn xlsx_with_drawing(drawing: &str, drawing_rels: &str) -> Vec<u8> {
     let image = std::fs::read("../mock-files/png/file1.png").unwrap();
     xlsx_with_drawing_image(drawing, drawing_rels, Some(&image))
