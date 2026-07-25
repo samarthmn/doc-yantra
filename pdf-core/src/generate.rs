@@ -1410,6 +1410,20 @@ fn render_table(
                 draw_header(eng)?;
                 continue;
             }
+            // Logical rows are atomic across page breaks: a row that does
+            // not fit in the remaining space moves whole to the next page
+            // (below its repeated header) instead of splitting mid-row.
+            // Only rows taller than a full header-bearing page may split.
+            if start_line == 0 && total_lines > available_lines {
+                let fresh =
+                    eng.page_h - eng.continuation_top_margin - header_h - eng.margin - size * 0.5;
+                let fresh_lines = (fresh / lead).floor().max(0.0) as usize;
+                if total_lines <= fresh_lines {
+                    eng.break_page();
+                    draw_header(eng)?;
+                    continue;
+                }
+            }
             let line_count = (total_lines - start_line).min(available_lines);
             draw_row(eng, &cell_lines, row, start_line, line_count, bg)?;
             start_line += line_count;

@@ -389,6 +389,65 @@ fn csv_sixty_line_cell_paginates_without_truncation() {
 }
 
 #[test]
+fn csv_row_wrapping_at_page_boundary_stays_atomic() {
+    // Regression: a logical row whose wrapped cell lines crossed the page
+    // boundary used to split mid-row — page N ended with the row's first
+    // lines and page N+1 resumed with orphaned continuation fragments under
+    // the repeated header. A row that fits on a full page must instead move
+    // whole to the next page; only rows taller than a page may split.
+    let mut csv = String::from("OrderId,Notes\n");
+    for i in 0..30 {
+        csv.push_str(&format!(
+            "ROW-{i:03},\"note{i:03}-line1\nnote{i:03}-line2\nnote{i:03}-line3\"\n"
+        ));
+    }
+    let bytes = csv_to_pdf(csv.as_bytes(), &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let n_pages = doc.get_pages().len();
+    assert!(n_pages >= 2, "30 three-line rows must paginate");
+
+    let mut line_occurrences = 0usize;
+    for page in 0..n_pages {
+        let ops = text_ops(&page_content_str(&doc, page));
+        let page_strings: Vec<&str> = ops.iter().map(|(_, _, text)| text.as_str()).collect();
+        // Atomicity: any fragment of a row on this page implies the whole
+        // row (its id cell and all three note lines) is on this page.
+        for i in 0..30 {
+            let fragments = ["line1", "line2", "line3"]
+                .iter()
+                .filter(|l| page_strings.contains(&format!("note{i:03}-{l}").as_str()))
+                .count();
+            if fragments == 0 {
+                continue;
+            }
+            line_occurrences += fragments;
+            assert_eq!(
+                fragments, 3,
+                "row {i} split across a page boundary: page {page} holds only \
+                 {fragments} of its 3 note lines"
+            );
+            assert!(
+                page_strings.contains(&format!("ROW-{i:03}").as_str()),
+                "row {i} note lines on page {page} lack their OrderId cell"
+            );
+        }
+        // The first data baseline under the (repeated) header is a row
+        // START — an OrderId cell — never a continuation fragment.
+        let data_top = ops
+            .iter()
+            .filter(|(_, _, text)| text.starts_with("ROW-") || text.starts_with("note"))
+            .map(|(_, y, _)| *y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            ops.iter()
+                .any(|(_, y, text)| (*y - data_top).abs() < 0.01 && text.starts_with("ROW-")),
+            "page {page}: topmost data line must be a row start, not a continuation"
+        );
+    }
+    assert_eq!(line_occurrences, 90, "every note line renders exactly once");
+}
+
+#[test]
 fn csv_forty_columns_shrinks_font_and_keeps_every_cell_readable() {
     // Regression (CRITICAL): 25+ column CSVs used to render EVERY cell as a
     // bare "..." (total data loss). Column floors + whole-table font
