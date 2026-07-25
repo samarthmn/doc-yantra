@@ -1018,7 +1018,7 @@ mod gate_tests {
         let reports = vec![report];
         let json = serde_json::to_string(&reports).expect("serialize report");
         assert!(json.contains("\"ssim_unweighted\""), "{json}");
-        let rendered = html(&reports, Path::new("tmp/nonexistent-fidelity-report"));
+        let rendered = html(&reports);
         assert!(rendered.contains("legacy gate"), "{rendered}");
         assert!(rendered.contains("weighted diagnostic"), "{rendered}");
         assert!(rendered.contains("geometry gate"), "{rendered}");
@@ -1037,6 +1037,32 @@ mod gate_tests {
                 && case.get("layout_trace").is_some(),
             "Task 0 diagnostic fields are absent: {case}"
         );
+    }
+
+    #[test]
+    fn report_html_shows_every_scored_page_scrollably() {
+        let mut case = report("core", true);
+        case.pages = vec![
+            page_report(1, 0.98, 0.97),
+            page_report(2, 0.95, 0.93),
+            page_report(3, 0.96, 0.94),
+        ];
+        let rendered = html(&[case]);
+        for page in 0..3 {
+            for kind in ["ours", "truth", "heat"] {
+                let img = format!("pages/case-{page}-{kind}.png");
+                assert!(rendered.contains(&img), "missing {img} in {rendered}");
+            }
+        }
+        assert!(rendered.contains("class=\"pages-scroll\""), "{rendered}");
+        assert!(rendered.contains("page 2/3"), "{rendered}");
+    }
+
+    #[test]
+    fn report_html_keeps_page_count_mismatch_note_without_scored_pages() {
+        let rendered = html(&[report("core", false)]);
+        assert!(rendered.contains("no page render"), "{rendered}");
+        assert!(!rendered.contains("class=\"pages-scroll\""), "{rendered}");
     }
 
     #[test]
@@ -1547,10 +1573,7 @@ fn write_reports(reports: &[CaseReport], selected_report_dir: &Path) -> Result<(
         selected_report_dir.join("report.json"),
         serde_json::to_string_pretty(reports)?,
     )?;
-    std::fs::write(
-        selected_report_dir.join("index.html"),
-        html(reports, selected_report_dir),
-    )?;
+    std::fs::write(selected_report_dir.join("index.html"), html(reports))?;
     Ok(())
 }
 
@@ -1601,14 +1624,19 @@ h1{font-size:24px;margin:0 0 4px;letter-spacing:-.02em}
 .bar .tick{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--tick);opacity:.55;border-radius:2px}
 .note{margin:0 18px 14px;padding:8px 12px;background:var(--fail-bg);color:var(--fail);border-radius:8px;
   font-size:12.5px;font-variant-numeric:tabular-nums}
+.pages-scroll{max-height:780px;overflow-y:auto;padding:2px 18px 18px;display:flex;flex-direction:column;gap:16px;
+  scrollbar-width:thin}
+.pageblock .plabel{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+  margin:0 0 6px;font-variant-numeric:tabular-nums}
 .frames{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:2px 18px 18px}
+.pages-scroll .frames{padding:0}
 figure{margin:0}
 figure img{width:100%;height:auto;border:1px solid var(--line);border-radius:6px;background:#fff;display:block}
 figcaption{text-align:center;color:var(--muted);font-size:11px;margin-top:6px;text-transform:uppercase;letter-spacing:.05em}
 @media (max-width:760px){.frames{grid-template-columns:1fr}.metrics{gap:12px;width:100%;justify-content:space-between}}
 "#;
 
-fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
+fn html(reports: &[CaseReport]) -> String {
     let total = reports.len();
     let passing = reports.iter().filter(|r| r.pass).count();
     let failing = total - passing;
@@ -1640,7 +1668,6 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
     // Amplify the meaningful SSIM range [0.8, 1.0] onto the bar so near-passing
     // and failing cases are visually distinct.
     let scale = |v: f64| (((v - 0.8) / 0.2) * 100.0).clamp(0.0, 100.0);
-    let pages = selected_report_dir.join("pages");
 
     let mut cards = String::new();
     for r in &ordered {
@@ -1667,19 +1694,35 @@ fn html(reports: &[CaseReport], selected_report_dir: &Path) -> String {
         } else {
             esc(&r.truth_fonts.join(", "))
         };
-        let frames = if pages.join(format!("{}-0-ours.png", r.name)).exists() {
-            format!(
-                "<div class=\"frames\">\
-                 <figure><img loading=\"lazy\" src=\"pages/{n}-0-ours.png\"><figcaption>ours</figcaption></figure>\
-                 <figure><img loading=\"lazy\" src=\"pages/{n}-0-truth.png\"><figcaption>ground truth</figcaption></figure>\
-                 <figure><img loading=\"lazy\" src=\"pages/{n}-0-heat.png\"><figcaption>heatmap</figcaption></figure>\
-                 </div>",
-                n = esc(&r.name)
-            )
-        } else {
+        let frames = if r.pages.is_empty() {
             String::from(
                 "<div class=\"note\">no page render (page-count mismatch — see note above)</div>",
             )
+        } else {
+            // One ours/truth/heat row per scored page (PNG names are 0-based),
+            // all inside one scroll container so long documents stay browsable.
+            let total_pages = r.pages.len();
+            let blocks: String = r
+                .pages
+                .iter()
+                .map(|p| {
+                    format!(
+                        "<section class=\"pageblock\">\
+                         <div class=\"plabel\">page {page}/{total_pages} · legacy ssim {ssim:.4} · diff {diff:.2}%</div>\
+                         <div class=\"frames\">\
+                         <figure><img loading=\"lazy\" src=\"pages/{n}-{i}-ours.png\"><figcaption>ours</figcaption></figure>\
+                         <figure><img loading=\"lazy\" src=\"pages/{n}-{i}-truth.png\"><figcaption>ground truth</figcaption></figure>\
+                         <figure><img loading=\"lazy\" src=\"pages/{n}-{i}-heat.png\"><figcaption>heatmap</figcaption></figure>\
+                         </div></section>",
+                        page = p.page,
+                        ssim = p.ssim_unweighted,
+                        diff = p.diff_pct * 100.0,
+                        n = esc(&r.name),
+                        i = p.page.saturating_sub(1),
+                    )
+                })
+                .collect();
+            format!("<div class=\"pages-scroll\">{blocks}</div>")
         };
         cards.push_str(&format!(
             "<article class=\"case {cls}\"><div class=\"head\">\
