@@ -596,12 +596,12 @@ fn item_has_rgb(item: &Item, expected: (u8, u8, u8)) -> bool {
         Item::Transform { item, .. } => item_has_rgb(item, expected),
         Item::Glyphs(run) => matches(&run.color),
         Item::Rect { fill, stroke, .. } => {
-            fill.as_ref().is_some_and(&matches)
+            fill.as_ref().is_some_and(matches)
                 || stroke.as_ref().is_some_and(|stroke| matches(&stroke.color))
         }
         Item::Line { stroke, .. } => matches(&stroke.color),
         Item::Path { paint, .. } => {
-            paint.fill.as_ref().is_some_and(&matches)
+            paint.fill.as_ref().is_some_and(matches)
                 || paint
                     .stroke
                     .as_ref()
