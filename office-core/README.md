@@ -179,7 +179,20 @@ outlines and antialiasing therefore still differ.
   hermetic fidelity. Production wasm is fontless and accepts validated
   provider/host-supplied SFNT faces; output uses subset Type0/CIDFontType2
   embedding with ToUnicode (or policy-bounded whole-font embedding when
-  `fsType` forbids subsetting).
+  `fsType` forbids subsetting). OpenType/CFF faces (e.g. the pan-CJK Noto
+  OTFs) embed as Type0/CIDFontType0 with a bare-CFF `FontFile3`
+  (`CIDFontType0C`) and an embedded `/Encoding` CMap. That CMap lists **only
+  content-reachable codes, painted codes allocated lowest**: pdf.js resolves
+  CIDFontType0C glyphs by inverting the CMap per CID (lowest charcode wins),
+  so any extra alias — an identity prelude over the subset glyph ids, or a
+  raw glyph-id fallback code — silently blanks the code the content stream
+  actually uses while extraction stays perfect. Paint-only glyphs in mixed
+  CFF runs draw as vector outlines instead of raw codes; a visible glyph
+  needing two painted codes, or a whole-embedded CFF whose charset is not the
+  `CID == GID` identity, fails closed (`missing_glyph`). `CIDFontType0C` +
+  `FontFile3` alone do not prove viewer compatibility — the paint regression
+  in `tests/office-cjk-pdfjs-paint.test.mjs` renders through pdf.js 3.11.174
+  and asserts actual ink.
 - **wasm-first.** The engine compiles to `wasm32-unknown-unknown` from day one;
   CI enforces it. Production: `--no-default-features --features wasm`.
 

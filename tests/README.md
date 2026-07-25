@@ -10,6 +10,7 @@ DocKosha's suites use):
 | **Redaction package contract** | `tests/redact-package.test.mjs` | `node --test` | `redact_pdf` removes content, validates JSON, preserves recoverable errors, and guards wasm allocation. |
 | **Office npm package** (`@samarthmn/doc-yantra-office`) | `tests/office.test.mjs`, `tests/office-font-provider.test.mjs`, `tests/fontsource-provider*.test.mjs`, `tests/noto-fallback.test.mjs` | `node --test` | Fontless staged/on-demand APIs, deterministic mock provider, Node/browser Fontsource resolution, fallback boot/cache recovery, telemetry, format coverage, and pre-copy guards work through the built package. |
 | **Release contract** | `tests/release-contract.test.mjs` | `node --test` | Versions align and `npm pack --dry-run` proves the Office artifact contains no font files or embedded font programs. |
+| **PDF.js paint regression** | `tests/office-cjk-pdfjs-paint.test.mjs` | `node --test` | pdf.js 3.11.174 (DocKosha's viewer) actually **paints** the CJK glyphs of office-core's CIDFontType0C embeds — structural font assertions alone all passed while every CJK glyph rendered blank. |
 | **Rust engine** (`pdf-core`) | `pdf-core/tests/*.rs` | `cargo test` | The crate's features, plus a real-file end-to-end pipeline. |
 
 ## Running the package suite (Node)
@@ -43,11 +44,15 @@ fonts), rather than a seeded cache.
 
 - The suite is ESM (`.mjs`, using `node:test`). `tests/all.test.mjs` imports
   both package suites. There is **no root
-  `package.json`** — the repo root intentionally has none. A tiny
-  `tests/package.json` (`{"type":"module","main":"all.test.mjs"}`)
-  exists only so the `node --test tests/` **path form** resolves on Node 24+
+  `package.json`** — the repo root intentionally has none. `tests/package.json`
+  exists so the `node --test tests/` **path form** resolves on Node 24+
   (which treats a positional path as a glob and no longer scans a bare
-  directory).
+  directory), and it declares the paint-regression's only dependencies
+  (`pdfjs-dist@3.11.174` pinned to DocKosha's viewer, plus `@napi-rs/canvas`).
+  Run `npm install` inside `tests/` once to enable
+  `office-cjk-pdfjs-paint.test.mjs`; without the install that one file skips
+  with a loud message while every other suite still needs no install. The
+  paint test itself is hermetic — no network, no system fonts.
 - To run the aggregate entry point directly:
   ```bash
   node --test tests/all.test.mjs

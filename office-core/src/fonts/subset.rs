@@ -6,6 +6,12 @@
 //! table. For TrueType faces, compact remapping must retain composite closure,
 //! global hint tables, and the instructions on retained simple and composite
 //! glyphs; `pdf_font_embedding_test` locks that production contract down.
+//!
+//! For CFF-flavoured (OTTO) faces the same `CID == new gid` contract holds
+//! because the subsetter rewrites the output charset to the identity mapping
+//! (and re-emits the ROS as Adobe-Identity-0). Whole-font embeds skip that
+//! rewrite, so the emitter validates the charset before embedding
+//! (`fonts::cff_check`) and fails closed on non-identity CID addressing.
 
 use super::db::Face;
 use super::metrics::FaceMetrics;

@@ -185,6 +185,10 @@ gate_package_suite() {
   # The Office suite configures its deterministic local mock provider; release
   # verification must never depend on a public font CDN.
   node --test tests/all.test.mjs
+  # Font-registering suites run per-file (the wasm font registry is process
+  # global) and include the pdf.js CJK paint regression — CIDFontType0C
+  # structure alone does not prove a viewer paints ink.
+  node --test tests/office-cjk.test.mjs tests/office-cjk-pdfjs-paint.test.mjs
 }
 
 run_gates() {

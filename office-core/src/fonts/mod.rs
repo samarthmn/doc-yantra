@@ -7,6 +7,7 @@
 //! directory — the crate compiles and non-font tests pass without them.
 
 pub mod bundled;
+pub(crate) mod cff_check;
 pub mod db;
 pub mod matching;
 pub mod metrics;

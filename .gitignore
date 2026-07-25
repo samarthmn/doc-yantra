@@ -8,6 +8,9 @@ pdf-core/pdfium/
 # OS
 .DS_Store
 
+# Test-only npm deps for the PDF.js paint regression (tests/package.json).
+tests/node_modules/
+
 # Per-task scratch artifacts (never committed).
 /tmp/
 

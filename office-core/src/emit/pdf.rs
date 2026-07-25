@@ -12,6 +12,7 @@ use crate::oxml::Rgba;
 use crate::profile::Warning;
 use crate::{OfficeError, Result};
 use pdf_writer::types::{ActionType, AnnotationType, CidFontType, SystemInfo, TextRenderingMode};
+use pdf_writer::writers::WMode;
 use pdf_writer::{Content, Date, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use std::collections::{BTreeMap, BTreeSet};
 use ttf_parser::{GlyphId, OutlineBuilder};
@@ -169,7 +170,7 @@ pub(crate) fn emit_with_internal_links(
             .face(*face_id)
             .map(|face| face.family_name.as_str())
             .unwrap_or_default();
-        write_font(&mut pdf, subsets.get(face_id).unwrap(), family);
+        write_font(&mut pdf, subsets.get(face_id).unwrap(), family)?;
     }
 
     // 4. Images.
@@ -277,6 +278,7 @@ pub(crate) fn emit_with_internal_links(
 }
 
 /// Per-face embedding state.
+#[derive(Debug)]
 struct EmbeddedFont {
     subset: SubsetFont,
     /// Bare `CFF ` table for `FontFile3` when the face is CFF-flavoured.
@@ -296,10 +298,18 @@ struct EmbeddedFont {
 
 impl EmbeddedFont {
     fn new(subset: SubsetFont, semantic_pairs: &BTreeSet<SemanticKey>) -> Result<EmbeddedFont> {
-        let cff_program = if subset.is_cff {
-            Some(subset.cff_table().ok_or_else(|| {
+        let is_cff = subset.is_cff;
+        let cff_program = if is_cff {
+            let program = subset.cff_table().ok_or_else(|| {
                 OfficeError::Font("CFF font program has no extractable CFF table".into())
-            })?)
+            })?;
+            // The encoding CMap addresses glyphs as CID == glyph id. The
+            // subsetter guarantees that identity charset; whole-font embeds
+            // (no-subsetting licenses, subsetter fallback) may not, and a
+            // non-identity charset would paint wrong or blank glyphs in every
+            // viewer. Fail closed instead.
+            crate::fonts::cff_check::ensure_identity_cid_addressing(&program)?;
+            Some(program)
         } else {
             None
         };
@@ -328,7 +338,26 @@ impl EmbeddedFont {
                     "font needs more than 65535 CIDs",
                 )
             })?;
-        for (gid, source, owns_advance) in semantic_pairs {
+        let painted_eligible = |(_, source, owns): &SemanticKey| {
+            let mut characters = source.chars();
+            characters.next().is_some() && characters.next().is_none() && *owns
+        };
+        // pdf.js resolves a CIDFontType0C glyph through the LOWEST content code
+        // its /Encoding CMap maps to the glyph's CID, so painted codes must be
+        // allocated below the semantic-only codes that share their backing
+        // glyph. TrueType (Identity-H + CIDToGIDMap stream) resolves each code
+        // independently and keeps the original single-pass order (frozen
+        // goldens).
+        let ordered: Vec<&SemanticKey> = if is_cff {
+            semantic_pairs
+                .iter()
+                .filter(|pair| painted_eligible(pair))
+                .chain(semantic_pairs.iter().filter(|pair| !painted_eligible(pair)))
+                .collect()
+        } else {
+            semantic_pairs.iter().collect()
+        };
+        for (gid, source, owns_advance) in ordered {
             let subset_gid = subset.remap.get(gid).copied().unwrap_or(0);
             semantic_cids.insert((*gid, source.clone(), *owns_advance), next_cid);
             let mut characters = source.chars();
@@ -367,6 +396,42 @@ impl EmbeddedFont {
                     "font needs more than 65535 CIDs",
                 )
             })?;
+        }
+        if is_cff {
+            // pdf.js paints at most one content code per CFF glyph (it inverts
+            // the CMap per CID, lowest code wins). Two painted codes sharing a
+            // glyph mean the higher one silently loses its ink; permit that
+            // only for glyphs that draw nothing anyway (spaces), otherwise
+            // fail closed rather than emit a partially visible PDF.
+            let mut painted_codes_by_gid: BTreeMap<u16, u32> = BTreeMap::new();
+            for code in painted_cids.values() {
+                let backing = cid_to_gid.get(code).copied().unwrap_or(0);
+                *painted_codes_by_gid.entry(backing).or_insert(0) += 1;
+            }
+            let shared: Vec<u16> = painted_codes_by_gid
+                .iter()
+                .filter(|(_, codes)| **codes > 1)
+                .map(|(gid, _)| *gid)
+                .collect();
+            if !shared.is_empty() {
+                let face = ttf_parser::Face::parse(&subset.data, 0).map_err(|error| {
+                    OfficeError::Font(format!(
+                        "embedded font subset could not be parsed for alias checking: {error:?}"
+                    ))
+                })?;
+                for gid in shared {
+                    if glyph_has_ink(&face, gid) {
+                        return Err(OfficeError::unsupported(
+                            crate::UnsupportedCode::MissingGlyph,
+                            format!(
+                                "CFF glyph {gid} backs multiple painted character codes; \
+                                 pdf.js paints only the lowest code per glyph, so the others \
+                                 would silently lose their ink"
+                            ),
+                        ));
+                    }
+                }
+            }
         }
         Ok(EmbeddedFont {
             subset,
@@ -494,7 +559,7 @@ fn collect_semantic_pairs(
     Ok(())
 }
 
-fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) {
+fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) -> Result<()> {
     let is_cff = f.subset.is_cff;
 
     // Type0. CFF programs have no CIDToGIDMap: codes (including semantic CIDs
@@ -531,15 +596,13 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) {
         }
         // CIDFontType2 widths are keyed by code (= CID under Identity-H);
         // CIDFontType0 widths are keyed by the CFF CID the encoding CMap maps
-        // to (= subset gid), where the first mapped code's width wins.
+        // to (= subset gid), so they are exactly the subset glyph advances.
         let widths_by_cid: BTreeMap<u16, f32> = if is_cff {
-            let mut by_gid = BTreeMap::new();
-            for (code, gid) in &f.cid_to_gid {
-                if let Some(width) = f.cid_widths.get(code) {
-                    by_gid.entry(*gid).or_insert(*width);
-                }
-            }
-            by_gid
+            f.subset
+                .widths
+                .iter()
+                .map(|&(gid, width)| (gid, width as f32))
+                .collect()
         } else {
             f.cid_widths.clone()
         };
@@ -597,12 +660,56 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) {
         &miniz_oxide::deflate::compress_to_vec_zlib(&cmap, 6),
     )
     .filter(Filter::FlateDecode);
-    let mapping = if is_cff {
-        build_cff_encoding(&f.cid_to_gid)
+    if is_cff {
+        // Only content-reachable codes may appear: pdf.js inverts this CMap
+        // per glyph (lowest code wins), so an unused identity-prelude entry
+        // over the subset glyph ids would shadow every code the content
+        // streams actually use. Painted codes were allocated below
+        // semantic-only codes for the same reason.
+        let mut content_codes: BTreeMap<u16, u16> = BTreeMap::new();
+        for code in f.semantic_cids.values() {
+            let backing = f.cid_to_gid.get(code).copied().ok_or_else(|| {
+                OfficeError::Internal(format!("content code {code} has no backing glyph"))
+            })?;
+            content_codes.insert(*code, backing);
+        }
+        let mapping = build_cff_encoding(&content_codes);
+        // PDF 32000-1 §9.7.5.3 requires /Type /CMap, /CMapName and
+        // /CIDSystemInfo on an embedded CMap stream dictionary.
+        let mut cmap = pdf.cmap(f.mapping, &mapping);
+        cmap.name(Name(b"DocYantra-CFF-Encoding"));
+        cmap.system_info(SystemInfo {
+            registry: Str(b"Adobe"),
+            ordering: Str(b"Identity"),
+            supplement: 0,
+        });
+        cmap.writing_mode(WMode::Horizontal);
     } else {
-        build_cid_to_gid(&f.cid_to_gid)
-    };
-    pdf.stream(f.mapping, &mapping);
+        pdf.stream(f.mapping, &build_cid_to_gid(&f.cid_to_gid));
+    }
+    Ok(())
+}
+
+/// True when the glyph's outline draws anything (any contour segment exists).
+fn glyph_has_ink(face: &ttf_parser::Face, gid: u16) -> bool {
+    struct InkProbe {
+        inked: bool,
+    }
+    impl OutlineBuilder for InkProbe {
+        fn move_to(&mut self, _: f32, _: f32) {}
+        fn line_to(&mut self, _: f32, _: f32) {
+            self.inked = true;
+        }
+        fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {
+            self.inked = true;
+        }
+        fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
+            self.inked = true;
+        }
+        fn close(&mut self) {}
+    }
+    let mut probe = InkProbe { inked: false };
+    face.outline_glyph(GlyphId(gid), &mut probe).is_some() && probe.inked
 }
 
 fn write_image(pdf: &mut Pdf, img: &EncodedImage, main: Ref, smask: Option<Ref>) {
@@ -939,6 +1046,19 @@ fn draw_glyphs_impl(
         return Ok(());
     }
 
+    // CFF faces carry no raw glyph-id fallback codes: the pruned /Encoding
+    // CMap lists only painted and semantic codes (a raw code would shadow the
+    // glyph's painted code under pdf.js's lowest-code inversion). Paint-only
+    // glyphs in mixed runs are drawn as vector outlines instead.
+    if font.subset.is_cff
+        && run
+            .glyphs
+            .iter()
+            .any(|glyph| painted_code(font, glyph).is_none())
+    {
+        return draw_cff_mixed_run(content, pos, page_h, baseline, run, idx, font);
+    }
+
     if run
         .glyphs
         .iter()
@@ -1107,6 +1227,88 @@ fn draw_glyph_outlines(
             )));
         }
         cursor += glyph.advance_pt;
+    }
+    Ok(())
+}
+
+/// A CFF run containing paint-only glyphs mixes text ops (glyphs with a
+/// painted content code) with vector outlines (the rest). Raw glyph-id codes
+/// must never be shown for CFF faces: they are absent from the pruned
+/// /Encoding CMap, and reintroducing them would shadow the painted codes under
+/// pdf.js's lowest-code CMap inversion.
+fn draw_cff_mixed_run(
+    content: &mut Content,
+    pos: &Positioned,
+    page_h: f64,
+    baseline: f64,
+    run: &crate::layout::GlyphRun,
+    font_index: usize,
+    font: &EmbeddedFont,
+) -> Result<()> {
+    let face = ttf_parser::Face::parse(&font.subset.data, 0).map_err(|error| {
+        OfficeError::Font(format!(
+            "embedded font subset could not be parsed during glyph painting: {error:?}"
+        ))
+    })?;
+    let scale = run.size_pt as f32 / f32::from(face.units_per_em().max(1));
+    let mut cursor = pos.x_pt;
+    set_fill(content, run.color);
+    for glyph in &run.glyphs {
+        if let Some(code) = painted_code(font, glyph) {
+            content.begin_text();
+            content.set_text_rendering_mode(TextRenderingMode::Fill);
+            content.set_font(
+                Name(font_res_name(font_index).as_bytes()),
+                run.size_pt as f32,
+            );
+            content.set_text_matrix([
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                (cursor + glyph.x_offset_pt) as f32,
+                (baseline + glyph.y_offset_pt) as f32,
+            ]);
+            content.show(Str(&code.to_be_bytes()));
+            content.end_text();
+        } else {
+            let subset_gid = font.subset.remap.get(&glyph.gid).copied().ok_or_else(|| {
+                OfficeError::Font(format!(
+                    "painted glyph {} is absent from the embedded font subset",
+                    glyph.gid
+                ))
+            })?;
+            let outlined = {
+                let mut outline = PdfGlyphOutline {
+                    content,
+                    origin_x: (cursor + glyph.x_offset_pt) as f32,
+                    origin_y: (baseline + glyph.y_offset_pt) as f32,
+                    scale,
+                    current: (0.0, 0.0),
+                    contour_start: (0.0, 0.0),
+                };
+                let outlined = face
+                    .outline_glyph(GlyphId(subset_gid), &mut outline)
+                    .is_some();
+                if outlined {
+                    outline.content.fill_nonzero();
+                }
+                outlined
+            };
+            if !outlined && face.glyph_bounding_box(GlyphId(subset_gid)).is_some() {
+                return Err(OfficeError::Font(format!(
+                    "painted glyph {} has bounds but its outline could not be emitted",
+                    glyph.gid
+                )));
+            }
+        }
+        cursor += glyph.advance_pt;
+    }
+    if let Some(dec) = run.underline {
+        draw_decor(content, pos, page_h, run, dec.thickness_pt, dec.y_offset_pt);
+    }
+    if let Some(dec) = run.strike {
+        draw_decor(content, pos, page_h, run, dec.thickness_pt, dec.y_offset_pt);
     }
     Ok(())
 }
@@ -1535,14 +1737,20 @@ fn is_semantic_glyph(glyph: &crate::layout::PlacedGlyph) -> bool {
     glyph.y_offset_pt <= crate::text::semantic::SEMANTIC_START_Y
 }
 
-fn painted_cid(font: &EmbeddedFont, glyph: &crate::layout::PlacedGlyph) -> u16 {
-    if glyph.ch != '\0'
-        && !is_semantic_glyph(glyph)
-        && let Some(cid) = font.painted_cids.get(&(glyph.gid, glyph.ch))
-    {
-        return *cid;
+/// The painted content code for a visible glyph, when one exists. CFF runs
+/// must draw glyphs without one as outlines; TrueType runs may fall back to
+/// the raw subset glyph id (see [`painted_cid`]).
+fn painted_code(font: &EmbeddedFont, glyph: &crate::layout::PlacedGlyph) -> Option<u16> {
+    if glyph.ch != '\0' && !is_semantic_glyph(glyph) {
+        font.painted_cids.get(&(glyph.gid, glyph.ch)).copied()
+    } else {
+        None
     }
-    font.subset.remap.get(&glyph.gid).copied().unwrap_or(0)
+}
+
+fn painted_cid(font: &EmbeddedFont, glyph: &crate::layout::PlacedGlyph) -> u16 {
+    painted_code(font, glyph)
+        .unwrap_or_else(|| font.subset.remap.get(&glyph.gid).copied().unwrap_or(0))
 }
 
 fn draw_decor(
@@ -1840,6 +2048,94 @@ mod tests {
             stream.lines().filter(|line| *line == "Q").count(),
             "unbalanced clipping state: {stream}"
         );
+    }
+
+    /// Subsets the repo-committed Noto Sans CJK JP OTF (a CID-keyed CFF face)
+    /// down to `chars`, returning the subset plus each char's ORIGINAL gid.
+    fn cff_fixture(chars: &[char]) -> (SubsetFont, BTreeMap<char, u16>) {
+        use crate::fonts::db::FontDb;
+        use crate::fonts::metrics::FaceMetrics;
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pdf-core/wasm/pkg/fonts/NotoSansCJKjp-Regular.otf"
+        ))
+        .expect("repo-committed Noto Sans CJK JP OTF");
+        let mut db = FontDb::with_bundled();
+        db.register(bytes).expect("register CFF face");
+        let face = db.faces().last().expect("registered face");
+        let metrics = FaceMetrics::new(face.parsed().unwrap());
+        let mut used = BTreeSet::new();
+        let mut gid_of = BTreeMap::new();
+        for &ch in chars {
+            let gid = metrics.glyph_id(ch).expect("glyph for fixture char");
+            used.insert(gid);
+            gid_of.insert(ch, gid.0);
+        }
+        let subset = subset_for_pdf(face, &used, &BTreeMap::new()).expect("subset CFF face");
+        assert!(subset.is_cff, "fixture face must be CFF-flavoured");
+        (subset, gid_of)
+    }
+
+    /// pdf.js paints a CIDFontType0C glyph only through the LOWEST charcode its
+    /// /Encoding CMap maps to the glyph's CID. Painted codes must therefore
+    /// sort below any semantic-only code sharing the same backing glyph.
+    #[test]
+    fn cff_painted_codes_stay_below_semantic_only_codes() {
+        let (subset, gid_of) = cff_fixture(&['あ', 'い']);
+        let gid = gid_of[&'あ'];
+        let pairs = BTreeSet::from([
+            // Sorts first in the pair set, but must NOT get the lower code:
+            // it is semantic-only (owns no advance) and paints nothing.
+            (gid, "あ".to_string(), false),
+            // Painted single-char owner of the same backing glyph.
+            (gid, "い".to_string(), true),
+        ]);
+        let embedded = EmbeddedFont::new(subset, &pairs).expect("embedded font state");
+        let painted = embedded.painted_cids[&(gid, 'い')];
+        let semantic_only = embedded.semantic_cids[&(gid, "あ".to_string(), false)];
+        assert_eq!(
+            embedded.cid_to_gid[&painted], embedded.cid_to_gid[&semantic_only],
+            "both codes back onto the same glyph"
+        );
+        assert!(
+            painted < semantic_only,
+            "painted code {painted} must be the lowest code for its CID or pdf.js \
+             blanks it (semantic-only code {semantic_only} shadows it)"
+        );
+    }
+
+    /// Two painted codes can only share one visible glyph by losing one of
+    /// them in pdf.js. That must fail closed instead of shipping a PDF whose
+    /// second code silently paints nothing.
+    #[test]
+    fn cff_visible_glyph_shared_by_two_painted_codes_fails_closed() {
+        let (subset, gid_of) = cff_fixture(&['一']);
+        let gid = gid_of[&'一'];
+        let pairs = BTreeSet::from([
+            (gid, "一".to_string(), true),
+            (gid, "二".to_string(), true), // second painted owner of the same glyph
+        ]);
+        let error = EmbeddedFont::new(subset, &pairs)
+            .expect_err("two painted codes on one inked CFF glyph must fail closed");
+        assert!(
+            error.to_string().starts_with("unsupported:"),
+            "collision must surface as a typed unsupported error: {error}"
+        );
+    }
+
+    /// Blank glyphs (spaces) may alias freely: pdf.js skipping the higher code
+    /// changes nothing visually, and exact per-code ToUnicode is preserved.
+    #[test]
+    fn cff_blank_glyph_alias_stays_supported() {
+        let (subset, gid_of) = cff_fixture(&[' ']);
+        let gid = gid_of[&' '];
+        let pairs = BTreeSet::from([
+            (gid, " ".to_string(), true),
+            (gid, "\u{A0}".to_string(), true),
+        ]);
+        let embedded =
+            EmbeddedFont::new(subset, &pairs).expect("blank-glyph aliases stay supported");
+        assert_eq!(embedded.painted_cids.len(), 2);
     }
 
     #[test]

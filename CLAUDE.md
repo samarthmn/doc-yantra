@@ -74,7 +74,9 @@ cargo build --release              # CLI binary at target/release/pdfcore
 ```
 pdfium resolution order: `PDFIUM_DYNAMIC_LIB_PATH` → crate-local `pdfium/lib/` → system.
 
-npm package suite (from repo root — validates the **built** `pkg/`, no install):
+npm package suite (from repo root — validates the **built** `pkg/`; packages
+load by path, no install; the PDF.js paint regression alone needs a one-time
+`npm install` inside `tests/` and skips loudly otherwise):
 ```bash
 node --test tests/                 # requires pkg/ built first (see below)
 ```
