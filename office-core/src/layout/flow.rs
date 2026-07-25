@@ -22,9 +22,9 @@ use super::{
 use crate::diagnostics::{self, LayoutTrace, LineTrace, LineTraceDraft};
 use crate::oxml::numbering::{NumFmt, format_number};
 use crate::oxml::wml::{
-    AnchorOrigin, BlockContent, ColumnSpec, FrameAlign, FrameHeightRule, FrameProps, HdrFtrKind,
-    HdrFtrRef, InlineContent, NoteKind, PageVAlign, Paragraph, Run, RunContent, RunProps, SectPr,
-    SectType, VertAlign, WrapMode,
+    AnchorOrigin, BlockContent, BreakKind, ColumnSpec, FrameAlign, FrameHeightRule, FrameProps,
+    HdrFtrKind, HdrFtrRef, InlineContent, NoteKind, PageVAlign, Paragraph, Run, RunContent,
+    RunProps, SectPr, SectType, VertAlign, WrapMode,
 };
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
@@ -1642,7 +1642,35 @@ fn counter_label(
     let Some((text, level)) = counters.advance(doc, num_ref)? else {
         return Ok(None);
     };
+    if page_break_is_only_content(p) {
+        // Word parity (chinese fidelity ground truth, [0029]): a numbered
+        // paragraph whose only content is a page break consumes its number
+        // without displaying it.
+        return Ok(None);
+    }
     build_label(doc, warnings, p, &text, &level)
+}
+
+/// True when the paragraph paints nothing itself: it has at least one page
+/// break and every other inline piece is a bookmark or another break.
+fn page_break_is_only_content(p: &Paragraph) -> bool {
+    let mut saw_page_break = false;
+    for inline in &p.runs {
+        match inline {
+            InlineContent::Bookmark(_) => {}
+            InlineContent::Run(run) => {
+                for content in &run.content {
+                    match content {
+                        RunContent::Break(BreakKind::Page) => saw_page_break = true,
+                        RunContent::Break(_) => {}
+                        _ => return false,
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+    saw_page_break
 }
 
 // --- Pagination -------------------------------------------------------------

@@ -1242,24 +1242,59 @@ fn layout_paragraph_with_wrap_context(
     if lines.is_empty() {
         let h = para_mark_height(doc, para, true);
         let height_pt = apply_line_spacing(line_spacing, h);
-        lines.push(Line {
-            height_pt,
-            items: Vec::new(),
-            anchored_items: Vec::new(),
-            bookmarks: Vec::new(),
-            internal_links: Vec::new(),
-            page_break_after: false,
-            column_break_after: false,
-            bottom_slack_pt: line_spacing_bottom_slack(line_spacing, height_pt, h),
-            #[cfg(feature = "fidelity-diagnostics")]
-            diagnostics: LineTraceDraft {
-                ascent_pt: height_pt * 0.8,
-                descent_pt: height_pt * 0.2,
-                natural_height_pt: h,
-                text_natural_height_pt: h,
-                ..LineTraceDraft::default()
-            },
-        });
+        if label.is_some() && para.sect_break.is_none() {
+            // Word parity (chinese fidelity ground truth, [0024]/[0026]): an
+            // empty numbered paragraph still displays its bare label on its
+            // own line. Place a content-less first line so the label's runs
+            // and geometry land exactly as they would ahead of body text.
+            // An empty paragraph that carries a section break is the section
+            // mark itself; Word does not display its number (no [0036] after
+            // the last body paragraph of the same ground truth).
+            let initial_x = left + first_offset;
+            let (content_w, base_x, clearance_pt) = constrained_width(0, content_first, initial_x);
+            let mut line = place_line(
+                &atoms,
+                &[],
+                content_w,
+                avail_width_pt,
+                base_x,
+                alignment,
+                line_spacing,
+                true,
+                default_tab,
+                &tab_stops,
+                label.as_ref(),
+                numbering_geometry.as_ref(),
+                rtl,
+                page_horizontal,
+            )?;
+            // The paragraph mark still governs the minimum empty-line height.
+            if line.height_pt < height_pt {
+                line.height_pt = height_pt;
+                line.bottom_slack_pt = line_spacing_bottom_slack(line_spacing, height_pt, h);
+            }
+            prepend_line_clearance(std::slice::from_mut(&mut line), clearance_pt);
+            lines.push(line);
+        } else {
+            lines.push(Line {
+                height_pt,
+                items: Vec::new(),
+                anchored_items: Vec::new(),
+                bookmarks: Vec::new(),
+                internal_links: Vec::new(),
+                page_break_after: false,
+                column_break_after: false,
+                bottom_slack_pt: line_spacing_bottom_slack(line_spacing, height_pt, h),
+                #[cfg(feature = "fidelity-diagnostics")]
+                diagnostics: LineTraceDraft {
+                    ascent_pt: height_pt * 0.8,
+                    descent_pt: height_pt * 0.2,
+                    natural_height_pt: h,
+                    text_natural_height_pt: h,
+                    ..LineTraceDraft::default()
+                },
+            });
+        }
     }
 
     #[cfg(feature = "fidelity-diagnostics")]
