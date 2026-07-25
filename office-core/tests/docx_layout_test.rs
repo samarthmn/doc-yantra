@@ -2036,6 +2036,57 @@ fn internal_anchor_link_targets_bookmark_page_and_dangling_anchor_is_not_annotat
     );
 }
 
+/// Every top-level object in `pdf` containing a `/Subtype /Link` entry.
+fn pdf_link_annotation_dicts(pdf: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(pdf)
+        .split("endobj")
+        .filter(|object| object.contains("/Subtype /Link"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn link_annotations_write_a_zero_border_so_viewers_draw_no_box() {
+    // PDF 32000-1 §12.5.2: without /Border an annotation defaults to a border
+    // of width 1, which many viewers paint as a black rectangle around the
+    // link text. Word/LibreOffice references show only the styled text.
+    let document = wrap_document(
+        r#"<w:p><w:hyperlink r:id="rIdLink"><w:r><w:t>Site</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let document_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#;
+    let external_bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", document_rels.as_bytes()),
+    ]);
+    let external =
+        convert(&external_bytes, OfficeFormat::Docx, &opts()).expect("external link converts");
+
+    let internal_bytes = minimal_docx(
+        r#"<w:p><w:hyperlink w:anchor="target"><w:r><w:t>Jump</w:t></w:r></w:hyperlink><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>Destination</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#,
+    );
+    let internal =
+        convert(&internal_bytes, OfficeFormat::Docx, &opts()).expect("internal link converts");
+
+    for (label, pdf) in [("external", &external.pdf), ("internal", &internal.pdf)] {
+        let dicts = pdf_link_annotation_dicts(pdf);
+        assert!(
+            !dicts.is_empty(),
+            "{label}: expected at least one /Subtype /Link annotation"
+        );
+        for dict in &dicts {
+            assert!(
+                dict.contains("/Border [0 0 0]"),
+                "{label}: link annotation must suppress the viewer default border \
+                 with /Border [0 0 0]:\n{dict}"
+            );
+        }
+    }
+}
+
 #[test]
 fn internal_links_cross_table_boundaries_with_exact_page_and_vertical_destination() {
     let bytes = minimal_docx(

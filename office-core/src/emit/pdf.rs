@@ -228,6 +228,9 @@ pub(crate) fn emit_with_internal_links(
         for (aref, rect, target) in annots {
             let mut a = pdf.annotation(*aref);
             a.subtype(AnnotationType::Link).rect(*rect);
+            // Suppress the PDF 32000-1 §12.5.2 default border (width 1), which
+            // viewers otherwise paint as a black box around the link text.
+            a.border(0.0, 0.0, 0.0, None);
             match target {
                 AnnotationTarget::Public(LinkTarget::Url(url)) => {
                     a.action()
