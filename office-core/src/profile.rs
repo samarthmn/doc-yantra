@@ -1011,19 +1011,49 @@ fn profile_docx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
     sections.push(&document.final_sect);
     let has_multi_section_columns =
         sections.len() >= 2 && sections.iter().any(|section| section.cols.is_multi());
+    // CFF (OTTO) faces carry emit-time fail-closed verdicts (pdf.js
+    // painted-code collisions, non-identity whole-embed charsets); run the
+    // embedding preflight so profile cannot approve what emission rejects.
+    let uses_cff_face = collector.fonts_used.iter().any(|family| {
+        [(400, false), (700, false), (400, true), (700, true)]
+            .iter()
+            .any(|&(weight, italic)| {
+                crate::fonts::resolve(&db, family, weight, italic)
+                    .face
+                    .and_then(|id| db.face(id))
+                    .is_some_and(|face| face.data.len() >= 4 && &face.data[..4] == b"OTTO")
+            })
+    });
     if profile.supported
         && (body_anchor_count > 1
             || body_has_page_float
             || body_has_floating_table
             || has_footnote_references
             || collector.has_tab_leaders
-            || has_multi_section_columns)
+            || has_multi_section_columns
+            || uses_cff_face)
     {
         let layout_doc = crate::layout::WordDoc::open(bytes, opts)?;
         match crate::layout::layout_docx(&layout_doc) {
-            Ok((_, warnings)) => {
+            Ok((laid, warnings)) => {
                 for warning in warnings {
                     profile.add_warning_deduped(warning);
+                }
+                if uses_cff_face
+                    && let Err(error) =
+                        crate::emit::pdf::preflight_embedded_fonts(&laid, &layout_doc.fonts)
+                {
+                    match error {
+                        OfficeError::Unsupported { code, detail } => {
+                            profile.add_reason_deduped(code, detail)
+                        }
+                        OfficeError::Font(detail) => {
+                            profile.add_reason_deduped(UnsupportedCode::MissingGlyph, detail)
+                        }
+                        OfficeError::Invalid(detail) | OfficeError::Internal(detail) => {
+                            profile.add_reason_deduped(UnsupportedCode::InvalidFile, detail)
+                        }
+                    }
                 }
             }
             Err(error) => match error {

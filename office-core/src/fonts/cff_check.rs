@@ -74,6 +74,20 @@ impl Parser<'_> {
         self.u16_at(at)
     }
 
+    /// `base + offset - 1` for a 1-based INDEX data offset, checked (32-bit
+    /// wasm wraps silently in release) and bounded by the table length so a
+    /// crafted offset can never alias back into already-parsed bytes.
+    fn index_position(&self, data_at: usize, offset: usize) -> Result<usize> {
+        let position = data_at
+            .checked_add(offset)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or_else(|| malformed("CFF INDEX offset overflows"))?;
+        if position > self.cff.len() {
+            return Err(malformed("CFF INDEX offset exceeds the table"));
+        }
+        Ok(position)
+    }
+
     /// Returns the byte offset just past the INDEX starting at `at`.
     fn skip_index(&self, at: usize) -> Result<usize> {
         let count = usize::from(self.u16_at(at)?);
@@ -87,7 +101,7 @@ impl Parser<'_> {
         let offsets_at = at + 3;
         let data_at = offsets_at + (count + 1) * off_size;
         let last = self.offset_at(offsets_at + count * off_size, off_size)?;
-        Ok(data_at + last - 1)
+        self.index_position(data_at, last)
     }
 
     /// Start/end (absolute) of the first entry of the INDEX at `at`.
@@ -104,7 +118,13 @@ impl Parser<'_> {
         let data_at = offsets_at + (count + 1) * off_size;
         let first = self.offset_at(offsets_at, off_size)?;
         let second = self.offset_at(offsets_at + off_size, off_size)?;
-        Ok((data_at + first - 1, data_at + second - 1))
+        if second < first {
+            return Err(malformed("CFF INDEX offsets are not ascending"));
+        }
+        Ok((
+            self.index_position(data_at, first)?,
+            self.index_position(data_at, second)?,
+        ))
     }
 
     fn offset_at(&self, at: usize, off_size: usize) -> Result<usize> {
@@ -176,6 +196,11 @@ fn parse_top_dict(data: &[u8]) -> Result<TopDict> {
     let mut operands: Vec<i64> = Vec::new();
     let mut i = 0usize;
     while i < data.len() {
+        // CFF caps the operand stack at 48 entries; enforcing it bounds the
+        // allocation a crafted DICT region can force.
+        if operands.len() > 48 {
+            return Err(malformed("CFF DICT operand stack exceeds 48 entries"));
+        }
         let b0 = data[i];
         match b0 {
             32..=246 => {
@@ -345,7 +370,37 @@ mod tests {
     #[test]
     fn truncated_cff_is_rejected() {
         let cff = synthetic_cid_cff(&[1, 2, 3]);
-        assert!(ensure_identity_cid_addressing(&cff[..cff.len() / 2]).is_err());
+        // The parser's last required bytes are the CharStrings INDEX count
+        // (the builder places it at charset_at 48 + charset 7 = 55, plus 2
+        // count bytes); every truncation before that must fail cleanly. This
+        // sweeps the INDEX headers, the DICT operand parser, and the charset
+        // walk rather than sampling a single prefix.
+        let required = 57;
+        assert!(
+            ensure_identity_cid_addressing(&cff[..required]).is_ok(),
+            "the synthetic layout changed; update `required`"
+        );
+        for len in 0..required {
+            assert!(
+                ensure_identity_cid_addressing(&cff[..len]).is_err(),
+                "truncation at {len} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_index_offset_is_rejected_not_wrapped() {
+        // Name INDEX declaring count=1, offSize=4, offsets [1, 0xFFFF_FFFF]:
+        // the unchecked `data_at + last - 1` wrapped on 32-bit wasm (release
+        // builds wrap silently) back into already-parsed bytes, letting
+        // crafted garbage pass validation. Checked-and-bounded arithmetic must
+        // reject it identically on every target.
+        let mut cff = vec![1u8, 0, 4, 4];
+        cff.extend_from_slice(&[0, 1, 4]); // count=1, offSize=4
+        cff.extend_from_slice(&[0, 0, 0, 1]); // offset[0] = 1
+        cff.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // offset[1]
+        cff.extend_from_slice(&[0u8; 32]);
+        assert!(ensure_identity_cid_addressing(&cff).is_err());
     }
 
     #[test]

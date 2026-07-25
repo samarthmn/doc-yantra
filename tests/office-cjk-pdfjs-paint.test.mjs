@@ -52,6 +52,15 @@ const CASES = [
 
 const stack = loadPdfjsStack();
 
+if (stack === null && process.env.REQUIRE_PDFJS_PAINT === "1") {
+  // Release gates must never pass on a skip: scripts/release.sh sets this
+  // after installing tests/package-lock.json, so a missing pdf.js stack at
+  // this point is an environment failure, not an optional feature.
+  throw new Error(
+    "REQUIRE_PDFJS_PAINT=1 but pdfjs-dist/@napi-rs/canvas failed to load from tests/node_modules",
+  );
+}
+
 test("office-core wasm package: pdf.js paints CJK ink", { skip: stack === null }, async (t) => {
   if (stack === null) return; // skip surfaced above; keep node happy
   assert.equal(

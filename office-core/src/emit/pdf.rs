@@ -63,7 +63,10 @@ pub(crate) fn emit_with_internal_links(
         {
             warnings.push(w.clone());
         }
-        subsets.insert(*face_id, EmbeddedFont::new(subset, &usage.semantic_pairs)?);
+        subsets.insert(
+            *face_id,
+            EmbeddedFont::new(subset, &usage.semantic_pairs, &usage.visible_pairs)?,
+        );
     }
 
     let mut pdf = Pdf::new();
@@ -277,6 +280,23 @@ pub(crate) fn emit_with_internal_links(
     Ok(pdf.finish())
 }
 
+/// Runs the font subsetting/embedding validation exactly as emission would,
+/// without writing a PDF. The DocProfile layout preflight calls this so the
+/// emit-time fail-closed verdicts (pdf.js painted-code collisions on shared
+/// CFF glyphs, non-identity whole-embed CFF charsets) cannot disagree with
+/// `profile()`.
+pub(crate) fn preflight_embedded_fonts(laid: &LaidOutDocument, fonts: &FontDb) -> Result<()> {
+    let used = collect_used_glyphs(laid)?;
+    for (face_id, usage) in &used {
+        let Some(face) = fonts.face(*face_id) else {
+            continue;
+        };
+        let subset = subset_for_pdf(face, &usage.gids, &usage.chars)?;
+        EmbeddedFont::new(subset, &usage.semantic_pairs, &usage.visible_pairs)?;
+    }
+    Ok(())
+}
+
 /// Per-face embedding state.
 #[derive(Debug)]
 struct EmbeddedFont {
@@ -297,7 +317,11 @@ struct EmbeddedFont {
 }
 
 impl EmbeddedFont {
-    fn new(subset: SubsetFont, semantic_pairs: &BTreeSet<SemanticKey>) -> Result<EmbeddedFont> {
+    fn new(
+        subset: SubsetFont,
+        semantic_pairs: &BTreeSet<SemanticKey>,
+        visible_pairs: &BTreeSet<(u16, char)>,
+    ) -> Result<EmbeddedFont> {
         let is_cff = subset.is_cff;
         let cff_program = if is_cff {
             let program = subset.cff_table().ok_or_else(|| {
@@ -402,9 +426,15 @@ impl EmbeddedFont {
             // the CMap per CID, lowest code wins). Two painted codes sharing a
             // glyph mean the higher one silently loses its ink; permit that
             // only for glyphs that draw nothing anyway (spaces), otherwise
-            // fail closed rather than emit a partially visible PDF.
+            // fail closed rather than emit a partially visible PDF. Only pairs
+            // that visible glyphs actually paint count: semantic-cluster pairs
+            // share the cluster's owner gid but render through the invisible
+            // Tr-3 layer, never as ink.
             let mut painted_codes_by_gid: BTreeMap<u16, u32> = BTreeMap::new();
-            for code in painted_cids.values() {
+            for (pair, code) in &painted_cids {
+                if !visible_pairs.contains(pair) {
+                    continue;
+                }
                 let backing = cid_to_gid.get(code).copied().unwrap_or(0);
                 *painted_codes_by_gid.entry(backing).or_insert(0) += 1;
             }
@@ -456,6 +486,11 @@ struct UsedFace {
     gids: BTreeSet<GlyphId>,
     chars: BTreeMap<GlyphId, char>,
     semantic_pairs: BTreeSet<SemanticKey>,
+    /// Pairs that visible glyphs actually paint through their content code
+    /// (`painted_cid`). Semantic-cluster pairs share the cluster's owner gid
+    /// and never paint ink themselves, so only these pairs participate in the
+    /// pdf.js one-code-per-glyph collision gate.
+    visible_pairs: BTreeSet<(u16, char)>,
 }
 
 type SemanticKey = (u16, String, bool);
@@ -528,6 +563,7 @@ fn collect_item_glyphs(
                 entry.gids.insert(gid);
                 if g.ch != '\0' {
                     entry.semantic_pairs.insert((g.gid, g.ch.to_string(), true));
+                    entry.visible_pairs.insert((g.gid, g.ch));
                 }
             }
         }
@@ -2090,7 +2126,8 @@ mod tests {
             // Painted single-char owner of the same backing glyph.
             (gid, "い".to_string(), true),
         ]);
-        let embedded = EmbeddedFont::new(subset, &pairs).expect("embedded font state");
+        let embedded =
+            EmbeddedFont::new(subset, &pairs, &BTreeSet::new()).expect("embedded font state");
         let painted = embedded.painted_cids[&(gid, 'い')];
         let semantic_only = embedded.semantic_cids[&(gid, "あ".to_string(), false)];
         assert_eq!(
@@ -2115,12 +2152,99 @@ mod tests {
             (gid, "一".to_string(), true),
             (gid, "二".to_string(), true), // second painted owner of the same glyph
         ]);
-        let error = EmbeddedFont::new(subset, &pairs)
+        let visible = BTreeSet::from([(gid, '\u{4e00}'), (gid, '\u{4e8c}')]);
+        let error = EmbeddedFont::new(subset, &pairs, &visible)
             .expect_err("two painted codes on one inked CFF glyph must fail closed");
         assert!(
             error.to_string().starts_with("unsupported:"),
             "collision must surface as a typed unsupported error: {error}"
         );
+    }
+
+    /// A CFF run mixing coded glyphs with paint-only glyphs must show exactly
+    /// the painted codes as text and draw the rest as vector outlines: a raw
+    /// glyph-id code is absent from the pruned /Encoding CMap and would shadow
+    /// the glyph's painted code under pdf.js's lowest-code inversion.
+    #[test]
+    fn cff_mixed_run_draws_paint_only_glyphs_as_outlines() {
+        use crate::layout::{GlyphRun, PlacedGlyph};
+
+        let (subset, gid_of) = cff_fixture(&['一', '二']);
+        let coded_gid = gid_of[&'一'];
+        let outlined_gid = gid_of[&'二'];
+        let pairs = BTreeSet::from([(coded_gid, "一".to_string(), true)]);
+        let visible = BTreeSet::from([(coded_gid, '一')]);
+        let embedded = EmbeddedFont::new(subset, &pairs, &visible).expect("embedded font state");
+        let painted_code = embedded.painted_cids[&(coded_gid, '一')];
+
+        let face = FaceId(0);
+        let glyph = |gid: u16, ch: char| PlacedGlyph {
+            gid,
+            advance_pt: 10.0,
+            x_offset_pt: 0.0,
+            y_offset_pt: 0.0,
+            ch,
+        };
+        let page = Page {
+            width_pt: 200.0,
+            height_pt: 100.0,
+            items: vec![Positioned {
+                x_pt: 10.0,
+                y_pt: 20.0,
+                item: Item::Glyphs(GlyphRun {
+                    face,
+                    size_pt: 10.0,
+                    color: Rgba {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 1.0,
+                    },
+                    base_direction: None,
+                    glyphs: vec![glyph(coded_gid, '一'), glyph(outlined_gid, '\0')],
+                    underline: None,
+                    strike: None,
+                }),
+            }],
+        };
+        let bytes = render_page(&page, &BTreeMap::from([(face, embedded)]), &[face])
+            .expect("render mixed CFF run");
+        let stream = String::from_utf8_lossy(&bytes);
+
+        let shows = stream.matches("Tj").count();
+        assert_eq!(
+            shows, 1,
+            "exactly the coded glyph is shown as text: {stream}"
+        );
+        // pdf-writer octal-escapes non-printable bytes inside literal strings.
+        let [hi, lo] = painted_code.to_be_bytes();
+        let code_octal = format!("(\\{hi:03o}\\{lo:03o}) Tj");
+        assert!(
+            stream.contains(&code_octal),
+            "the painted content code must be shown (looked for {code_octal}): {stream}"
+        );
+        assert!(
+            stream.contains(" c\n") || stream.contains(" l\n"),
+            "paint-only glyph must draw as outline segments: {stream}"
+        );
+        assert!(
+            stream.contains("f\n"),
+            "outline contours must be filled: {stream}"
+        );
+    }
+
+    /// Semantic-cluster pairs share their cluster's owner gid without painting
+    /// ink (the visible glyphs are paint-only; extraction rides the invisible
+    /// Tr-3 layer). Sharing an inked glyph between such pairs must therefore
+    /// stay supported — only pairs painted by visible glyphs can collide.
+    #[test]
+    fn cff_cluster_pairs_sharing_an_inked_glyph_stay_supported() {
+        let (subset, gid_of) = cff_fixture(&['一']);
+        let gid = gid_of[&'一'];
+        let pairs = BTreeSet::from([(gid, "一".to_string(), true), (gid, "二".to_string(), true)]);
+        let embedded = EmbeddedFont::new(subset, &pairs, &BTreeSet::new())
+            .expect("cluster-owner aliases never paint through their codes");
+        assert_eq!(embedded.painted_cids.len(), 2);
     }
 
     /// Blank glyphs (spaces) may alias freely: pdf.js skipping the higher code
@@ -2133,8 +2257,9 @@ mod tests {
             (gid, " ".to_string(), true),
             (gid, "\u{A0}".to_string(), true),
         ]);
-        let embedded =
-            EmbeddedFont::new(subset, &pairs).expect("blank-glyph aliases stay supported");
+        let visible = BTreeSet::from([(gid, ' '), (gid, '\u{A0}')]);
+        let embedded = EmbeddedFont::new(subset, &pairs, &visible)
+            .expect("blank-glyph aliases stay supported");
         assert_eq!(embedded.painted_cids.len(), 2);
     }
 
@@ -2149,7 +2274,8 @@ mod tests {
             warning: None,
         };
         let pairs = BTreeSet::from([(5, "का".to_string(), true), (5, "कि".to_string(), true)]);
-        let embedded = EmbeddedFont::new(subset, &pairs).expect("embedded font state");
+        let embedded =
+            EmbeddedFont::new(subset, &pairs, &BTreeSet::new()).expect("embedded font state");
         let first = embedded.semantic_cids[&(5, "का".to_string(), true)];
         let second = embedded.semantic_cids[&(5, "कि".to_string(), true)];
 
@@ -2177,6 +2303,7 @@ mod tests {
                 pdfium_actual_text(&source, Some(text_core::Direction::Rtl)),
                 true,
             )]),
+            &BTreeSet::new(),
         )
         .unwrap();
         let cid = *embedded.semantic_cids.values().next().unwrap();
@@ -2198,8 +2325,12 @@ mod tests {
             is_cff: false,
             warning: None,
         };
-        let embedded = EmbeddedFont::new(subset, &BTreeSet::from([(5, "word".to_string(), true)]))
-            .expect("semantic font state");
+        let embedded = EmbeddedFont::new(
+            subset,
+            &BTreeSet::from([(5, "word".to_string(), true)]),
+            &BTreeSet::new(),
+        )
+        .expect("semantic font state");
         let page = Page {
             width_pt: 100.0,
             height_pt: 100.0,
@@ -2248,7 +2379,8 @@ mod tests {
             warning: None,
         };
         let pairs = BTreeSet::from([(5, "A".to_string(), true)]);
-        let embedded = EmbeddedFont::new(subset, &pairs).expect("embedded font state");
+        let embedded =
+            EmbeddedFont::new(subset, &pairs, &BTreeSet::new()).expect("embedded font state");
         let glyph = PlacedGlyph {
             gid: 5,
             advance_pt: 6.0,
@@ -2336,7 +2468,7 @@ mod tests {
             is_cff: false,
             warning: None,
         };
-        let embedded = EmbeddedFont::new(subset, &pairs).unwrap();
+        let embedded = EmbeddedFont::new(subset, &pairs, &BTreeSet::new()).unwrap();
         let face = FaceId(0);
         let page = Page {
             width_pt: 200.0,
@@ -2448,7 +2580,7 @@ mod tests {
             is_cff: false,
             warning: None,
         };
-        let embedded = EmbeddedFont::new(subset, &BTreeSet::new()).unwrap();
+        let embedded = EmbeddedFont::new(subset, &BTreeSet::new(), &BTreeSet::new()).unwrap();
 
         assert_eq!(embedded.to_unicode.get(&2), None);
         let cmap = String::from_utf8(build_to_unicode(&embedded.to_unicode)).unwrap();
@@ -2471,7 +2603,7 @@ mod tests {
             is_cff: false,
             warning: None,
         };
-        let embedded = EmbeddedFont::new(subset, &BTreeSet::new()).unwrap();
+        let embedded = EmbeddedFont::new(subset, &BTreeSet::new(), &BTreeSet::new()).unwrap();
         let page = Page {
             width_pt: 100.0,
             height_pt: 100.0,
