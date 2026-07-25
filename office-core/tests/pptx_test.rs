@@ -568,6 +568,57 @@ fn three_slide_pptx_with_corrupt_second() -> Vec<u8> {
     ])
 }
 
+/// A deck whose bullet declarations live ONLY in the master's
+/// `p:txStyles/p:bodyStyle` — exactly where PowerPoint stores default body
+/// bullets. The lvl props also carry buClr/buFont/spcBef noise that real
+/// masters always include; those must be tolerated, not fail the deck.
+fn body_placeholder_deck_with_master_txstyles_bullets() -> Vec<u8> {
+    let ct = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/></Types>"#;
+    let root_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
+    let pres = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId2"/></p:sldMasterIdLst></p:presentation>"#;
+    let pres_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/></Relationships>"#;
+    let slide = br#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6096000" cy="3657600"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>First point</a:t></a:r></a:p><a:p><a:pPr lvl="1"/><a:r><a:t>Nested detail</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+    let slide_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+    let layout = br#"<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sldLayout>"#;
+    let layout_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
+    let master = br#"<?xml version="1.0"?><p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree/></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr marL="342900" indent="-342900" algn="l"><a:spcBef><a:spcPct val="20000"/></a:spcBef><a:buClr><a:schemeClr val="accent1"/></a:buClr><a:buFont typeface="Arial" pitchFamily="34" charset="0"/><a:buChar char="&#8226;"/><a:defRPr sz="3200"/></a:lvl1pPr><a:lvl2pPr marL="742950" indent="-285750"><a:buFont typeface="Arial"/><a:buChar char="&#8211;"/><a:defRPr sz="2800"/></a:lvl2pPr></p:bodyStyle><p:otherStyle/></p:txStyles></p:sldMaster>"#;
+    let master_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+    zip_package(&[
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", root_rels),
+        ("ppt/presentation.xml", pres),
+        ("ppt/_rels/presentation.xml.rels", pres_rels),
+        ("ppt/slides/slide1.xml", slide),
+        ("ppt/slides/_rels/slide1.xml.rels", slide_rels),
+        ("ppt/slideLayouts/slideLayout1.xml", layout),
+        ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", layout_rels),
+        ("ppt/slideMasters/slideMaster1.xml", master),
+        ("ppt/slideMasters/_rels/slideMaster1.xml.rels", master_rels),
+    ])
+}
+
+/// PowerPoint stores default body-placeholder bullets in the master's
+/// `p:txStyles/p:bodyStyle`; dropping them flattens every list in the deck
+/// (found by the LLM fidelity judge on the synthetic corpus: bullets absent,
+/// scores 54/62).
+#[test]
+fn body_placeholder_inherits_master_txstyles_bullets() {
+    let bytes = body_placeholder_deck_with_master_txstyles_bullets();
+    let doc = PptxDoc::open(&bytes, &ConvertOptions::default()).expect("open deck");
+    let (laid, _) = render_pptx(&doc).expect("render deck");
+    let text = page_text(&laid.pages[0]);
+    assert!(
+        text.contains('\u{2022}'),
+        "level-1 body bullet from p:txStyles must render: {text:?}"
+    );
+    assert!(
+        text.contains('\u{2013}'),
+        "level-2 dash bullet from p:txStyles must render: {text:?}"
+    );
+    assert!(text.contains("First point"), "{text:?}");
+    assert!(text.contains("Nested detail"), "{text:?}");
+}
+
 fn page_text(page: &Page) -> String {
     let mut s = String::new();
     for pos in &page.items {

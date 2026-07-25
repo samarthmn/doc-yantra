@@ -1,7 +1,7 @@
 //! Placeholder inheritance: a slide shape with no geometry inherits its `xfrm`
 //! from the matching placeholder on the layout, then the master.
 
-use super::assemble::Category;
+use super::assemble::{Category, TextDefaults};
 use crate::oxml::pml::{
     Placeholder, ShapeElem, Slide, TextBody, TextBulletStyle, TextListStyleLevel, TextRun, Xfrm,
 };
@@ -32,6 +32,7 @@ pub fn resolve_text_body(
     own: &TextBody,
     layout: &Slide,
     master: &Slide,
+    defaults: &TextDefaults,
 ) -> TextBody {
     let Some(ph) = ph else { return own.clone() };
     let layout_body = find_ph_text(ph, layout);
@@ -46,7 +47,16 @@ pub fn resolve_text_body(
         let master_style = master_body
             .and_then(|body| body.list_style.get(level))
             .and_then(Option::as_ref);
-        apply_list_level(paragraph, own_style, layout_style, master_style);
+        // The master's `p:txStyles` bucket is the lowest-precedence source —
+        // it is where PowerPoint stores the default placeholder bullets.
+        let txstyles_style = defaults.level_style(category(ph), level);
+        apply_list_level(
+            paragraph,
+            own_style,
+            layout_style,
+            master_style,
+            txstyles_style,
+        );
     }
     resolved
 }
@@ -56,8 +66,9 @@ fn apply_list_level(
     own: Option<&TextListStyleLevel>,
     layout: Option<&TextListStyleLevel>,
     master: Option<&TextListStyleLevel>,
+    txstyles: Option<&TextListStyleLevel>,
 ) {
-    let styles = [own, layout, master];
+    let styles = [own, layout, master, txstyles];
     if paragraph.align.is_none() {
         paragraph.align = styles
             .iter()
@@ -87,7 +98,7 @@ fn apply_list_level(
     }
 }
 
-fn apply_run_defaults(run: &mut TextRun, styles: [Option<&TextListStyleLevel>; 3]) {
+fn apply_run_defaults(run: &mut TextRun, styles: [Option<&TextListStyleLevel>; 4]) {
     let defaults = styles.map(|style| style.map(|style| &style.default_run));
     if run.bold.is_none() {
         run.bold = defaults.iter().flatten().find_map(|run| run.bold);

@@ -131,7 +131,8 @@ fn render_elem(
             if let Some(body) = text
                 && !body.paragraphs.is_empty()
             {
-                let body = resolve_text_body(ph.as_ref(), body, &rs.layout, &rs.master);
+                let body =
+                    resolve_text_body(ph.as_ref(), body, &rs.layout, &rs.master, &rs.text_defaults);
                 place_text(
                     doc,
                     rs,

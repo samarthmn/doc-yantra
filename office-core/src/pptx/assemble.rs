@@ -11,9 +11,12 @@ use crate::drawing::image::{
 use crate::fonts::FontDb;
 use crate::layout::{DocDates, EncodedImage, ImageId, LinkTarget};
 use crate::opc::Package;
-use crate::oxml::pml::{ColorMapOverride, CropRect, Fill, Presentation, ShapeElem, Slide};
+use crate::oxml::pml::{
+    ColorMapOverride, CropRect, Fill, Presentation, ShapeElem, Slide, TextBulletStyle,
+    TextListStyleLevel,
+};
 use crate::oxml::theme::Theme;
-use crate::oxml::{A, P, attr, child, children, parse_f64};
+use crate::oxml::{A, P, attr, child, children, parse_f64, parse_i64};
 use crate::pptx::table_style::{TableCellStyle, TableStyleList};
 use crate::{ConvertOptions, OfficeError, Result, UnsupportedCode};
 use std::collections::{BTreeSet, HashMap};
@@ -47,6 +50,13 @@ pub struct TextDefaults {
     pub body: Vec<f64>,
     /// Other style sizes by level.
     pub other: Vec<f64>,
+    /// Title bullet/alignment level styles from `p:txStyles`.
+    pub title_levels: Vec<Option<TextListStyleLevel>>,
+    /// Body bullet/alignment level styles from `p:txStyles` — where
+    /// PowerPoint stores the default body-placeholder bullets.
+    pub body_levels: Vec<Option<TextListStyleLevel>>,
+    /// Other bullet/alignment level styles from `p:txStyles`.
+    pub other_levels: Vec<Option<TextListStyleLevel>>,
 }
 
 impl TextDefaults {
@@ -65,6 +75,17 @@ impl TextDefaults {
                 Category::Body => 18.0,
                 Category::Other => 18.0,
             })
+    }
+
+    /// The `p:txStyles` level style for a placeholder category and level, the
+    /// lowest-precedence source in the list-style inheritance chain.
+    pub fn level_style(&self, category: Category, level: usize) -> Option<&TextListStyleLevel> {
+        let table = match category {
+            Category::Title => &self.title_levels,
+            Category::Body => &self.body_levels,
+            Category::Other => &self.other_levels,
+        };
+        table.get(level).and_then(Option::as_ref)
     }
 }
 
@@ -537,7 +558,11 @@ fn effective_color_map(master: &Slide, layout: &Slide, slide: &Slide) -> HashMap
     mapping
 }
 
-/// Parses master `p:txStyles` into default sizes per bucket + level.
+/// Parses master `p:txStyles` into default sizes plus tolerant bullet and
+/// alignment level styles per bucket. Tolerance matters: real masters always
+/// decorate these levels with buClr/buFont/spcBef and similar cosmetics; only
+/// the pieces the engine renders (bullet declaration, alignment) are lifted,
+/// everything else is deliberately ignored rather than failed.
 fn parse_text_defaults(xml: &str) -> TextDefaults {
     let mut defs = TextDefaults::default();
     let Ok(doc) = roxmltree::Document::parse(xml) else {
@@ -548,22 +573,57 @@ fn parse_text_defaults(xml: &str) -> TextDefaults {
             continue;
         }
         for bucket in children(node) {
-            let target = match bucket.tag_name().name() {
-                "titleStyle" => &mut defs.title,
-                "bodyStyle" => &mut defs.body,
-                "otherStyle" => &mut defs.other,
+            let (sizes, levels) = match bucket.tag_name().name() {
+                "titleStyle" => (&mut defs.title, &mut defs.title_levels),
+                "bodyStyle" => (&mut defs.body, &mut defs.body_levels),
+                "otherStyle" => (&mut defs.other, &mut defs.other_levels),
                 _ => continue,
             };
+            if levels.is_empty() {
+                levels.resize(9, None);
+            }
             for lvl in children(bucket) {
                 let name = lvl.tag_name().name();
-                if let Some(rest) = name.strip_prefix("lvl")
-                    && rest.ends_with("pPr")
-                {
-                    let sz = child(lvl, A, "defRPr")
-                        .and_then(|r| parse_f64(attr(r, A, "sz")))
-                        .map(|s| s / 100.0)
-                        .unwrap_or(18.0);
-                    target.push(sz);
+                let Some(index) = name
+                    .strip_prefix("lvl")
+                    .and_then(|value| value.strip_suffix("pPr"))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| (1..=9).contains(value))
+                    .map(|value| value - 1)
+                else {
+                    continue;
+                };
+                let sz = child(lvl, A, "defRPr")
+                    .and_then(|r| parse_f64(attr(r, A, "sz")))
+                    .map(|s| s / 100.0)
+                    .unwrap_or(18.0);
+                sizes.push(sz);
+                let mut style = TextListStyleLevel {
+                    align: attr(lvl, A, "algn").map(str::to_string),
+                    ..TextListStyleLevel::default()
+                };
+                for property in children(lvl) {
+                    match property.tag_name().name() {
+                        "buNone" => style.bullet = Some(TextBulletStyle::None),
+                        "buChar" => {
+                            style.bullet = attr(property, A, "char")
+                                .map(str::to_string)
+                                .map(TextBulletStyle::Character)
+                        }
+                        "buAutoNum" => {
+                            style.bullet = attr(property, A, "type").map(|format| {
+                                TextBulletStyle::AutoNumber(
+                                    format.to_string(),
+                                    parse_i64(attr(property, A, "startAt")).unwrap_or(1).max(1)
+                                        as u32,
+                                )
+                            })
+                        }
+                        _ => {}
+                    }
+                }
+                if style.align.is_some() || style.bullet.is_some() {
+                    levels[index] = Some(style);
                 }
             }
         }

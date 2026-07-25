@@ -510,7 +510,11 @@ fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
         major: &Option<String>,
         minor: &Option<String>,
         theme: &Theme,
-        inheritance: Option<(&crate::oxml::pml::Slide, &crate::oxml::pml::Slide)>,
+        inheritance: Option<(
+            &crate::oxml::pml::Slide,
+            &crate::oxml::pml::Slide,
+            &crate::pptx::TextDefaults,
+        )>,
         shape_count: &mut u32,
         doc: &PptxDoc,
         rels: &std::collections::HashMap<String, String>,
@@ -574,7 +578,9 @@ fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
                     if let Some(body) = text {
                         let resolved_body = inheritance.map_or_else(
                             || body.clone(),
-                            |(layout, master)| resolve_text_body(ph.as_ref(), body, layout, master),
+                            |(layout, master, defaults)| {
+                                resolve_text_body(ph.as_ref(), body, layout, master, defaults)
+                            },
                         );
                         let category = ph
                             .as_ref()
@@ -781,7 +787,7 @@ fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
             &major,
             &minor,
             &rs.theme,
-            Some((&rs.layout, &rs.master)),
+            Some((&rs.layout, &rs.master, &rs.text_defaults)),
             &mut shape_count,
             &doc,
             &rs.rels,

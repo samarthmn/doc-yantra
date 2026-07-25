@@ -12,5 +12,5 @@ pub mod render;
 pub(crate) mod table_style;
 pub mod textbody;
 
-pub use assemble::PptxDoc;
+pub use assemble::{PptxDoc, TextDefaults};
 pub use render::render_pptx;
