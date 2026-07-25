@@ -90,8 +90,16 @@ fn page_break_only_numbered_paragraph_consumes_but_hides_its_label() {
         extracted.contains("[3]"),
         "the page-break-only paragraph must still consume its number: {extracted:?}"
     );
+    // No bracketed label AND no bare start-value fallback: when the flow
+    // suppresses the label, layout's standalone resolve_label fallback must
+    // not resurrect it as an unformatted "2" (or "1", the level start).
     assert!(
-        !extracted.contains("[2]"),
+        !extracted.contains('2'),
         "Word hides the label of a page-break-only numbered paragraph: {extracted:?}"
+    );
+    assert_eq!(
+        extracted.matches('1').count(),
+        1,
+        "no start-value fallback label may appear: {extracted:?}"
     );
 }

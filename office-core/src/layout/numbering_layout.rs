@@ -344,6 +344,31 @@ pub struct ListContext {
     pub label: PlacedLabel,
 }
 
+/// True when the paragraph paints nothing itself: it has at least one page
+/// break and every other inline piece is a bookmark or another break. Word
+/// consumes such a paragraph's number without displaying it (chinese fidelity
+/// ground truth, [0029]).
+pub(crate) fn page_break_is_only_content(para: &Paragraph) -> bool {
+    use crate::oxml::wml::{BreakKind, InlineContent, RunContent};
+    let mut saw_page_break = false;
+    for inline in &para.runs {
+        match inline {
+            InlineContent::Bookmark(_) => {}
+            InlineContent::Run(run) => {
+                for content in &run.content {
+                    match content {
+                        RunContent::Break(BreakKind::Page) => saw_page_break = true,
+                        RunContent::Break(_) => {}
+                        _ => return false,
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+    saw_page_break
+}
+
 /// Retained for the paragraph layout API: builds a label only when the effective
 /// paragraph carries numbering *and* a caller-driven counter is unavailable.
 /// (Flow drives [`ListCounters`] directly; this is the standalone fallback used
@@ -357,6 +382,12 @@ pub fn resolve_label(
     let Some(num_ref) = eff_para.numbering else {
         return Ok(None);
     };
+    // The flow's counter path suppresses these labels after advancing the
+    // counter; this standalone fallback must not resurrect them with the
+    // level's start value.
+    if page_break_is_only_content(para) {
+        return Ok(None);
+    }
     let Some(level) = doc.numbering.resolve(num_ref.num_id, num_ref.ilvl) else {
         return Ok(None);
     };
