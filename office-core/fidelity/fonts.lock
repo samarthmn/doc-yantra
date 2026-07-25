@@ -8,7 +8,7 @@ catalog_version = "v36"
 subset = "latin"
 weight = 400
 style = "normal"
-sha256 = "d492bf3111ec2c5f5270069728b4471ace9c29921223192130469a34a8f5961e"
+sha256 = "b5ac80e459c345e7c8a41d5c5652bea0bb9f61eeeb24b9cd499572257690ad3e"
 internal_version = "Version 1.33"
 
 [[fonts]]
@@ -173,7 +173,7 @@ catalog_version = "v21"
 subset = "latin-ext"
 weight = 400
 style = "normal"
-sha256 = "0eb0d964994d195e3c55d7c4e6d1402b1616c02088516767b7a240d2573d3fdc"
+sha256 = "b2b4b3b0002c88d8a8b17e84ebafc203e29062fd6a894bebf9c462c8a52c8495"
 internal_version = "0.83"
 
 [[fonts]]
