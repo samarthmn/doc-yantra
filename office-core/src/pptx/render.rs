@@ -4,17 +4,17 @@
 use super::assemble::{Category, PptxDoc, ResolvedSlide};
 use super::geometry::{Contour, evaluate_shape, resolve_colorspec, solid_fill_color};
 use super::inherit::{resolve_text_body, resolve_xfrm, shape_category};
-use super::table_style::CellBounds;
+use super::table_style::{CellBounds, TableCellStyle};
 use super::textbody::layout_textbody;
 use crate::layout::{FillRule, Item, LaidOutDocument, Page, PathPaint, Positioned, Stroke};
 use crate::oxml::pml::{
-    Fill, LineSpec, PictureMode, PmlTable, ShapeElem, ShapeProps, TextBody, Xfrm,
+    Fill, LineSpec, PictureMode, PmlCell, PmlTable, ShapeElem, ShapeProps, TextBody, Xfrm,
 };
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
-use crate::resource_limits::PageBudget;
+use crate::resource_limits::{PageBudget, checked_count_add, try_reserve};
 use crate::{OfficeError, Result, UnsupportedCode};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Renders all slides into a laid-out document.
 pub fn render_pptx(doc: &PptxDoc) -> Result<(LaidOutDocument, Vec<Warning>)> {
@@ -71,6 +71,7 @@ fn render_pptx_with_page_budget(
                         elem,
                         &rs.master_rels,
                         offset,
+                        true,
                         &mut page,
                         &mut warnings,
                     )?;
@@ -85,13 +86,23 @@ fn render_pptx_with_page_budget(
                     elem,
                     &rs.layout_rels,
                     offset,
+                    true,
                     &mut page,
                     &mut warnings,
                 )?;
             }
         }
         for elem in &rs.slide.shapes {
-            render_elem(doc, rs, elem, &rs.rels, offset, &mut page, &mut warnings)?;
+            render_elem(
+                doc,
+                rs,
+                elem,
+                &rs.rels,
+                offset,
+                true,
+                &mut page,
+                &mut warnings,
+            )?;
         }
         pages.push(page);
     }
@@ -113,6 +124,7 @@ fn render_elem(
     elem: &ShapeElem,
     rels: &HashMap<String, String>,
     offset: (f64, f64),
+    quantize_picture_frame: bool,
     page: &mut Page,
     warnings: &mut Vec<Warning>,
 ) -> Result<()> {
@@ -149,7 +161,12 @@ fn render_elem(
             transform_new_items(page, item_start, shape_matrix(x, y, xfrm));
         }
         ShapeElem::Picture { props, drawing } => {
-            let xfrm = props.xfrm.unwrap_or_default();
+            let authored_xfrm = props.xfrm.unwrap_or_default();
+            let xfrm = if quantize_picture_frame {
+                powerpoint_web_picture_frame(authored_xfrm)
+            } else {
+                authored_xfrm
+            };
             let item_start = page.items.len();
             if let Some(error) = &drawing.unsupported {
                 return Err(OfficeError::unsupported(error.code, error.detail.clone()));
@@ -244,6 +261,7 @@ fn render_elem(
                         child,
                         &diagram.rels,
                         (frame.x_pt + offset.0, frame.y_pt + offset.1),
+                        false,
                         page,
                         warnings,
                     )?;
@@ -297,13 +315,40 @@ fn render_elem(
         } => {
             let item_start = page.items.len();
             for child in children {
-                render_elem(doc, rs, child, rels, (0.0, 0.0), page, warnings)?;
+                render_elem(doc, rs, child, rels, (0.0, 0.0), false, page, warnings)?;
             }
             transform_new_items(page, item_start, group_matrix(*xfrm, *child_space, offset));
         }
         ShapeElem::Unsupported(_) => {} // reported by profile; convert fails first
     }
     Ok(())
+}
+
+const POWERPOINT_WEB_DEVICE_PIXEL_PT: f64 = 72.0 / 96.0;
+
+fn powerpoint_web_picture_frame(mut xfrm: Xfrm) -> Xfrm {
+    let values = [xfrm.x_pt, xfrm.y_pt, xfrm.w_pt, xfrm.h_pt];
+    if values.iter().any(|value| !value.is_finite())
+        || xfrm.w_pt < 0.0
+        || xfrm.h_pt < 0.0
+        || xfrm.rot_deg != 0.0
+        || xfrm.flip_h
+        || xfrm.flip_v
+    {
+        return xfrm;
+    }
+    let snap = |value: f64| {
+        (value / POWERPOINT_WEB_DEVICE_PIXEL_PT).round() * POWERPOINT_WEB_DEVICE_PIXEL_PT
+    };
+    let left = snap(xfrm.x_pt);
+    let top = snap(xfrm.y_pt);
+    let right = snap(xfrm.x_pt + xfrm.w_pt);
+    let bottom = snap(xfrm.y_pt + xfrm.h_pt);
+    xfrm.x_pt = left;
+    xfrm.y_pt = top;
+    xfrm.w_pt = (right - left).max(0.0);
+    xfrm.h_pt = (bottom - top).max(0.0);
+    xfrm
 }
 
 fn is_placeholder(elem: &ShapeElem) -> bool {
@@ -1079,138 +1124,584 @@ fn render_table(
     warnings: &mut Vec<Warning>,
     page: &mut Page,
 ) -> Result<()> {
-    let border = Stroke {
-        width_pt: 0.75,
-        color: Rgba::opaque(Rgb::new(0, 0, 0)),
-        dash: None,
-    };
-    let row_heights: Vec<f64> = table
-        .rows
-        .iter()
-        .map(|row| {
-            if row.height_pt > 0.0 {
-                row.height_pt
-            } else {
-                24.0
-            }
-        })
-        .collect();
+    validate_table_grid(table)?;
+    let mut row_heights = Vec::new();
+    try_reserve(
+        &mut row_heights,
+        table.rows.len(),
+        "PowerPoint table row heights",
+    )?;
+    for row in &table.rows {
+        row_heights.push(if row.height_pt > 0.0 {
+            row.height_pt
+        } else {
+            24.0
+        });
+    }
+    let x_position_count = checked_count_add(
+        "PowerPoint table column positions",
+        table.col_widths.len(),
+        1,
+    )?;
+    let mut x_positions = Vec::new();
+    try_reserve(
+        &mut x_positions,
+        x_position_count,
+        "PowerPoint table column positions",
+    )?;
+    x_positions.push(x0);
+    for width in &table.col_widths {
+        if !width.is_finite() || *width < 0.0 {
+            return Err(OfficeError::Invalid(
+                "PowerPoint table column width is not finite and non-negative".to_string(),
+            ));
+        }
+        let next = x_positions.last().copied().unwrap_or(x0) + width;
+        if !next.is_finite() {
+            return Err(OfficeError::Invalid(
+                "PowerPoint table column positions overflow finite geometry".to_string(),
+            ));
+        }
+        x_positions.push(next);
+    }
+    let y_position_count =
+        checked_count_add("PowerPoint table row positions", row_heights.len(), 1)?;
+    let mut y_positions = Vec::new();
+    try_reserve(
+        &mut y_positions,
+        y_position_count,
+        "PowerPoint table row positions",
+    )?;
+    y_positions.push(y0);
+    for height in &row_heights {
+        let next = y_positions.last().copied().unwrap_or(y0) + height;
+        if !next.is_finite() {
+            return Err(OfficeError::Invalid(
+                "PowerPoint table row positions overflow finite geometry".to_string(),
+            ));
+        }
+        y_positions.push(next);
+    }
     if let Some(fill) = &table.fill {
-        let width = table.col_widths.iter().sum::<f64>().max(48.0);
-        let height = row_heights.iter().sum::<f64>();
+        let width = x_positions.last().copied().unwrap_or(x0) - x0;
+        let height = y_positions.last().copied().unwrap_or(y0) - y0;
         render_fill(doc, rs, rels, fill, x0, y0, width, height, page)?;
     }
-    let mut y = y0;
+
+    let row_count = table.rows.len();
+    let col_count = table.col_widths.len();
+    let mut cells = Vec::new();
+    let authored_cell_count = table.rows.iter().try_fold(0usize, |count, row| {
+        checked_count_add("PowerPoint table cells", count, row.cells.len())
+    })?;
+    try_reserve(&mut cells, authored_cell_count, "PowerPoint table cells")?;
     for (row_index, row) in table.rows.iter().enumerate() {
-        let mut x = x0;
         let mut col = 0usize;
-        let row_h = row_heights[row_index];
         for cell in &row.cells {
-            let span = cell.grid_span.max(1) as usize;
-            let w: f64 = table
-                .col_widths
-                .iter()
-                .skip(col)
-                .take(span)
-                .sum::<f64>()
-                .max(48.0);
+            let next_col = col.checked_add(1).ok_or_else(|| {
+                OfficeError::Invalid("PowerPoint table cell cursor overflows usize".to_string())
+            })?;
+            if next_col > col_count {
+                return Err(OfficeError::Invalid(
+                    "PowerPoint table row has more cells than a:tblGrid columns".to_string(),
+                ));
+            }
+            let span = usize::try_from(cell.grid_span.max(1)).map_err(|_| {
+                OfficeError::Invalid("PowerPoint table gridSpan exceeds usize".to_string())
+            })?;
+            let col_end = col.checked_add(span).ok_or_else(|| {
+                OfficeError::Invalid("PowerPoint table column span overflows usize".to_string())
+            })?;
+            if col_end > col_count {
+                return Err(OfficeError::Invalid(
+                    "PowerPoint table cell span exceeds a:tblGrid".to_string(),
+                ));
+            }
             if cell.h_merge || cell.v_merge {
-                x += w;
-                col += span;
+                col = next_col;
                 continue;
             }
-            let cell_h = row_heights
-                .iter()
-                .skip(row_index)
-                .take(cell.row_span.max(1) as usize)
-                .sum::<f64>();
+            let row_span = usize::try_from(cell.row_span.max(1)).map_err(|_| {
+                OfficeError::Invalid("PowerPoint table rowSpan exceeds usize".to_string())
+            })?;
+            let row_end = row_index.checked_add(row_span).ok_or_else(|| {
+                OfficeError::Invalid("PowerPoint table row span overflows usize".to_string())
+            })?;
+            if row_end > row_count {
+                return Err(OfficeError::Invalid(
+                    "PowerPoint table cell span exceeds its row count".to_string(),
+                ));
+            }
             let style = doc.table_cell_style(table, row_index, col)?;
-            // Cell fill.
-            if let Some(fill) = &cell.fill {
-                render_fill(doc, rs, rels, fill, x, y, w, cell_h, page)?;
-            } else if let Some(fill) = style.as_ref().and_then(|style| style.fill.as_ref()) {
-                render_fill(doc, rs, rels, fill, x, y, w, cell_h, page)?;
-            }
-            // Borders (4 edges).
-            for (edge, (dx0, dy0, dx1, dy1)) in [
-                (0, (0.0, 0.0, w, 0.0)),
-                (2, (0.0, cell_h, w, cell_h)),
-                (3, (0.0, 0.0, 0.0, cell_h)),
-                (1, (w, 0.0, w, cell_h)),
-            ] {
-                let styled_line = style.as_ref().and_then(|style| {
-                    style.border(
-                        edge,
-                        CellBounds {
-                            row_start: row_index,
-                            row_end: row_index + cell.row_span.max(1) as usize - 1,
-                            col_start: col,
-                            col_end: col + span - 1,
-                            row_count: table.rows.len(),
-                            col_count: table.col_widths.len(),
-                        },
-                    )
-                });
-                let line = if cell.border_specified[edge] {
-                    cell.borders[edge].as_ref()
-                } else {
-                    styled_line
-                };
-                let edge_border = line
-                    .map(|line| Stroke {
-                        width_pt: line.width_pt.max(0.25),
-                        color: resolve_colorspec(&rs.theme, &line.color),
-                        dash: None,
-                    })
-                    .or_else(|| style.is_none().then(|| border.clone()));
-                let Some(edge_border) = edge_border else {
-                    continue;
-                };
-                page.items.push(Positioned {
-                    x_pt: x + dx0,
-                    y_pt: y + dy0,
-                    item: Item::Line {
-                        dx_pt: dx1 - dx0,
-                        dy_pt: dy1 - dy0,
-                        stroke: edge_border,
-                    },
-                });
-            }
-            // Cell text.
-            if let Some(body) = &cell.text {
-                let styled_body = style
-                    .as_ref()
-                    .map_or_else(|| body.clone(), |style| style.apply_text(body));
-                let layout = layout_textbody(
-                    &doc.fonts,
-                    &rs.theme,
-                    &rs.text_defaults,
-                    warnings,
-                    &styled_body,
-                    Category::Other,
-                    (w - cell.inset_lr.0 - cell.inset_lr.1).max(1.0),
-                    |rel_id| doc.link_target(rels, rel_id),
-                )?;
-                let free = (cell_h - cell.inset_tb.0 - cell.inset_tb.1 - layout.height_pt).max(0.0);
-                let text_y = match cell.anchor.as_deref() {
-                    Some("ctr") => cell.inset_tb.0 + free / 2.0,
-                    Some("b") => cell.inset_tb.0 + free,
-                    _ => cell.inset_tb.0,
-                };
-                for li in layout.items {
-                    page.items.push(Positioned {
-                        x_pt: x + cell.inset_lr.0 + li.x_pt,
-                        y_pt: y + text_y + li.y_pt,
-                        item: li.item,
-                    });
-                }
-            }
-            x += w;
-            col += span;
+            cells.push(TableRenderCell {
+                cell,
+                style,
+                bounds: CellBounds {
+                    row_start: row_index,
+                    row_end: row_end - 1,
+                    col_start: col,
+                    col_end: col_end - 1,
+                    row_count,
+                    col_count,
+                },
+                x: x_positions[col],
+                y: y_positions[row_index],
+                width: x_positions[col_end] - x_positions[col],
+                height: y_positions[row_end] - y_positions[row_index],
+            });
+            col = next_col;
         }
-        y += row_h;
+    }
+
+    // DrawingML paints cell backgrounds first. Borders are resolved on the
+    // shared physical grid and painted once afterwards, so a later cell fill
+    // cannot erase an earlier cell's right/bottom edge.
+    for rendered in &cells {
+        let cell = rendered.cell;
+        let style = rendered.style.as_ref();
+        if let Some(fill) = &cell.fill {
+            render_fill(
+                doc,
+                rs,
+                rels,
+                fill,
+                rendered.x,
+                rendered.y,
+                rendered.width,
+                rendered.height,
+                page,
+            )?;
+        } else if let Some(fill) = style.and_then(|style| style.fill.as_ref()) {
+            render_fill(
+                doc,
+                rs,
+                rels,
+                fill,
+                rendered.x,
+                rendered.y,
+                rendered.width,
+                rendered.height,
+                page,
+            )?;
+        }
+    }
+
+    let mut edges = BTreeMap::new();
+    for rendered in &cells {
+        for edge in 0..4 {
+            let candidate = table_edge_candidate(rendered, edge, rs);
+            match edge {
+                0 => {
+                    for segment in rendered.bounds.col_start..=rendered.bounds.col_end {
+                        insert_table_edge(
+                            &mut edges,
+                            TableEdgeKey::Horizontal(rendered.bounds.row_start, segment),
+                            candidate.clone(),
+                        );
+                    }
+                }
+                1 => {
+                    for segment in rendered.bounds.row_start..=rendered.bounds.row_end {
+                        insert_table_edge(
+                            &mut edges,
+                            TableEdgeKey::Vertical(segment, rendered.bounds.col_end + 1),
+                            candidate.clone(),
+                        );
+                    }
+                }
+                2 => {
+                    for segment in rendered.bounds.col_start..=rendered.bounds.col_end {
+                        insert_table_edge(
+                            &mut edges,
+                            TableEdgeKey::Horizontal(rendered.bounds.row_end + 1, segment),
+                            candidate.clone(),
+                        );
+                    }
+                }
+                3 => {
+                    for segment in rendered.bounds.row_start..=rendered.bounds.row_end {
+                        insert_table_edge(
+                            &mut edges,
+                            TableEdgeKey::Vertical(segment, rendered.bounds.col_start),
+                            candidate.clone(),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    render_table_edges(&edges, &x_positions, &y_positions, page);
+
+    for rendered in &cells {
+        let cell = rendered.cell;
+        let style = rendered.style.as_ref();
+        if let Some(body) = &cell.text {
+            let styled_body = style.map_or_else(|| body.clone(), |style| style.apply_text(body));
+            let layout = layout_textbody(
+                &doc.fonts,
+                &rs.theme,
+                &rs.text_defaults,
+                warnings,
+                &styled_body,
+                Category::Other,
+                (rendered.width - cell.inset_lr.0 - cell.inset_lr.1).max(1.0),
+                |rel_id| doc.link_target(rels, rel_id),
+            )?;
+            let free =
+                (rendered.height - cell.inset_tb.0 - cell.inset_tb.1 - layout.height_pt).max(0.0);
+            let text_y = match cell.anchor.as_deref() {
+                Some("ctr") => cell.inset_tb.0 + free / 2.0,
+                Some("b") => cell.inset_tb.0 + free,
+                _ => cell.inset_tb.0,
+            };
+            for li in layout.items {
+                page.items.push(Positioned {
+                    x_pt: rendered.x + cell.inset_lr.0 + li.x_pt,
+                    y_pt: rendered.y + text_y + li.y_pt,
+                    item: li.item,
+                });
+            }
+        }
     }
     Ok(())
+}
+
+/// Validates DrawingML's physical-cell merge encoding before layout.
+///
+/// Every `a:tr` contains one `a:tc` for each `a:tblGrid` slot. A horizontal
+/// anchor's `gridSpan` covers the following physical cells, which must carry
+/// `hMerge`; a vertical anchor's `rowSpan` similarly requires `vMerge`
+/// continuations. Rejecting gaps and overlaps keeps malformed producer input
+/// from being painted as overlapping visible cells.
+pub(crate) fn validate_table_grid(table: &PmlTable) -> Result<()> {
+    #[derive(Clone, Copy, Default)]
+    struct ActiveVerticalMerge {
+        until: usize,
+        col_start: usize,
+        col_end: usize,
+    }
+
+    let row_count = table.rows.len();
+    let col_count = table.col_widths.len();
+    let mut active_vertical = Vec::new();
+    try_reserve(
+        &mut active_vertical,
+        col_count,
+        "PowerPoint table merge validation",
+    )?;
+    active_vertical.resize(col_count, ActiveVerticalMerge::default());
+    let mut pending_vertical = Vec::new();
+    try_reserve(
+        &mut pending_vertical,
+        col_count,
+        "PowerPoint table merge validation",
+    )?;
+
+    for (row_index, row) in table.rows.iter().enumerate() {
+        if row.cells.len() != col_count {
+            return Err(OfficeError::Invalid(format!(
+                "PowerPoint table row {row_index} has {} physical cells for {col_count} a:tblGrid columns",
+                row.cells.len()
+            )));
+        }
+        let mut horizontal_until = 0usize;
+        let mut horizontal_start = 0usize;
+        let mut horizontal_row_span = 1usize;
+        pending_vertical.clear();
+        for (col, cell) in row.cells.iter().enumerate() {
+            if let Some(detail) = cell.unsupported.first() {
+                return Err(OfficeError::unsupported(
+                    UnsupportedCode::UnknownElement,
+                    detail.clone(),
+                ));
+            }
+            let span = usize::try_from(cell.grid_span.max(1)).map_err(|_| {
+                OfficeError::Invalid("PowerPoint table gridSpan exceeds usize".to_string())
+            })?;
+            let col_end = col.checked_add(span).ok_or_else(|| {
+                OfficeError::Invalid("PowerPoint table column span overflows usize".to_string())
+            })?;
+            if col_end > col_count {
+                return Err(OfficeError::Invalid(
+                    "PowerPoint table cell span exceeds a:tblGrid".to_string(),
+                ));
+            }
+            let row_span = usize::try_from(cell.row_span.max(1)).map_err(|_| {
+                OfficeError::Invalid("PowerPoint table rowSpan exceeds usize".to_string())
+            })?;
+            let row_end = row_index.checked_add(row_span).ok_or_else(|| {
+                OfficeError::Invalid("PowerPoint table row span overflows usize".to_string())
+            })?;
+            if row_end > row_count {
+                return Err(OfficeError::Invalid(
+                    "PowerPoint table cell span exceeds its row count".to_string(),
+                ));
+            }
+
+            let expected_h_merge = col < horizontal_until;
+            if cell.h_merge != expected_h_merge {
+                return Err(OfficeError::Invalid(format!(
+                    "PowerPoint table cell ({row_index},{col}) has an inconsistent hMerge continuation"
+                )));
+            }
+            if expected_h_merge {
+                if span != 1 {
+                    return Err(OfficeError::Invalid(
+                        "PowerPoint table hMerge continuation gridSpan must be one".to_string(),
+                    ));
+                }
+                if row_span != horizontal_row_span {
+                    return Err(OfficeError::Invalid(
+                        "PowerPoint table hMerge continuation rowSpan differs from its anchor"
+                            .to_string(),
+                    ));
+                }
+            } else {
+                horizontal_start = col;
+                horizontal_until = col_end;
+                horizontal_row_span = row_span;
+            }
+
+            let active = active_vertical[col];
+            let expected_v_merge = active.until > row_index;
+            if cell.v_merge != expected_v_merge {
+                return Err(OfficeError::Invalid(format!(
+                    "PowerPoint table cell ({row_index},{col}) has an inconsistent vMerge continuation"
+                )));
+            }
+            if expected_v_merge && row_span != 1 {
+                return Err(OfficeError::Invalid(
+                    "PowerPoint table vMerge continuation rowSpan must be one".to_string(),
+                ));
+            }
+            if expected_v_merge
+                && (active.col_start != horizontal_start || active.col_end != horizontal_until)
+            {
+                return Err(OfficeError::Invalid(
+                    "PowerPoint table vMerge continuation gridSpan differs from its anchor"
+                        .to_string(),
+                ));
+            }
+            if !cell.h_merge && !cell.v_merge && row_span > 1 {
+                pending_vertical.push((col, col_end, row_end));
+            }
+        }
+        // A rectangular merge's top-row hMerge continuations are not vMerge
+        // continuations. Activate rowSpan coverage only after validating that
+        // complete physical row.
+        for &(col_start, col_end, row_end) in &pending_vertical {
+            for continuation in &mut active_vertical[col_start..col_end] {
+                if continuation.until > row_index {
+                    return Err(OfficeError::Invalid(
+                        "PowerPoint table merge regions overlap".to_string(),
+                    ));
+                }
+                *continuation = ActiveVerticalMerge {
+                    until: row_end,
+                    col_start,
+                    col_end,
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
+struct TableRenderCell<'a> {
+    cell: &'a PmlCell,
+    style: Option<TableCellStyle>,
+    bounds: CellBounds,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TableEdgeKey {
+    Horizontal(usize, usize),
+    Vertical(usize, usize),
+}
+
+#[derive(Clone)]
+enum TableEdgePaint {
+    NoFill,
+    Stroke(Stroke),
+}
+
+#[derive(Clone)]
+struct TableEdgeCandidate {
+    paint: TableEdgePaint,
+}
+
+fn table_edge_candidate(
+    rendered: &TableRenderCell<'_>,
+    edge: usize,
+    rs: &ResolvedSlide,
+) -> TableEdgeCandidate {
+    let (specified, line) = if rendered.cell.border_specified[edge] {
+        (true, rendered.cell.borders[edge].as_ref())
+    } else if let Some(style) = &rendered.style {
+        style.border(edge, rendered.bounds)
+    } else {
+        (false, None)
+    };
+    let fallback = match rendered.style.as_ref() {
+        None => Some(Stroke {
+            // Preserve the engine's legacy no-style table geometry.
+            width_pt: 0.75,
+            color: Rgba::opaque(Rgb::new(0, 0, 0)),
+            dash: None,
+        }),
+        Some(style) if style.inherited_base_grid => Some(Stroke {
+            // Sparse Medium Style 2 package entries in Microsoft-produced
+            // files resolve to this measured 1 pt theme-dark grid.
+            width_pt: 1.0,
+            color: Rgba::opaque(rs.theme.color("dk1").unwrap_or(Rgb::new(0, 0, 0))),
+            dash: None,
+        }),
+        Some(_) => None,
+    };
+    if line.is_none() && (specified || fallback.is_none()) {
+        return TableEdgeCandidate {
+            paint: TableEdgePaint::NoFill,
+        };
+    }
+    let stroke = if let Some(line) = line {
+        Stroke {
+            width_pt: line.width_pt.max(0.25),
+            color: resolve_colorspec(&rs.theme, &line.color),
+            dash: None,
+        }
+    } else if let Some(fallback) = fallback {
+        fallback
+    } else {
+        return TableEdgeCandidate {
+            paint: TableEdgePaint::NoFill,
+        };
+    };
+    TableEdgeCandidate {
+        paint: TableEdgePaint::Stroke(stroke),
+    }
+}
+
+fn insert_table_edge(
+    edges: &mut BTreeMap<TableEdgeKey, TableEdgeCandidate>,
+    key: TableEdgeKey,
+    candidate: TableEdgeCandidate,
+) {
+    let replace = edges
+        .get(&key)
+        .is_none_or(|existing| table_edge_precedes(existing, &candidate));
+    if replace {
+        edges.insert(key, candidate);
+    }
+}
+
+fn table_edge_precedes(existing: &TableEdgeCandidate, candidate: &TableEdgeCandidate) -> bool {
+    match (&existing.paint, &candidate.paint) {
+        (TableEdgePaint::NoFill, TableEdgePaint::Stroke(_)) => true,
+        (TableEdgePaint::Stroke(_), TableEdgePaint::NoFill) => false,
+        (TableEdgePaint::Stroke(existing), TableEdgePaint::Stroke(candidate)) => {
+            candidate.width_pt > existing.width_pt
+                || ((candidate.width_pt - existing.width_pt).abs() < 1e-9
+                    && table_border_brightness(candidate.color)
+                        < table_border_brightness(existing.color))
+        }
+        (TableEdgePaint::NoFill, TableEdgePaint::NoFill) => false,
+    }
+}
+
+fn table_border_brightness(color: Rgba) -> (u16, u16, u16) {
+    let red = u16::from(color.r);
+    let green = u16::from(color.g);
+    let blue = u16::from(color.b);
+    (red + blue + 2 * green, blue + 2 * green, green)
+}
+
+fn same_table_stroke(left: &Stroke, right: &Stroke) -> bool {
+    (left.width_pt - right.width_pt).abs() < 1e-9
+        && left.color == right.color
+        && left.dash == right.dash
+}
+
+fn render_table_edges(
+    edges: &BTreeMap<TableEdgeKey, TableEdgeCandidate>,
+    xs: &[f64],
+    ys: &[f64],
+    page: &mut Page,
+) {
+    for (row_boundary, &y) in ys.iter().enumerate() {
+        let mut col = 0usize;
+        while col + 1 < xs.len() {
+            let Some(TableEdgeCandidate {
+                paint: TableEdgePaint::Stroke(stroke),
+                ..
+            }) = edges.get(&TableEdgeKey::Horizontal(row_boundary, col))
+            else {
+                col += 1;
+                continue;
+            };
+            let start = col;
+            col += 1;
+            while col + 1 < xs.len()
+                && matches!(
+                    edges.get(&TableEdgeKey::Horizontal(row_boundary, col)),
+                    Some(TableEdgeCandidate {
+                        paint: TableEdgePaint::Stroke(next),
+                        ..
+                    }) if same_table_stroke(stroke, next)
+                )
+            {
+                col += 1;
+            }
+            page.items.push(Positioned {
+                x_pt: xs[start],
+                y_pt: y,
+                item: Item::Line {
+                    dx_pt: xs[col] - xs[start],
+                    dy_pt: 0.0,
+                    stroke: stroke.clone(),
+                },
+            });
+        }
+    }
+    for (col_boundary, &x) in xs.iter().enumerate() {
+        let mut row = 0usize;
+        while row + 1 < ys.len() {
+            let Some(TableEdgeCandidate {
+                paint: TableEdgePaint::Stroke(stroke),
+                ..
+            }) = edges.get(&TableEdgeKey::Vertical(row, col_boundary))
+            else {
+                row += 1;
+                continue;
+            };
+            let start = row;
+            row += 1;
+            while row + 1 < ys.len()
+                && matches!(
+                    edges.get(&TableEdgeKey::Vertical(row, col_boundary)),
+                    Some(TableEdgeCandidate {
+                        paint: TableEdgePaint::Stroke(next),
+                        ..
+                    }) if same_table_stroke(stroke, next)
+                )
+            {
+                row += 1;
+            }
+            page.items.push(Positioned {
+                x_pt: x,
+                y_pt: ys[start],
+                item: Item::Line {
+                    dx_pt: 0.0,
+                    dy_pt: ys[row] - ys[start],
+                    stroke: stroke.clone(),
+                },
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1251,5 +1742,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn picture_frame_edges_snap_independently_to_powerpoint_web_device_pixels() {
+        let xfrm = Xfrm {
+            x_pt: 50.4,
+            y_pt: 129.6,
+            w_pt: 619.2,
+            h_pt: 348.3,
+            ..Xfrm::default()
+        };
+        let snapped = powerpoint_web_picture_frame(xfrm);
+        assert!((snapped.x_pt - 50.25).abs() < 0.001);
+        assert!((snapped.y_pt - 129.75).abs() < 0.001);
+        assert!((snapped.w_pt - 619.5).abs() < 0.001);
+        assert!((snapped.h_pt - 348.0).abs() < 0.001);
+
+        let rotated = Xfrm {
+            rot_deg: 15.0,
+            ..xfrm
+        };
+        let unchanged = powerpoint_web_picture_frame(rotated);
+        assert!((unchanged.x_pt - rotated.x_pt).abs() < f64::EPSILON);
+        assert!((unchanged.w_pt - rotated.w_pt).abs() < f64::EPSILON);
     }
 }

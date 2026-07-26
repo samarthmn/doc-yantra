@@ -1151,122 +1151,298 @@ impl TableStyle {
     }
 }
 
-/// Per-column minimum width at `size`: cell padding plus roughly "xx..." in
-/// the widest (bold) face — the smallest column that still shows content.
-fn table_col_floor(size: f64, pad: f64, font: StandardFont) -> f64 {
-    2.0 * pad + font.text_width_pt("xx...", size)
-}
-
-/// Natural (content-driven) column widths at `size`: the widest cell per
-/// column (header row measured bold) plus padding on both sides.
-fn table_natural_widths(
+/// Measures the content-driven width targets for every column at `size`.
+///
+/// `natural` is the widest explicit line in the column. `minimum` is the
+/// widest indivisible atom plus cell padding: body words (including dates,
+/// numbers, and hyphen/underscore-joined identifiers) stay whole, while
+/// snake_case headers may wrap only after an underscore.
+fn table_column_widths(
     rows: &[Vec<ResolvedRun>],
     ncols: usize,
     size: f64,
     pad: f64,
-) -> Result<Vec<f64>> {
-    let mut widths = vec![2.0 * pad; ncols];
-    for row in rows {
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let padded_empty = 2.0 * pad;
+    let mut natural = vec![padded_empty; ncols];
+    let mut minimum = vec![padded_empty; ncols];
+    let mut visible = vec![padded_empty; ncols];
+    for (ri, row) in rows.iter().enumerate() {
         for (ci, cell) in row.iter().enumerate() {
-            let w = cell.choice.text_width_pt(&cell.text, cell.font, size)? + 2.0 * pad;
-            if w > widths[ci] {
-                widths[ci] = w;
+            if cell.text.split_whitespace().next().is_some() {
+                let marker_width = cell.choice.text_width_pt("...", cell.font, size)? + 2.0 * pad;
+                visible[ci] = visible[ci].max(marker_width);
+            }
+            for line in cell.text.split_terminator('\n') {
+                let line = line.trim_matches(' ');
+                let width = cell.choice.text_width_pt(line, cell.font, size)? + 2.0 * pad;
+                natural[ci] = natural[ci].max(width);
+
+                for word in line.split_whitespace() {
+                    if ri == 0 {
+                        for atom in word.split_inclusive('_') {
+                            let width =
+                                cell.choice.text_width_pt(atom, cell.font, size)? + 2.0 * pad;
+                            minimum[ci] = minimum[ci].max(width);
+                        }
+                    } else {
+                        let width = cell.choice.text_width_pt(word, cell.font, size)? + 2.0 * pad;
+                        minimum[ci] = minimum[ci].max(width);
+                    }
+                }
             }
         }
     }
-    Ok(widths)
+    for (visible, minimum) in visible.iter_mut().zip(&minimum) {
+        *visible = visible.min(*minimum);
+    }
+    Ok((natural, minimum, visible))
 }
 
-/// Squeezes `natural` column widths into `usable` points: widths shrink
-/// proportionally but never below `min(floor, natural)` per column. When even
-/// the floors overflow (extreme column counts at minimum font size), the
-/// floors themselves scale down as a last resort.
-fn squeeze_widths(natural: &[f64], floor: f64, usable: f64) -> Vec<f64> {
-    let total: f64 = natural.iter().sum();
-    if total <= usable {
-        return natural.to_vec();
+/// Allocates width from `minimum` toward `natural` using capped water-filling.
+/// Sorting the remaining demands finds the common water level in O(n log n);
+/// columns that reach their natural width return their unused share to wider
+/// columns.
+fn fair_share_widths(minimum: &[f64], natural: &[f64], usable: f64) -> Vec<f64> {
+    let minimum_total: f64 = minimum.iter().sum();
+    if minimum_total >= usable {
+        let scale = usable / minimum_total.max(f64::MIN_POSITIVE);
+        return minimum.iter().map(|width| width * scale).collect();
     }
-    let floors: Vec<f64> = natural.iter().map(|&w| w.min(floor)).collect();
-    let floor_sum: f64 = floors.iter().sum();
-    if floor_sum >= usable {
-        let scale = usable / floor_sum.max(f64::MIN_POSITIVE);
-        return floors.iter().map(|w| w * scale).collect();
+
+    let natural_total: f64 = natural.iter().sum();
+    let target = natural_total.min(usable);
+    let mut remaining = (target - minimum_total).max(0.0);
+    if remaining <= f64::EPSILON {
+        return minimum.to_vec();
     }
-    // Iterative proportional squeeze: columns whose share would dip below
-    // their floor get pinned there; the rest re-share the remaining width.
-    let n = natural.len();
-    let mut pinned = vec![false; n];
-    loop {
-        let pinned_sum: f64 = (0..n).filter(|&i| pinned[i]).map(|i| floors[i]).sum();
-        let flex_nat: f64 = (0..n).filter(|&i| !pinned[i]).map(|i| natural[i]).sum();
-        if flex_nat <= 0.0 {
-            return floors;
+
+    let mut demands: Vec<f64> = natural
+        .iter()
+        .zip(minimum)
+        .map(|(natural, minimum)| (natural - minimum).max(0.0))
+        .filter(|demand| *demand > f64::EPSILON)
+        .collect();
+    demands.sort_by(f64::total_cmp);
+    let mut active_count = demands.len();
+    let mut water_level = 0.0;
+    for demand in demands {
+        if active_count == 0 {
+            break;
         }
-        let scale = (usable - pinned_sum) / flex_nat;
-        let mut changed = false;
-        for i in 0..n {
-            if !pinned[i] && natural[i] * scale < floors[i] - 1e-9 {
-                pinned[i] = true;
-                changed = true;
-            }
+        let step = (demand - water_level).max(0.0);
+        let step_cost = step * active_count as f64;
+        if remaining <= step_cost {
+            water_level += remaining / active_count as f64;
+            remaining = 0.0;
+            break;
         }
-        if !changed {
-            return (0..n)
-                .map(|i| {
-                    if pinned[i] {
-                        floors[i]
-                    } else {
-                        natural[i] * scale
-                    }
-                })
-                .collect();
-        }
+        remaining -= step_cost;
+        water_level = demand;
+        active_count -= 1;
     }
+    if remaining > f64::EPSILON && active_count > 0 {
+        water_level += remaining / active_count as f64;
+    }
+    natural
+        .iter()
+        .zip(minimum)
+        .map(|(natural, minimum)| minimum + (natural - minimum).max(0.0).min(water_level))
+        .collect()
 }
 
 /// Picks the table font size and column widths for `usable` points of width.
-/// Natural widths are used when they fit; otherwise columns squeeze down to a
-/// readable floor; and when even the floors cannot fit, the whole table's
-/// font shrinks by the needed factor (never below [`TABLE_MIN_FONT_PT`]).
+/// Atom-safe minima are satisfied before slack is distributed toward natural
+/// widths. If the minima do not fit, every column shrinks together, never
+/// below [`TABLE_MIN_FONT_PT`]. Only a floor-sized table whose minima still
+/// overflow is allowed to ellipsize atoms.
 fn table_layout(
     rows: &[Vec<ResolvedRun>],
     ncols: usize,
     base_size: f64,
     usable: f64,
     style: TableStyle,
-) -> Result<(f64, Vec<f64>)> {
+) -> Result<(f64, Vec<f64>, bool)> {
     let mut size = base_size;
     let mut pad = size * style.pad_factor();
-    let floor_font = match style {
-        TableStyle::Csv => StandardFont::Courier,
-        TableStyle::Markdown => StandardFont::HelveticaBold,
-    };
-    let mut natural = table_natural_widths(rows, ncols, size, pad)?;
-    let floors_total: f64 = natural
-        .iter()
-        .map(|&w| w.min(table_col_floor(size, pad, floor_font)))
-        .sum();
-    if floors_total > usable {
+    let (mut natural, mut minimum, mut visible) = table_column_widths(rows, ncols, size, pad)?;
+    let mut minimum_total: f64 = minimum.iter().sum();
+    if minimum_total > usable {
         // All metrics are linear in font size, so this factor is exact.
-        size = (size * usable / floors_total).max(TABLE_MIN_FONT_PT);
+        size = (size * usable / minimum_total).max(TABLE_MIN_FONT_PT);
         pad = size * style.pad_factor();
-        natural = table_natural_widths(rows, ncols, size, pad)?;
+        (natural, minimum, visible) = table_column_widths(rows, ncols, size, pad)?;
+        minimum_total = minimum.iter().sum();
     }
-    let widths = squeeze_widths(&natural, table_col_floor(size, pad, floor_font), usable);
-    Ok((size, widths))
+    let clip_oversized_atoms = size <= TABLE_MIN_FONT_PT + 0.01 && minimum_total > usable + 0.01;
+    let widths = if clip_oversized_atoms {
+        let visible_total: f64 = visible.iter().sum();
+        if visible_total > usable + 0.01 {
+            return Err(PdfCoreError::ResourceLimit(format!(
+                "table has {ncols} columns whose minimum visible widths \
+                 exceed the available page width"
+            )));
+        }
+        fair_share_widths(&visible, &minimum, usable)
+    } else {
+        fair_share_widths(&minimum, &natural, usable)
+    };
+    Ok((size, widths, clip_oversized_atoms))
 }
 
-/// Wraps one cell into lines that fit `avail_w`, preserving every line.
-fn wrap_cell(cell: &ResolvedRun, size: f64, avail_w: f64) -> Result<Vec<String>> {
+fn ellipsize_table_atom(cell: &ResolvedRun, atom: &str, size: f64, avail_w: f64) -> Result<String> {
+    const ELLIPSIS: &str = "...";
+    let ellipsis_width = cell.choice.text_width_pt(ELLIPSIS, cell.font, size)?;
+    let prefix_limit = (avail_w - ellipsis_width).max(0.0);
+    let mut prefix = String::new();
+    let mut prefix_width = 0.0;
+    for ch in atom.chars() {
+        let char_width = cell.choice.char_width_pt(ch, cell.font, size)?;
+        if prefix_width + char_width > prefix_limit + 0.01 {
+            break;
+        }
+        prefix.push(ch);
+        prefix_width += char_width;
+    }
+    prefix.push_str(ELLIPSIS);
+    Ok(prefix)
+}
+
+struct TableWrapContext<'a> {
+    cell: &'a ResolvedRun,
+    size: f64,
+    avail_w: f64,
+    clip_oversized_atoms: bool,
+}
+
+fn push_table_atom(
+    lines: &mut Vec<String>,
+    current: &mut String,
+    current_width: &mut f64,
+    context: &TableWrapContext<'_>,
+    atom: &str,
+    separator: &str,
+) -> Result<()> {
+    let atom_width = context
+        .cell
+        .choice
+        .text_width_pt(atom, context.cell.font, context.size)?;
+    if atom_width > context.avail_w + 0.01 {
+        if !current.is_empty() {
+            lines.push(std::mem::take(current));
+            *current_width = 0.0;
+        }
+        if context.clip_oversized_atoms {
+            lines.push(ellipsize_table_atom(
+                context.cell,
+                atom,
+                context.size,
+                context.avail_w,
+            )?);
+        } else {
+            // The measured column minimum makes this unreachable outside
+            // floating-point tolerance. Preserve the atom rather than split
+            // or silently truncate it if a future metric violates that
+            // invariant.
+            lines.push(atom.to_string());
+        }
+        return Ok(());
+    }
+
+    let separator_width = if !separator.is_empty() && !current.is_empty() {
+        context
+            .cell
+            .choice
+            .text_width_pt(separator, context.cell.font, context.size)?
+    } else {
+        0.0
+    };
+    if !current.is_empty() && *current_width + separator_width + atom_width > context.avail_w + 0.01
+    {
+        lines.push(std::mem::take(current));
+        *current_width = 0.0;
+    }
+    if !separator.is_empty() && !current.is_empty() {
+        current.push_str(separator);
+        *current_width += separator_width;
+    }
+    current.push_str(atom);
+    *current_width += atom_width;
+    Ok(())
+}
+
+/// Wraps one table cell only at whitespace, explicit newlines, and (for the
+/// header row) after underscores. Indivisible atoms are never character-split.
+fn wrap_cell(
+    cell: &ResolvedRun,
+    size: f64,
+    avail_w: f64,
+    is_header: bool,
+    clip_oversized_atoms: bool,
+) -> Result<Vec<String>> {
     if cell.text.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(
-        wrap_resolved_runs(std::slice::from_ref(cell), size, avail_w)?
-            .into_iter()
-            .map(|line| line.into_iter().map(|r| r.text).collect::<String>())
-            .collect(),
-    )
+    let context = TableWrapContext {
+        cell,
+        size,
+        avail_w,
+        clip_oversized_atoms,
+    };
+    let mut lines = Vec::new();
+    for explicit_line in cell.text.split_terminator('\n') {
+        let mut current = String::new();
+        let mut current_width = 0.0;
+        let mut saw_word = false;
+        let mut rest = explicit_line;
+        loop {
+            let Some(word_start) = rest
+                .char_indices()
+                .find(|(_, ch)| !ch.is_whitespace())
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            let separator = if saw_word { &rest[..word_start] } else { "" };
+            let word_and_rest = &rest[word_start..];
+            let word_end = word_and_rest
+                .char_indices()
+                .find(|(_, ch)| ch.is_whitespace())
+                .map(|(index, _)| index)
+                .unwrap_or(word_and_rest.len());
+            let word = &word_and_rest[..word_end];
+            rest = &word_and_rest[word_end..];
+
+            if is_header {
+                for (atom_index, atom) in word.split_inclusive('_').enumerate() {
+                    push_table_atom(
+                        &mut lines,
+                        &mut current,
+                        &mut current_width,
+                        &context,
+                        atom,
+                        if atom_index == 0 { separator } else { "" },
+                    )?;
+                }
+            } else {
+                push_table_atom(
+                    &mut lines,
+                    &mut current,
+                    &mut current_width,
+                    &context,
+                    word,
+                    separator,
+                )?;
+            }
+            saw_word = true;
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        } else if !saw_word {
+            lines.push(String::new());
+        }
+    }
+    Ok(lines)
 }
 
 /// Draws `rows` as a zebra-striped table with a bold header repeated on
@@ -1304,18 +1480,25 @@ fn render_table(
         .collect::<Result<_>>()?;
     let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
     let usable = eng.usable_width();
-    let (size, widths) = table_layout(&resolved_rows, ncols, base_size, usable, style)?;
+    let (size, widths, clip_oversized_atoms) =
+        table_layout(&resolved_rows, ncols, base_size, usable, style)?;
     let pad = size * style.pad_factor();
     let lead = size * style.line_height_factor();
     let table_w: f64 = widths.iter().sum();
     let left = eng.left();
 
-    let wrap_row = |cells: &[ResolvedRun]| -> Result<Vec<Vec<String>>> {
+    let wrap_row = |cells: &[ResolvedRun], is_header: bool| -> Result<Vec<Vec<String>>> {
         widths
             .iter()
             .enumerate()
             .map(|(ci, w)| match cells.get(ci) {
-                Some(cell) => wrap_cell(cell, size, (w - 2.0 * pad).max(1.0)),
+                Some(cell) => wrap_cell(
+                    cell,
+                    size,
+                    (w - 2.0 * pad).max(1.0),
+                    is_header,
+                    clip_oversized_atoms,
+                ),
                 None => Ok(Vec::new()),
             })
             .collect()
@@ -1366,7 +1549,7 @@ fn render_table(
         Ok(())
     };
 
-    let header_lines = wrap_row(&resolved_rows[0])?;
+    let header_lines = wrap_row(&resolved_rows[0], true)?;
     let header_line_count = header_lines.iter().map(Vec::len).max().unwrap_or(0).max(1);
     let header_h = row_height(header_line_count);
     let draw_header = |eng: &mut LayoutEngine| -> Result<()> {
@@ -1391,7 +1574,7 @@ fn render_table(
     draw_header(eng)?;
 
     for (ri, row) in resolved_rows.iter().enumerate().skip(1) {
-        let cell_lines = wrap_row(row)?;
+        let cell_lines = wrap_row(row, false)?;
         let total_lines = cell_lines.iter().map(Vec::len).max().unwrap_or(0).max(1);
         // Zebra stripes on even data rows.
         let bg = if matches!(style, TableStyle::Markdown) && ri % 2 == 0 {

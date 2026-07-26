@@ -620,26 +620,33 @@ fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
                 }
                 ShapeElem::Table { table, .. } => {
                     *shape_count += 1;
+                    if let Err(error) = crate::pptx::render::validate_table_grid(table) {
+                        profile.add_reason_deduped(
+                            UnsupportedCode::UnknownElement,
+                            format!("PowerPoint table grid: {error}"),
+                        );
+                    }
                     if let Some(fill) = &table.fill {
                         profile_pptx_fill(fill, theme, profile, doc, rels);
                     }
                     for (row_index, row) in table.rows.iter().enumerate() {
-                        let mut col_index = 0usize;
-                        for cell in &row.cells {
-                            match doc.table_cell_style(table, row_index, col_index) {
-                                Ok(Some(style)) => {
-                                    if let Some(fill) = &style.fill {
-                                        profile_pptx_fill(fill, theme, profile, doc, rels);
+                        for (col_index, cell) in row.cells.iter().enumerate() {
+                            if !cell.h_merge && !cell.v_merge {
+                                match doc.table_cell_style(table, row_index, col_index) {
+                                    Ok(Some(style)) => {
+                                        if let Some(fill) = &style.fill {
+                                            profile_pptx_fill(fill, theme, profile, doc, rels);
+                                        }
                                     }
+                                    Ok(None) => {}
+                                    Err(OfficeError::Unsupported { code, detail }) => {
+                                        profile.add_reason_deduped(code, detail)
+                                    }
+                                    Err(error) => profile.add_reason_deduped(
+                                        UnsupportedCode::TableStyle,
+                                        error.to_string(),
+                                    ),
                                 }
-                                Ok(None) => {}
-                                Err(OfficeError::Unsupported { code, detail }) => {
-                                    profile.add_reason_deduped(code, detail)
-                                }
-                                Err(error) => profile.add_reason_deduped(
-                                    UnsupportedCode::TableStyle,
-                                    error.to_string(),
-                                ),
                             }
                             for detail in &cell.unsupported {
                                 profile.add_reason_deduped(
@@ -647,22 +654,23 @@ fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
                                     detail.clone(),
                                 );
                             }
-                            if let Some(fill) = &cell.fill {
-                                profile_pptx_fill(fill, theme, profile, doc, rels);
+                            if !cell.h_merge && !cell.v_merge {
+                                if let Some(fill) = &cell.fill {
+                                    profile_pptx_fill(fill, theme, profile, doc, rels);
+                                }
+                                if let Some(b) = &cell.text {
+                                    walk_body(
+                                        b,
+                                        profile,
+                                        inventory,
+                                        major,
+                                        minor,
+                                        Category::Other,
+                                        doc,
+                                        rels,
+                                    );
+                                }
                             }
-                            if let Some(b) = &cell.text {
-                                walk_body(
-                                    b,
-                                    profile,
-                                    inventory,
-                                    major,
-                                    minor,
-                                    Category::Other,
-                                    doc,
-                                    rels,
-                                );
-                            }
-                            col_index += cell.grid_span.max(1) as usize;
                         }
                     }
                 }

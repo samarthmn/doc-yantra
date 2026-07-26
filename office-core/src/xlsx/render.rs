@@ -33,6 +33,7 @@ const EXCEL_WEB_VERTICAL_CELL_PADDING_PT: f64 = 1.5;
 const EXCEL_WEB_UNSCALED_BASELINE_OFFSET_PT: f64 = 0.42;
 const EXCEL_WEB_SCALED_BASELINE_OFFSET_PT: f64 = 0.54;
 const EXCEL_WEB_FONT_SIZE_QUANTUM_PT: f64 = 0.12;
+const MAX_NUMERIC_OVERFLOW_HASHES: usize = 1024;
 const GRID: Rgba = Rgba {
     r: 190,
     g: 190,
@@ -1509,7 +1510,7 @@ fn render_cell_text(
             ),
         ));
     }
-    let (text, color, default_align) = format_cell(doc, cell, style);
+    let (mut text, color, default_align) = format_cell(doc, cell, style);
     if text.is_empty() {
         return Ok(());
     }
@@ -1538,9 +1539,31 @@ fn render_cell_text(
     };
     let metrics = FaceMetrics::new(parsed);
     let (fallback_ids, fallback_faces) = coverage_faces(doc, face, weight, style.italic);
-    let align = style.align.as_deref().unwrap_or(default_align);
+    let mut align = style.align.as_deref().unwrap_or(default_align);
     let horizontal_pad = EXCEL_WEB_HORIZONTAL_CELL_PADDING_PT;
-    let lines = if style.wrap || text.contains('\n') {
+    let mut numeric_overflow = false;
+    if matches!(cell.value, CellValue::Number(_)) && !text.contains('\n') {
+        let available_width =
+            (w - 2.0 * horizontal_pad - excel_web_right_padding_extra(print_scale)).max(0.0);
+        let formatted = shape::require_glyphs(shape::shape_with_fallback(
+            &text,
+            &fallback_faces,
+            size,
+            0.0,
+            false,
+        ))?;
+        if formatted.width_pt > available_width {
+            text = width_fitting_overflow_hashes(&fallback_faces, size, available_width)?;
+            if text.is_empty() {
+                return Ok(());
+            }
+            // Excel centers the hash field in the cell even though the numeric
+            // value it replaces is normally right-aligned.
+            align = "center";
+            numeric_overflow = true;
+        }
+    }
+    let lines = if !numeric_overflow && (style.wrap || text.contains('\n')) {
         wrap_lines(
             &text,
             &fallback_faces,
@@ -1616,6 +1639,35 @@ fn render_cell_text(
         }
     }
     Ok(())
+}
+
+fn width_fitting_overflow_hashes(
+    fallback_faces: &[&Face],
+    size: f64,
+    available_width: f64,
+) -> Result<String> {
+    if !available_width.is_finite() || available_width <= 0.0 {
+        return Ok(String::new());
+    }
+    let mut low = 0usize;
+    let mut high = MAX_NUMERIC_OVERFLOW_HASHES;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let candidate = "#".repeat(middle);
+        let shaped = shape::require_glyphs(shape::shape_with_fallback(
+            &candidate,
+            fallback_faces,
+            size,
+            0.0,
+            false,
+        ))?;
+        if shaped.width_pt <= available_width {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Ok("#".repeat(low))
 }
 
 fn push_cell_text_run(

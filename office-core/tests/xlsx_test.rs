@@ -286,6 +286,52 @@ fn sheet_cells_render_with_values() {
 }
 
 #[test]
+fn numeric_overflow_uses_width_fitting_hashes_but_text_and_fitting_numbers_do_not() {
+    let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><printOptions gridLines="1"/><cols><col min="1" max="1" width="13"/><col min="2" max="2" width="4"/><col min="3" max="4" width="13"/><col min="5" max="5" width="4"/></cols><sheetData><row r="1"><c r="A1" s="1"><v>111629091.35</v></c><c r="B1" s="2"><v>12.5</v></c><c r="C1" t="inlineStr"><is><t>$111,629,091.35</t></is></c><c r="D1"><v>123</v></c><c r="E1" s="3"><v>12.5</v></c></row></sheetData></worksheet>"#;
+    let styles = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="165" formatCode="&quot;$&quot;#,##0.00"/></numFmts><fonts count="1"><font><name val="Calibri"/><sz val="11"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="4"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="0" fillId="0" borderId="0" numFmtId="165"/><xf fontId="0" fillId="0" borderId="0" numFmtId="10"/><xf fontId="0" fillId="0" borderId="0" numFmtId="10"><alignment wrapText="1"/></xf></cellXfs></styleSheet>"#;
+    let bytes = minimal_xlsx(sheet, Some(styles));
+    let doc = XlsxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_xlsx(&doc).unwrap();
+    let runs: Vec<(String, f64, f64)> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) => Some((
+                run.glyphs
+                    .iter()
+                    .map(|glyph| glyph.ch)
+                    .filter(|character| *character != '\0')
+                    .collect(),
+                positioned.x_pt,
+                run.glyphs.iter().map(|glyph| glyph.advance_pt).sum(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let texts: Vec<_> = runs.iter().map(|(text, _, _)| text.as_str()).collect();
+    assert_eq!(
+        texts,
+        ["############", "###", "$111,629,091.35", "123", "###"]
+    );
+    let mut vertical_edges: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match positioned.item {
+            Item::Line { dx_pt: 0.0, .. } => Some(positioned.x_pt),
+            _ => None,
+        })
+        .collect();
+    vertical_edges.sort_by(f64::total_cmp);
+    vertical_edges.dedup_by(|left, right| (*left - *right).abs() < 0.01);
+    let hash_center = runs[0].1 + runs[0].2 / 2.0;
+    let cell_center = (vertical_edges[0] + vertical_edges[1]) / 2.0;
+    assert!(
+        (hash_center - cell_center).abs() < 0.01,
+        "numeric overflow placeholders are centered in the cell"
+    );
+}
+
+#[test]
 fn xlsx_conversion_is_deterministic() {
     let bytes = std::fs::read("../mock-files/xlsx/file1.xlsx").unwrap();
     let a = convert(&bytes, OfficeFormat::Xlsx, &opts()).unwrap();
@@ -842,7 +888,7 @@ fn formula_type_annotations_do_not_mask_a_missing_cache() {
 
 #[test]
 fn valid_cached_formula_result_types_render_without_formula_evaluation() {
-    let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>40+2</f><v>42</v></c><c r="B1" t="str"><f>CONCAT("cache","d")</f><v>cached</v></c><c r="C1" t="inlineStr"><is><t>inline</t></is></c><c r="D1" t="b"><f>1=1</f><v>1</v></c><c r="E1" t="e"><f>1/0</f><v>#DIV/0!</v></c><c r="F1" s="1"><f>DATE(2024,1,1)</f><v>45292</v></c><c r="G1"><f>IF(TRUE,"",1)</f><v></v></c></row></sheetData></worksheet>"#;
+    let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="6" max="6" width="14"/></cols><sheetData><row r="1"><c r="A1"><f>40+2</f><v>42</v></c><c r="B1" t="str"><f>CONCAT("cache","d")</f><v>cached</v></c><c r="C1" t="inlineStr"><is><t>inline</t></is></c><c r="D1" t="b"><f>1=1</f><v>1</v></c><c r="E1" t="e"><f>1/0</f><v>#DIV/0!</v></c><c r="F1" s="1"><f>DATE(2024,1,1)</f><v>45292</v></c><c r="G1"><f>IF(TRUE,"",1)</f><v></v></c></row></sheetData></worksheet>"#;
     let styles = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><fonts count="1"><font/></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>"#;
     let bytes = minimal_xlsx(sheet, Some(styles));
 

@@ -1249,6 +1249,112 @@ fn pptx_vertical_table_merge_renders_anchor_once() {
 }
 
 #[test]
+fn pptx_horizontal_table_merge_advances_physical_cells_once() {
+    let bytes = minimal_pptx(
+        r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="1828800" cy="914400"/></p:xfrm><a:graphic><a:graphicData uri="table"><a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>ONLY_ONCE</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc><a:tc hMerge="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>PHANTOM</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+    );
+    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_pptx(&doc).unwrap();
+    assert_eq!(page_text(&laid.pages[0]), "ONLY_ONCE");
+    assert_eq!(
+        laid.pages[0]
+            .items
+            .iter()
+            .filter(|positioned| matches!(positioned.item, Item::Line { .. }))
+            .count(),
+        4,
+        "a merged cell has only its outer grid"
+    );
+    assert!(convert(&bytes, OfficeFormat::Pptx, &opts()).is_ok());
+}
+
+#[test]
+fn pptx_rectangular_table_merge_accepts_true_continuations_and_paints_outer_grid_only() {
+    let bytes = minimal_pptx(
+        r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="1828800" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="table"><a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid>
+        <a:tr h="914400"><a:tc gridSpan="2" rowSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>ONLY_ONCE</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc><a:tc hMerge="true" rowSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>HIDDEN</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr>
+        <a:tr h="914400"><a:tc gridSpan="2" vMerge="true"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>HIDDEN</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc><a:tc hMerge="true" vMerge="true"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>HIDDEN</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr>
+        </a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+    );
+    let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+    assert!(prof.supported, "{:?}", prof.reasons);
+    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_pptx(&doc).unwrap();
+    assert_eq!(page_text(&laid.pages[0]), "ONLY_ONCE");
+    assert_eq!(
+        laid.pages[0]
+            .items
+            .iter()
+            .filter(|positioned| matches!(positioned.item, Item::Line { .. }))
+            .count(),
+        4
+    );
+    assert!(convert(&bytes, OfficeFormat::Pptx, &opts()).is_ok());
+}
+
+#[test]
+fn pptx_malformed_horizontal_table_merges_fail_closed() {
+    for row in [
+        r#"<a:tr h="914400"><a:tc gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr>"#,
+        r#"<a:tr h="914400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr>"#,
+    ] {
+        let bytes = minimal_pptx(&format!(
+            r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="1828800" cy="914400"/></p:xfrm><a:graphic><a:graphicData uri="table"><a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid>{row}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        ));
+        let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+        assert!(!prof.supported, "{:?}", prof.reasons);
+        assert!(convert(&bytes, OfficeFormat::Pptx, &opts()).is_err());
+    }
+}
+
+#[test]
+fn pptx_malformed_rectangular_merge_spans_and_lexemes_fail_closed() {
+    let malformed_rows = [
+        r#"<a:tr h="914400"><a:tc gridSpan="2" rowSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc hMerge="1" rowSpan="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr><a:tr h="914400"><a:tc gridSpan="2" vMerge="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc hMerge="1" vMerge="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr>"#,
+        r#"<a:tr h="914400"><a:tc gridSpan="2" rowSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc hMerge="1" rowSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr><a:tr h="914400"><a:tc vMerge="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc vMerge="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr>"#,
+    ];
+    for rows in malformed_rows {
+        let bytes = minimal_pptx(&format!(
+            r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="1828800" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="table"><a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        ));
+        let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+        assert!(!prof.supported, "{:?}", prof.reasons);
+        assert!(convert(&bytes, OfficeFormat::Pptx, &opts()).is_err());
+    }
+
+    for table in [
+        r#"<a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc hMerge="1" gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl>"#,
+        r#"<a:tbl><a:tblGrid><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc rowSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr><a:tr h="914400"><a:tc vMerge="1" rowSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr><a:tr h="914400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl>"#,
+    ] {
+        let bytes = minimal_pptx(&format!(
+            r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="2743200" cy="2743200"/></p:xfrm><a:graphic><a:graphicData uri="table">{table}</a:graphicData></a:graphic></p:graphicFrame>"#
+        ));
+        let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+        assert!(!prof.supported, "{:?}", prof.reasons);
+        assert!(convert(&bytes, OfficeFormat::Pptx, &opts()).is_err());
+    }
+
+    for attributes in [
+        r#"gridSpan="0""#,
+        r#"gridSpan="4294967296""#,
+        r#"rowSpan="-1""#,
+        r#"hMerge="yes""#,
+        r#"vMerge="invalid""#,
+    ] {
+        let bytes = minimal_pptx(&format!(
+            r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="914400" cy="914400"/></p:xfrm><a:graphic><a:graphicData uri="table"><a:tbl><a:tblGrid><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc {attributes}><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        ));
+        let prof = profile(&bytes, OfficeFormat::Pptx).unwrap();
+        assert!(
+            !prof.supported,
+            "{attributes} was accepted: {:?}",
+            prof.reasons
+        );
+        assert!(convert(&bytes, OfficeFormat::Pptx, &opts()).is_err());
+    }
+}
+
+#[test]
 fn pptx_gradient_fill_renders_multiple_color_bands() {
     let bytes = minimal_pptx(
         r#"<p:sp><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill><a:prstGeom prst="rect"/></p:spPr></p:sp>"#,
@@ -1858,6 +1964,150 @@ fn pptx_table_uses_cell_border_width_and_color() {
     let doc = PptxDoc::open(&bytes, &opts()).unwrap();
     let (laid, _) = render_pptx(&doc).unwrap();
     assert!(laid.pages[0].items.iter().any(|positioned| matches!(&positioned.item, Item::Line { stroke, .. } if (stroke.width_pt - 3.0).abs() < 0.01 && (stroke.color.r, stroke.color.g, stroke.color.b) == (255, 0, 0))));
+}
+
+#[test]
+fn pptx_no_style_table_keeps_legacy_three_quarter_point_grid() {
+    let bytes = minimal_pptx(
+        r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="1828800" cy="914400"/></p:xfrm><a:graphic><a:graphicData uri="table"><a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+    );
+    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_pptx(&doc).unwrap();
+    let borders: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Line { stroke, .. } => Some(stroke.width_pt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(borders.len(), 5);
+    assert!(borders.iter().all(|width| (*width - 0.75).abs() < 0.01));
+}
+
+#[test]
+fn pptx_shared_table_border_prefers_visible_then_heavier_then_darker() {
+    let bytes = minimal_pptx(
+        r#"<p:graphicFrame><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="2743200" cy="914400"/></p:xfrm><a:graphic><a:graphicData uri="table"><a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400">
+        <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr><a:lnR w="50800"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnR></a:tcPr></a:tc>
+        <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr><a:lnL w="25400"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:lnL><a:lnR w="38100"><a:solidFill><a:srgbClr val="DDDDDD"/></a:solidFill></a:lnR></a:tcPr></a:tc>
+        <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr><a:lnL w="38100"><a:solidFill><a:srgbClr val="111111"/></a:solidFill></a:lnL></a:tcPr></a:tc>
+        </a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+    );
+    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_pptx(&doc).unwrap();
+    for (x, width, color) in [(144.0, 4.0, (255, 0, 0)), (216.0, 3.0, (17, 17, 17))] {
+        assert!(
+            laid.pages[0].items.iter().any(|positioned| matches!(
+                &positioned.item,
+                Item::Line { dx_pt: 0.0, stroke, .. }
+                    if (positioned.x_pt - x).abs() < 0.01
+                        && (stroke.width_pt - width).abs() < 0.01
+                        && (stroke.color.r, stroke.color.g, stroke.color.b) == color
+            )),
+            "missing resolved shared border at x={x}"
+        );
+    }
+}
+
+#[test]
+fn pptx_sparse_medium_style_2_inherits_base_grid_above_all_cell_fills() {
+    let style_id = "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}";
+    let styles = format!(
+        r#"<?xml version="1.0"?><a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="{style_id}"><a:tblStyle styleId="{style_id}" styleName="Medium Style 2 - Accent 1"><a:wholeTbl><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:fill></a:tcStyle></a:wholeTbl></a:tblStyle></a:tblStyleLst>"#
+    );
+    let table = format!(
+        r#"<a:tbl><a:tblPr><a:tableStyleId>{style_id}</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:tcPr></a:tc><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:tcPr></a:tc></a:tr></a:tbl>"#
+    );
+    let bytes = pptx_with_table_styles(&table, &styles);
+    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_pptx(&doc).unwrap();
+    let last_fill = laid.pages[0]
+        .items
+        .iter()
+        .rposition(|positioned| matches!(positioned.item, Item::Rect { fill: Some(_), .. }))
+        .expect("cell fills");
+    let grid: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, positioned)| {
+            matches!(
+                &positioned.item,
+                Item::Line { stroke, .. }
+                    if (stroke.width_pt - 1.0).abs() < 0.01
+                        && (stroke.color.r, stroke.color.g, stroke.color.b) == (0x10, 0x10, 0x10)
+            )
+        })
+        .collect();
+    assert_eq!(grid.len(), 5, "one shared divider must be painted once");
+    assert!(
+        grid.iter().all(|(index, _)| *index > last_fill),
+        "table grid must be painted above every cell fill"
+    );
+}
+
+#[test]
+fn pptx_custom_sparse_table_style_does_not_fabricate_a_grid() {
+    let styles = r#"<?xml version="1.0"?><a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="SPARSE"><a:tblStyle styleId="SPARSE" styleName="Sparse"><a:wholeTbl><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:fill></a:tcStyle></a:wholeTbl></a:tblStyle></a:tblStyleLst>"#;
+    let table = r#"<a:tbl><a:tblPr><a:tableStyleId>SPARSE</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl>"#;
+    let bytes = pptx_with_table_styles(table, styles);
+    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_pptx(&doc).unwrap();
+    assert!(
+        laid.pages[0]
+            .items
+            .iter()
+            .all(|positioned| !matches!(positioned.item, Item::Line { .. }))
+    );
+}
+
+#[test]
+fn pptx_table_region_precedence_uses_top_row_after_bottom_row_then_cell_override() {
+    let styles = r#"<?xml version="1.0"?><a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="ORDER"><a:tblStyle styleId="ORDER" styleName="Order">
+    <a:wholeTbl><a:tcStyle><a:tcBdr><a:top><a:ln w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></a:top></a:tcBdr></a:tcStyle></a:wholeTbl>
+    <a:lastRow><a:tcStyle><a:tcBdr><a:top><a:ln w="25400"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></a:top></a:tcBdr></a:tcStyle></a:lastRow>
+    <a:firstRow><a:tcStyle><a:tcBdr><a:top><a:ln w="38100"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln></a:top></a:tcBdr></a:tcStyle></a:firstRow>
+    </a:tblStyle></a:tblStyleLst>"#;
+    let table = r#"<a:tbl><a:tblPr firstRow="1" lastRow="1"><a:tableStyleId>ORDER</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="914400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr><a:lnT w="50800"><a:solidFill><a:srgbClr val="FFFF00"/></a:solidFill></a:lnT></a:tcPr></a:tc><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl>"#;
+    let bytes = pptx_with_table_styles(table, styles);
+    let doc = PptxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_pptx(&doc).unwrap();
+    let top_segments: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Line {
+                dx_pt,
+                dy_pt: 0.0,
+                stroke,
+            } if (positioned.y_pt - 72.0).abs() < 0.01 => Some((
+                positioned.x_pt,
+                *dx_pt,
+                stroke.width_pt,
+                (stroke.color.r, stroke.color.g, stroke.color.b),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        top_segments.iter().any(|segment| {
+            (segment.0 - 72.0).abs() < 0.01
+                && (segment.1 - 72.0).abs() < 0.01
+                && (segment.2 - 4.0).abs() < 0.01
+                && segment.3 == (255, 255, 0)
+        }),
+        "{top_segments:?}"
+    );
+    assert!(
+        top_segments.iter().any(|segment| {
+            (segment.0 - 144.0).abs() < 0.01
+                && (segment.1 - 72.0).abs() < 0.01
+                && (segment.2 - 3.0).abs() < 0.01
+                && segment.3 == (0, 255, 0)
+        }),
+        "{top_segments:?}"
+    );
 }
 
 #[test]

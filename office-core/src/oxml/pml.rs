@@ -1896,16 +1896,21 @@ fn parse_table(tbl: Node) -> PmlTable {
 }
 
 fn parse_table_cell(tc: Node) -> PmlCell {
+    let mut unsupported = Vec::new();
+    let grid_span = parse_table_merge_span(tc, "gridSpan", &mut unsupported);
+    let h_merge = parse_table_merge_flag(tc, "hMerge", &mut unsupported);
+    let row_span = parse_table_merge_span(tc, "rowSpan", &mut unsupported);
+    let v_merge = parse_table_merge_flag(tc, "vMerge", &mut unsupported);
     let mut cell = PmlCell {
-        grid_span: parse_i64(attr(tc, A, "gridSpan")).unwrap_or(1).max(1) as u32,
-        h_merge: attr(tc, A, "hMerge") == Some("1"),
-        row_span: parse_i64(attr(tc, A, "rowSpan")).unwrap_or(1).max(1) as u32,
-        v_merge: attr(tc, A, "vMerge") == Some("1"),
+        grid_span,
+        h_merge,
+        row_span,
+        v_merge,
         text: child(tc, A, "txBody").map(parse_txbody),
         fill: None,
         borders: Default::default(),
         border_specified: [false; 4],
-        unsupported: Vec::new(),
+        unsupported,
         inset_lr: (7.2, 7.2),
         inset_tb: (3.6, 3.6),
         anchor: None,
@@ -1943,4 +1948,30 @@ fn parse_table_cell(tc: Node) -> PmlCell {
         }
     }
     cell
+}
+
+fn parse_table_merge_span(tc: Node, name: &str, unsupported: &mut Vec<String>) -> u32 {
+    let Some(raw) = attr(tc, A, name) else {
+        return 1;
+    };
+    if let Some(value) = parse_i64(Some(raw))
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+    {
+        value
+    } else {
+        unsupported.push(format!("a:tc@{name} malformed value"));
+        1
+    }
+}
+
+fn parse_table_merge_flag(tc: Node, name: &str, unsupported: &mut Vec<String>) -> bool {
+    match attr(tc, A, name) {
+        None | Some("0") | Some("false") => false,
+        Some("1") | Some("true") => true,
+        Some(_) => {
+            unsupported.push(format!("a:tc@{name} malformed boolean"));
+            false
+        }
+    }
 }

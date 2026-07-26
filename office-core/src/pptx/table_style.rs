@@ -73,6 +73,8 @@ struct TableTextStyle {
 pub(crate) struct TableCellStyle {
     /// Cascaded cell fill.
     pub fill: Option<Fill>,
+    /// Whether omitted borders inherit PowerPoint's Medium Style 2 base grid.
+    pub inherited_base_grid: bool,
     borders: [BorderValue; 6],
     text: TableTextStyle,
 }
@@ -146,20 +148,11 @@ impl TableStyleList {
             ));
         }
         let row_count = table.rows.len();
-        let col_count = table.col_widths.len().max(
-            table
-                .rows
-                .iter()
-                .map(|row| {
-                    row.cells
-                        .iter()
-                        .map(|cell| cell.grid_span.max(1) as usize)
-                        .sum()
-                })
-                .max()
-                .unwrap_or(0),
-        );
-        let mut resolved = TableCellStyle::default();
+        let col_count = table.col_widths.len();
+        let mut resolved = TableCellStyle {
+            inherited_base_grid: is_medium_style_2(id),
+            ..TableCellStyle::default()
+        };
         apply_region(style, Region::Whole, &mut resolved)?;
         if table.band_rows {
             let band_row = row.saturating_sub(usize::from(table.first_row));
@@ -189,37 +182,60 @@ impl TableStyleList {
         let is_last_row = table.last_row && row + 1 == row_count;
         let is_first_col = table.first_col && col == 0;
         let is_last_col = table.last_col && col + 1 == col_count;
-        if is_first_row {
-            apply_region(style, Region::FirstRow, &mut resolved)?;
-        }
-        if is_last_row {
-            apply_region(style, Region::LastRow, &mut resolved)?;
+        // ISO/IEC 29500's table-style cascade is ordered, rather than a
+        // specificity contest. The later region wins for every property it
+        // specifies. This matters for one-row/one-column tables, where several
+        // conditional regions apply to the same cell.
+        if is_last_col {
+            apply_region(style, Region::LastCol, &mut resolved)?;
         }
         if is_first_col {
             apply_region(style, Region::FirstCol, &mut resolved)?;
         }
-        if is_last_col {
-            apply_region(style, Region::LastCol, &mut resolved)?;
+        if is_last_row {
+            apply_region(style, Region::LastRow, &mut resolved)?;
         }
-        let corner = match (is_first_row, is_last_row, is_first_col, is_last_col) {
-            (true, _, true, _) => Some(Region::Nw),
-            (true, _, _, true) => Some(Region::Ne),
-            (_, true, true, _) => Some(Region::Sw),
-            (_, true, _, true) => Some(Region::Se),
-            _ => None,
-        };
-        if let Some(region) = corner {
-            apply_region(style, region, &mut resolved)?;
+        if is_last_row && is_last_col {
+            apply_region(style, Region::Se, &mut resolved)?;
+        }
+        if is_last_row && is_first_col {
+            apply_region(style, Region::Sw, &mut resolved)?;
+        }
+        if is_first_row {
+            apply_region(style, Region::FirstRow, &mut resolved)?;
+        }
+        if is_first_row && is_last_col {
+            apply_region(style, Region::Ne, &mut resolved)?;
+        }
+        if is_first_row && is_first_col {
+            apply_region(style, Region::Nw, &mut resolved)?;
         }
         Ok(Some(resolved))
     }
 }
 
+fn is_medium_style_2(id: &str) -> bool {
+    const IDS: [&str; 7] = [
+        "{073A0DAA-6AF3-43AB-8588-CEC1D06C72B9}",
+        "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}",
+        "{21E4AEA4-8DFA-4A89-87EB-49C32662AFE0}",
+        "{F5AB1C69-6EDB-4FF4-983F-18BD219EF322}",
+        "{00A15C55-8517-42AA-B614-E9B94910E393}",
+        "{7DF18680-E054-41AD-8BC1-D1AEF772440D}",
+        "{93296810-A885-4BE3-A3E7-6D5BEEA58F35}",
+    ];
+    IDS.iter()
+        .any(|candidate| id.eq_ignore_ascii_case(candidate))
+}
+
 impl TableCellStyle {
-    pub(crate) fn border(&self, edge: usize, bounds: CellBounds) -> Option<&LineSpec> {
+    /// Returns whether the style cascade specified this edge and, when it did,
+    /// its visible line. `true, None` is an explicit `a:noFill`; keeping that
+    /// distinct from omission is required before applying the table default.
+    pub(crate) fn border(&self, edge: usize, bounds: CellBounds) -> (bool, Option<&LineSpec>) {
         let direct = &self.borders[edge];
         if direct.specified {
-            return direct.line.as_ref();
+            return (true, direct.line.as_ref());
         }
         let inside = match edge {
             TOP if bounds.row_start > 0 => Some(INSIDE_H),
@@ -228,12 +244,11 @@ impl TableCellStyle {
             RIGHT if bounds.col_end + 1 < bounds.col_count => Some(INSIDE_V),
             _ => None,
         };
-        inside.and_then(|index| {
-            self.borders[index]
-                .specified
-                .then(|| self.borders[index].line.as_ref())
-                .flatten()
-        })
+        let Some(index) = inside else {
+            return (false, None);
+        };
+        let value = &self.borders[index];
+        (value.specified, value.line.as_ref())
     }
 
     pub(crate) fn apply_text(&self, body: &TextBody) -> TextBody {

@@ -310,10 +310,99 @@ fn csv_empty_input_is_invalid() {
 }
 
 #[test]
-fn csv_wide_cell_wraps_fully_without_data_loss() {
-    // Regression (parity): long cells used to be truncated to one ellipsized
-    // line. A 600-char cell fits within the 8-line cap and must render
-    // completely, wrapped across multiple lines of its column.
+fn csv_preserves_unbreakable_cell_atoms() {
+    // Regression: proportional column squeezing followed by character-level
+    // wrapping split IDs, dates, joined identifiers, and ordinary words.
+    // Content-aware minima must keep each of these atoms in one text run.
+    let csv = "order_id,order_date,customer,company,city,country,sku,product,\
+               channel,qty,unit_price_eur,line_total_eur\n\
+               SO-30412,2026-04-01,Grace Whitfield,\"Meridian Foods, Ltd.\",\
+               Leeds,Switzerland,KV-3315,\"Chai latte mix, 400 g tin\",\
+               distributor,24,11.25,270.00\n";
+    let bytes = csv_to_pdf(csv.as_bytes(), &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let strings = all_show_strings(&doc);
+    for atom in [
+        "SO-30412",
+        "2026-04-01",
+        "Whitfield",
+        "Switzerland",
+        "KV-3315",
+        "distributor",
+        "11.25",
+        "270.00",
+    ] {
+        assert!(
+            strings.iter().any(|text| text == atom),
+            "{atom:?} must render without a mid-token split: {strings:?}"
+        );
+    }
+}
+
+#[test]
+fn csv_wide_numeric_table_shrinks_before_splitting_atoms() {
+    // Regression: every week_start date and several numeric values in a
+    // 14-column table were character-split. The whole table must shrink
+    // together until cell atoms fit, while header wrapping remains limited
+    // to natural underscore boundaries.
+    let csv = "week_start,active_users,new_signups,activation_pct,retention_d7_pct,\
+               mrr_usd,expansion_usd,churn_pct,nps,tickets,avg_reply_hrs,\
+               uptime_pct,deploys,error_rate_pct\n\
+               2026-02-01,18883,480,37.9,27.5,216797.3,8660.04,1.76,51,188,\
+               4.9,99.914,29,0.22\n";
+    let bytes = csv_to_pdf(csv.as_bytes(), &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let strings = all_show_strings(&doc);
+    for atom in ["week_start", "2026-02-01", "216797.3", "8660.04", "99.914"] {
+        assert!(
+            strings.iter().any(|text| text == atom),
+            "{atom:?} must render without a mid-token split: {strings:?}"
+        );
+    }
+    assert!(
+        !strings.iter().any(|text| text == "new_signu"),
+        "headers may wrap after '_' but never at an arbitrary character: {strings:?}"
+    );
+}
+
+#[test]
+fn csv_wrapping_preserves_interior_whitespace_runs() {
+    // Whitespace is a legal wrap opportunity, not permission to normalize
+    // quoted cell data. When both atoms fit on one line, the exact separator
+    // from the source must survive.
+    let csv = "id,notes\n1,\"alpha  beta   gamma\"\n";
+    let bytes = csv_to_pdf(csv.as_bytes(), &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let strings = all_show_strings(&doc);
+    assert!(
+        strings.iter().any(|text| text == "alpha  beta   gamma"),
+        "interior whitespace must be preserved exactly: {strings:?}"
+    );
+}
+
+#[test]
+fn csv_impossibly_dense_columns_fail_closed_without_overlapping_ellipses() {
+    // At the 4pt floor, a table must not scale columns below both their
+    // padding and a visible atom/ellipsis marker. Such geometry would place
+    // text outside its cell, so fail closed with a typed resource limit.
+    let headers: Vec<String> = (0..100).map(|i| format!("header_{i:03}")).collect();
+    let values: Vec<String> = (0..100).map(|i| format!("value-{i:03}")).collect();
+    let csv = format!("{}\n{}\n", headers.join(","), values.join(","));
+    let result = std::panic::catch_unwind(|| csv_to_pdf(csv.as_bytes(), &DocOptions::default()));
+    let error = result
+        .expect("dense columns must not panic")
+        .expect_err("geometry too dense for a visible marker");
+    assert!(
+        matches!(error, PdfCoreError::ResourceLimit(ref message) if message.contains("visible")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn csv_oversized_atom_ellipsizes_only_after_reaching_font_floor() {
+    // Rule change: table cells no longer character-wrap an indivisible token
+    // to preserve every byte. The table first shrinks to the 4pt floor; an
+    // atom that still cannot fit is visibly clipped with an ellipsis.
     let long = "x".repeat(600);
     let csv = format!("Name,Description\nitem,{long}\n");
     let bytes = csv_to_pdf(csv.as_bytes(), &DocOptions::default()).unwrap();
@@ -324,18 +413,22 @@ fn csv_wide_cell_wraps_fully_without_data_loss() {
         .iter()
         .map(|s| s.chars().filter(|&c| c == 'x').count())
         .sum();
-    assert_eq!(
-        x_total, 600,
-        "every cell character must render: {strings:?}"
-    );
-    let wrapped_lines = strings.iter().filter(|s| s.len() > 20).count();
     assert!(
-        wrapped_lines >= 3,
-        "cell must wrap over multiple lines, got {wrapped_lines}"
+        x_total < 600,
+        "an atom wider than the page at 4pt must be clipped: {strings:?}"
     );
     assert!(
-        !content.contains(&long),
-        "600-char cell must not be emitted as a single line"
+        strings
+            .iter()
+            .any(|text| text.starts_with('x') && text.ends_with("...")),
+        "clipping must be explicit, never a silent split: {strings:?}"
+    );
+    assert!(
+        tf_sizes(&content)
+            .iter()
+            .all(|size| (*size - 4.0).abs() < 0.01),
+        "oversized atom must reach the 4pt floor before clipping: {:?}",
+        tf_sizes(&content)
     );
 }
 
@@ -802,6 +895,32 @@ fn markdown_gfm_table_renders_as_table_not_raw_pipes() {
     // Surrounding paragraphs still render in order.
     assert!(strings.iter().any(|s| s.contains("Before table.")));
     assert!(strings.iter().any(|s| s.contains("After table.")));
+}
+
+#[test]
+fn markdown_table_uses_the_same_token_safe_layout_as_csv() {
+    // The CSV and GFM table renderers share layout helpers. Joined cell atoms
+    // must remain indivisible in both formats even when many columns force a
+    // shared font-size reduction.
+    let md = "\
+| week_start | order_id | mrr_usd | active_users | new_signups | activation_pct | retention_d7_pct | expansion_usd |\n\
+| --- | --- | --- | --- | --- | --- | --- | --- |\n\
+| 2026-04-01 | SO-30412 | 216797.3 | 18883 | 480 | 37.9 | 27.5 | 8660.04 |\n";
+    let bytes = markdown_to_pdf(md, &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let strings = all_show_strings(&doc);
+    for atom in [
+        "week_start",
+        "2026-04-01",
+        "SO-30412",
+        "216797.3",
+        "8660.04",
+    ] {
+        assert!(
+            strings.iter().any(|text| text == atom),
+            "{atom:?} must render without a mid-token split: {strings:?}"
+        );
+    }
 }
 
 #[test]
