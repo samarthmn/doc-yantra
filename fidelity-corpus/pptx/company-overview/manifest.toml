@@ -1,0 +1,11 @@
+title = "Company overview deck (real-world synthetic)"
+tier = "experimental"
+ssim_threshold = 0.90
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft PowerPoint for the web"
+ground_truth_exported_at = "2026-07-26"
+provenance = "web-export-unattested"
+input_sha256 = "07c183d05e39b87094a482be4fb063ed71ad69b9365613bbacb3273bb4a17097"
+golden_sha256 = "378c707faf4a87fea4ff97f3ac171effdf8526a788c7f7bebacd8b596b8a4391"
+notes = "Real-world synthetic fixture exported 2026-07-26 by the maintainer. Office-for-the-web export: the PDF carries no producer metadata (web export, unattested); hashes pin the exact bytes. Calibrated 2026-07-26: baseline weighted SSIM 0.8419; threshold is the 0.90 harness floor and the case stays experimental (non-gating) until it clears it."

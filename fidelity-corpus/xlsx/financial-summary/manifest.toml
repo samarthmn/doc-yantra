@@ -1,0 +1,11 @@
+title = "Financial summary workbook (real-world synthetic)"
+tier = "experimental"
+ssim_threshold = 0.90
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft Excel for the web"
+ground_truth_exported_at = "2026-07-26"
+provenance = "web-export-unattested"
+input_sha256 = "0d70eeb403452cf187e980c55c88d498dbefd6ab2228993f17530657dfb41c81"
+golden_sha256 = "cbda308b172c5e5a644e045284258508eaaa5cc406c53f8cad888fe2f71b7e99"
+notes = "Real-world synthetic fixture exported 2026-07-26 by the maintainer. Office-for-the-web export: the PDF carries no producer metadata (web export, unattested); hashes pin the exact bytes. Workbook sources declare the landscape Letter pageSetup the export used. Calibrated 2026-07-26: baseline weighted SSIM 0.8496; threshold is the 0.90 harness floor and the case stays experimental (non-gating) until it clears it."

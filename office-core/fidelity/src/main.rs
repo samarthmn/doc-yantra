@@ -177,6 +177,14 @@ struct Manifest {
     max_page_count_delta: u32,
     word_version: String,
     ground_truth_exported_at: String,
+    /// `"web-export-unattested"` opts a case out of PDF producer/date
+    /// matching: Office-for-the-web exports strip PDF metadata, so their
+    /// provenance rests on the manifest declaration, the pinned hashes, and
+    /// the notes. Absent (default) keeps the strict desktop contract.
+    #[serde(default)]
+    provenance: Option<String>,
+    #[serde(default)]
+    notes: String,
     input_sha256: String,
     golden_sha256: String,
     #[serde(default)]
@@ -337,7 +345,7 @@ fn run_probe(
         ..ConvertOptions::default()
     };
     let name = case.or(diag).expect("probe source kind was validated");
-    let resolved = resolver::resolve_for_case(name, &source, &base_options)?;
+    let resolved = resolver::resolve_for_case(name, &source, OfficeFormat::Docx, &base_options)?;
     let ours = convert(&source, OfficeFormat::Docx, &resolved.options)
         .with_context(|| format!("convert probe source {}", source_path.display()))?;
     if let Some(path) = dump_pdf {
@@ -434,6 +442,13 @@ fn list_missing() -> Result<()> {
 
 fn case_dirs(format: &str) -> Result<Vec<PathBuf>> {
     let base = corpus_root().join(format);
+    if !base.is_dir() {
+        anyhow::bail!(
+            "no {format} fidelity corpus cases found under {} — finalize cases from \
+             fidelity-corpus/{format}-pending/ (ground truths + calibrated manifests) first",
+            base.display()
+        );
+    }
     let mut dirs = Vec::new();
     let entries = std::fs::read_dir(&base)
         .with_context(|| format!("read fidelity corpus {}", base.display()))?;
@@ -455,13 +470,36 @@ fn case_dirs(format: &str) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+/// The case's frozen source: `source.<format>`, plus `source.xlsm` for
+/// macro-enabled workbooks in the xlsx corpus.
+fn case_source_file(dir: &Path, format: &str) -> Result<PathBuf> {
+    let mut candidates = vec![format!("source.{format}")];
+    if format == "xlsx" {
+        candidates.push("source.xlsm".to_string());
+    }
+    for candidate in &candidates {
+        let path = dir.join(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    anyhow::bail!(
+        "selected case {} is missing {}",
+        dir.display(),
+        candidates.join(" or ")
+    )
+}
+
 fn run(format: &str, only: Option<&str>, selected_report_dir: &Path) -> Result<()> {
     ensure_diagnostic_output_outside_corpus(selected_report_dir)?;
-    if format != "docx" {
-        anyhow::bail!(
+    let office_format = match format {
+        "docx" => OfficeFormat::Docx,
+        "pptx" => OfficeFormat::Pptx,
+        "xlsx" => OfficeFormat::Xlsx,
+        _ => anyhow::bail!(
             "no {format} reference corpus is committed; refusing to claim fidelity coverage"
-        );
-    }
+        ),
+    };
     let pages_dir = selected_report_dir.join("pages");
     std::fs::create_dir_all(&pages_dir).ok();
 
@@ -476,10 +514,7 @@ fn run(format: &str, only: Option<&str>, selected_report_dir: &Path) -> Result<(
 
     for dir in selected {
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        let source = dir.join("source.docx");
-        if !source.is_file() {
-            anyhow::bail!("selected case {name} is missing {}", source.display());
-        }
+        let source = case_source_file(&dir, format)?;
         let gt = dir.join("ground-truth.pdf");
         if !gt.is_file() {
             anyhow::bail!("selected case {name} is missing {}", gt.display());
@@ -492,13 +527,18 @@ fn run(format: &str, only: Option<&str>, selected_report_dir: &Path) -> Result<(
         validate_manifest_contract(&manifest_path, &manifest)?;
         let source_bytes = read_verified_frozen_file(&source, &manifest.input_sha256)?;
         let ground_truth_bytes = read_verified_frozen_file(&gt, &manifest.golden_sha256)?;
-        validate_provenance(&manifest_path, &manifest, &gt, &ground_truth_bytes)?;
-        let resolved =
-            resolver::resolve_for_case(&name, &source_bytes, &ConvertOptions::default())?;
-        validate_required_fonts(&name, &source_bytes, &manifest, &resolved)?;
+        validate_provenance(&manifest_path, &manifest, format, &gt, &ground_truth_bytes)?;
+        let resolved = resolver::resolve_for_case(
+            &name,
+            &source_bytes,
+            office_format,
+            &ConvertOptions::default(),
+        )?;
+        validate_required_fonts(&name, &source_bytes, office_format, &manifest, &resolved)?;
         reports.push(score_case(
             &name,
             &source_bytes,
+            office_format,
             &ground_truth_bytes,
             &manifest,
             &pages_dir,
@@ -606,10 +646,11 @@ fn lock_fonts() -> Result<()> {
 fn validate_required_fonts(
     case_name: &str,
     source: &[u8],
+    format: OfficeFormat,
     manifest: &Manifest,
     resolved: &resolver::ResolvedFonts,
 ) -> Result<()> {
-    let unresolved = office_core::font_requests(source, OfficeFormat::Docx, &resolved.options)
+    let unresolved = office_core::font_requests(source, format, &resolved.options)
         .with_context(|| format!("verify resolved fonts for fidelity case {case_name}"))?;
     for required in &manifest.required_fonts {
         let required = required
@@ -639,7 +680,7 @@ fn validate_required_fonts(
             );
         }
     }
-    let profile = office_core::profile_with_options(source, OfficeFormat::Docx, &resolved.options)
+    let profile = office_core::profile_with_options(source, format, &resolved.options)
         .with_context(|| format!("profile resolved fonts for fidelity case {case_name}"))?;
     validate_required_font_profile(case_name, &manifest.required_fonts, &profile)?;
     Ok(())
@@ -816,13 +857,36 @@ fn read_verified_frozen_file(path: &Path, expected: &str) -> Result<Vec<u8>> {
 fn validate_provenance(
     path: &Path,
     manifest: &Manifest,
+    format: &str,
     ground_truth_path: &Path,
     ground_truth: &[u8],
 ) -> Result<()> {
+    if manifest.provenance.as_deref() == Some("web-export-unattested") {
+        // Office-for-the-web exports carry no usable PDF metadata (and may
+        // pass through re-packagers). The manifest must still declare the
+        // authoring tool and record the export in its notes; hashes pin the
+        // exact bytes.
+        if manifest.word_version.trim().is_empty()
+            || !manifest.notes.to_ascii_lowercase().contains("web export")
+        {
+            anyhow::bail!(
+                "{} opts into web-export-unattested provenance but does not                  declare the authoring tool and a 'web export' note",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    // The provenance producer follows the corpus format: Word exports docx
+    // truths, PowerPoint pptx, Excel xlsx/xlsm.
+    let expected_producer = match format {
+        "pptx" => "microsoft powerpoint",
+        "xlsx" => "microsoft excel",
+        _ => "microsoft word",
+    };
     let declared_producer = manifest.word_version.trim();
     if !declared_producer
         .to_ascii_lowercase()
-        .starts_with("microsoft word")
+        .starts_with(expected_producer)
         || declared_producer.to_ascii_lowercase().contains("tbd")
         || declared_producer
             .to_ascii_lowercase()
@@ -946,8 +1010,12 @@ fn enforce_thresholds(reports: &[CaseReport], require_both_tiers: bool) -> Resul
     }) {
         anyhow::bail!("fidelity manifest has an unknown tier");
     }
-    if require_both_tiers && (core.is_empty() || extended.is_empty()) {
-        anyhow::bail!("full fidelity corpus must contain both core and extended cases");
+    let all_experimental =
+        !reports.is_empty() && reports.iter().all(|report| report.tier == "experimental");
+    if require_both_tiers && !all_experimental && (core.is_empty() || extended.is_empty()) {
+        anyhow::bail!(
+            "full fidelity corpus must contain both core and extended cases (an all-experimental corpus is exempt while its cases calibrate)"
+        );
     }
     if core.iter().any(|report| !report.pass) {
         anyhow::bail!("core fidelity gate failed: every core case must pass");
@@ -1009,6 +1077,13 @@ mod gate_tests {
     #[test]
     fn full_release_gate_requires_both_tiers() {
         assert!(enforce_thresholds(&[report("core", true)], true).is_err());
+    }
+
+    #[test]
+    fn full_release_gate_exempts_all_experimental_corpus() {
+        let reports = [report("experimental", false), report("experimental", true)];
+        assert!(enforce_thresholds(&reports, true).is_ok());
+        assert!(enforce_thresholds(&[], true).is_err());
     }
 
     #[test]
@@ -1350,10 +1425,13 @@ golden_sha256 = "000000000000000000000000000000000000000000000000000000000000000
             geometry_median_pt: default_geometry_median_pt(),
             geometry_p95_pt: default_geometry_p95_pt(),
             geometry_max_unmatched_pct: default_geometry_max_unmatched_pct(),
+            provenance: None,
+            notes: String::new(),
         };
         validate_provenance(
             Path::new("creator-fallback/manifest.toml"),
             &manifest,
+            "docx",
             &ground_truth,
             &bytes,
         )
@@ -1361,9 +1439,11 @@ golden_sha256 = "000000000000000000000000000000000000000000000000000000000000000
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_case(
     name: &str,
     source: &[u8],
+    format: OfficeFormat,
     truth_pdf: &[u8],
     manifest: &Manifest,
     pages_dir: &Path,
@@ -1397,7 +1477,7 @@ fn score_case(
         note: String::new(),
     };
 
-    let our_pdf = match convert(source, OfficeFormat::Docx, options) {
+    let our_pdf = match convert(source, format, options) {
         Ok(out) => {
             report.our_pages = out.page_count;
             #[cfg(feature = "layout-trace")]

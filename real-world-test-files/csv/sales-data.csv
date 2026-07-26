@@ -1,0 +1,81 @@
+order_id,order_date,customer,company,city,country,sku,product,channel,qty,unit_price_eur,line_total_eur
+SO-30412,2026-04-01,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-3315,"Chai latte mix, 400 g tin",online,24,11.25,270.00
+SO-30413,2026-04-03,Marta Kowalska,Kowalska i Wspólnicy Sp. z o.o.,Kraków,Poland,KV-1044,"Decaf filter roast, 500 g",retail,8,9.75,78.00
+SO-30414,2026-04-04,Camila Ferreira,Ferreira Distribuição Ltda.,São Paulo,Brazil,KV-4020,"Compostable cup sleeve, 500 ct",wholesale,12,21.60,259.20
+SO-30415,2026-04-04,Camila Ferreira,Ferreira Distribuição Ltda.,São Paulo,Brazil,KV-1043,"Single-origin espresso beans, 1 kg",online,2,18.40,36.80
+SO-30416,2026-04-06,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-4020,"Compostable cup sleeve, 500 ct",wholesale,12,21.60,259.20
+SO-30417,2026-04-07,Ryan O'Donnell,Harbourline Provisions,Cork,Ireland,KV-2210,Ceramic pour-over set,distributor,3,32.00,96.00
+SO-30418,2026-04-07,Ryan O'Donnell,Harbourline Provisions,Cork,Ireland,KV-5150,"Digital brew scale, 0.1 g",retail,10,44.80,448.00
+SO-30421,2026-04-08,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-1043,"Single-origin espresso beans, 1 kg",retail,4,18.40,73.60
+SO-30423,2026-04-08,Ryan O'Donnell,Harbourline Provisions,Cork,Ireland,KV-1043,"Single-origin espresso beans, 1 kg",wholesale,6,18.40,110.40
+SO-30424,2026-04-10,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-2214,"Stainless milk pitcher, 600 ml",distributor,10,14.50,145.00
+SO-30427,2026-04-11,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-3315,"Chai latte mix, 400 g tin",distributor,24,11.25,270.00
+SO-30428,2026-04-12,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-1044,"Decaf filter roast, 500 g",distributor,10,9.75,97.50
+SO-30429,2026-04-12,Marta Kowalska,Kowalska i Wspólnicy Sp. z o.o.,Kraków,Poland,KV-5107,"Barista apron, waxed canvas",distributor,5,39.95,199.75
+SO-30430,2026-04-13,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-3300,"Cold brew concentrate, 6-pack",distributor,3,27.90,83.70
+SO-30431,2026-04-14,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-5150,"Digital brew scale, 0.1 g",retail,3,44.80,134.40
+SO-30432,2026-04-15,Priya Raghavan,Cardamom & Clove Imports,Singapore,Singapore,KV-5150,"Digital brew scale, 0.1 g",distributor,3,44.80,134.40
+SO-30433,2026-04-15,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-3300,"Cold brew concentrate, 6-pack",retail,8,27.90,223.20
+SO-30434,2026-04-16,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-5150,"Digital brew scale, 0.1 g",retail,1,44.80,44.80
+SO-30435,2026-04-17,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-3300,"Cold brew concentrate, 6-pack",retail,2,27.90,55.80
+SO-30436,2026-04-18,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-2214,"Stainless milk pitcher, 600 ml",retail,10,14.50,145.00
+SO-30437,2026-04-19,Camila Ferreira,Ferreira Distribuição Ltda.,São Paulo,Brazil,KV-2214,"Stainless milk pitcher, 600 ml",distributor,6,14.50,87.00
+SO-30438,2026-04-20,Ryan O'Donnell,Harbourline Provisions,Cork,Ireland,KV-5107,"Barista apron, waxed canvas",retail,3,39.95,119.85
+SO-30439,2026-04-21,Camila Ferreira,Ferreira Distribuição Ltda.,São Paulo,Brazil,KV-5107,"Barista apron, waxed canvas",wholesale,1,39.95,39.95
+SO-30440,2026-04-22,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-5150,"Digital brew scale, 0.1 g",wholesale,10,44.80,448.00
+SO-30442,2026-04-23,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-2214,"Stainless milk pitcher, 600 ml",online,4,14.50,58.00
+SO-30444,2026-04-25,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-1044,"Decaf filter roast, 500 g",distributor,12,9.75,117.00
+SO-30445,2026-04-26,Ryan O'Donnell,Harbourline Provisions,Cork,Ireland,KV-1044,"Decaf filter roast, 500 g",online,2,9.75,19.50
+SO-30447,2026-04-27,Étienne Côté,"Côté Épicerie, Inc.",Québec City,Canada,KV-3300,"Cold brew concentrate, 6-pack",wholesale,2,27.90,55.80
+SO-30448,2026-04-28,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-2214,"Stainless milk pitcher, 600 ml",retail,2,14.50,29.00
+SO-30451,2026-05-01,Tomás Aguirre,"Aguirre Hermanos, S.A.",Valparaíso,Chile,KV-4020,"Compostable cup sleeve, 500 ct",wholesale,10,21.60,216.00
+SO-30454,2026-05-02,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-4021,"Double-wall paper cup 12 oz, 1000 ct",retail,24,68.00,1632.00
+SO-30455,2026-05-03,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-2210,Ceramic pour-over set,wholesale,2,32.00,64.00
+SO-30457,2026-05-04,Priya Raghavan,Cardamom & Clove Imports,Singapore,Singapore,KV-4020,"Compostable cup sleeve, 500 ct",retail,2,21.60,43.20
+SO-30459,2026-05-06,Ryan O'Donnell,Harbourline Provisions,Cork,Ireland,KV-2214,"Stainless milk pitcher, 600 ml",wholesale,4,14.50,58.00
+SO-30461,2026-05-08,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-1044,"Decaf filter roast, 500 g",distributor,1,9.75,9.75
+SO-30462,2026-05-09,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-3300,"Cold brew concentrate, 6-pack",online,5,27.90,139.50
+SO-30463,2026-05-10,Tomás Aguirre,"Aguirre Hermanos, S.A.",Valparaíso,Chile,KV-4021,"Double-wall paper cup 12 oz, 1000 ct",wholesale,6,68.00,408.00
+SO-30464,2026-05-10,Tomás Aguirre,"Aguirre Hermanos, S.A.",Valparaíso,Chile,KV-3300,"Cold brew concentrate, 6-pack",distributor,2,27.90,55.80
+SO-30467,2026-05-11,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-3315,"Chai latte mix, 400 g tin",wholesale,2,11.25,22.50
+SO-30469,2026-05-12,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-3300,"Cold brew concentrate, 6-pack",online,4,27.90,111.60
+SO-30471,2026-05-13,Lena Vogel,Vogel & Brandt KG,Zürich,Switzerland,KV-2214,"Stainless milk pitcher, 600 ml",retail,2,14.50,29.00
+SO-30472,2026-05-13,Elin Lindqvist,Lindqvist Handel AB,Göteborg,Sweden,KV-5150,"Digital brew scale, 0.1 g",online,3,44.80,134.40
+SO-30475,2026-05-14,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-1044,"Decaf filter roast, 500 g",online,5,9.75,48.75
+SO-30476,2026-05-15,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-3300,"Cold brew concentrate, 6-pack",distributor,3,27.90,83.70
+SO-30477,2026-05-16,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-3315,"Chai latte mix, 400 g tin",retail,2,11.25,22.50
+SO-30478,2026-05-16,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-3300,"Cold brew concentrate, 6-pack",distributor,2,27.90,55.80
+SO-30479,2026-05-16,Étienne Côté,"Côté Épicerie, Inc.",Québec City,Canada,KV-5107,"Barista apron, waxed canvas",online,10,39.95,399.50
+SO-30481,2026-05-16,Ryan O'Donnell,Harbourline Provisions,Cork,Ireland,KV-4020,"Compostable cup sleeve, 500 ct",online,24,21.60,518.40
+SO-30482,2026-05-16,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-4021,"Double-wall paper cup 12 oz, 1000 ct",distributor,10,68.00,680.00
+SO-30483,2026-05-16,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-4020,"Compostable cup sleeve, 500 ct",wholesale,2,21.60,43.20
+SO-30484,2026-05-18,Camila Ferreira,Ferreira Distribuição Ltda.,São Paulo,Brazil,KV-5150,"Digital brew scale, 0.1 g",online,6,44.80,268.80
+SO-30487,2026-05-18,Elin Lindqvist,Lindqvist Handel AB,Göteborg,Sweden,KV-3300,"Cold brew concentrate, 6-pack",distributor,3,27.90,83.70
+SO-30488,2026-05-19,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-3315,"Chai latte mix, 400 g tin",retail,6,11.25,67.50
+SO-30489,2026-05-19,Lena Vogel,Vogel & Brandt KG,Zürich,Switzerland,KV-4021,"Double-wall paper cup 12 oz, 1000 ct",wholesale,4,68.00,272.00
+SO-30492,2026-05-19,Lena Vogel,Vogel & Brandt KG,Zürich,Switzerland,KV-3315,"Chai latte mix, 400 g tin",retail,2,11.25,22.50
+SO-30494,2026-05-19,Elin Lindqvist,Lindqvist Handel AB,Göteborg,Sweden,KV-3300,"Cold brew concentrate, 6-pack",wholesale,4,27.90,111.60
+SO-30495,2026-05-19,Marta Kowalska,Kowalska i Wspólnicy Sp. z o.o.,Kraków,Poland,KV-4021,"Double-wall paper cup 12 oz, 1000 ct",wholesale,8,68.00,544.00
+SO-30498,2026-05-19,Marta Kowalska,Kowalska i Wspólnicy Sp. z o.o.,Kraków,Poland,KV-3300,"Cold brew concentrate, 6-pack",distributor,5,27.90,139.50
+SO-30499,2026-05-19,Priya Raghavan,Cardamom & Clove Imports,Singapore,Singapore,KV-5107,"Barista apron, waxed canvas",online,6,39.95,239.70
+SO-30502,2026-05-20,Rafael Núñez,"Núñez y Asociados, S.L.",Sevilla,Spain,KV-1044,"Decaf filter roast, 500 g",distributor,2,9.75,19.50
+SO-30505,2026-05-21,Elin Lindqvist,Lindqvist Handel AB,Göteborg,Sweden,KV-5107,"Barista apron, waxed canvas",online,12,39.95,479.40
+SO-30508,2026-05-22,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-1043,"Single-origin espresso beans, 1 kg",online,6,18.40,110.40
+SO-30510,2026-05-23,Marta Kowalska,Kowalska i Wspólnicy Sp. z o.o.,Kraków,Poland,KV-2210,Ceramic pour-over set,retail,24,32.00,768.00
+SO-30512,2026-05-24,Camila Ferreira,Ferreira Distribuição Ltda.,São Paulo,Brazil,KV-5107,"Barista apron, waxed canvas",distributor,4,39.95,159.80
+SO-30513,2026-05-26,Priya Raghavan,Cardamom & Clove Imports,Singapore,Singapore,KV-4021,"Double-wall paper cup 12 oz, 1000 ct",online,8,68.00,544.00
+SO-30515,2026-05-27,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-4020,"Compostable cup sleeve, 500 ct",retail,8,21.60,172.80
+SO-30516,2026-05-28,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-2210,Ceramic pour-over set,retail,3,32.00,96.00
+SO-30519,2026-05-28,Marta Kowalska,Kowalska i Wspólnicy Sp. z o.o.,Kraków,Poland,KV-1043,"Single-origin espresso beans, 1 kg",online,24,18.40,441.60
+SO-30520,2026-05-28,Marta Kowalska,Kowalska i Wspólnicy Sp. z o.o.,Kraków,Poland,KV-4020,"Compostable cup sleeve, 500 ct",online,5,21.60,108.00
+SO-30522,2026-06-02,Étienne Côté,"Côté Épicerie, Inc.",Québec City,Canada,KV-4020,"Compostable cup sleeve, 500 ct",retail,4,21.60,86.40
+SO-30525,2026-06-02,Grace Whitfield,"Meridian Foods, Ltd.",Leeds,United Kingdom,KV-1044,"Decaf filter roast, 500 g",retail,10,9.75,97.50
+SO-30528,2026-06-02,Daniel Okafor,Bluepine Trading Co.,"Portland, OR",United States,KV-1044,"Decaf filter roast, 500 g",retail,6,9.75,58.50
+SO-30529,2026-06-03,Lena Vogel,Vogel & Brandt KG,Zürich,Switzerland,KV-1044,"Decaf filter roast, 500 g",wholesale,4,9.75,39.00
+SO-30530,2026-06-05,Elin Lindqvist,Lindqvist Handel AB,Göteborg,Sweden,KV-2210,Ceramic pour-over set,distributor,1,32.00,32.00
+SO-30532,2026-06-05,Elin Lindqvist,Lindqvist Handel AB,Göteborg,Sweden,KV-4020,"Compostable cup sleeve, 500 ct",online,6,21.60,129.60
+SO-30535,2026-06-06,Anja Müller,Müller Feinkost GmbH,Hamburg,Germany,KV-2210,Ceramic pour-over set,distributor,3,32.00,96.00
+SO-30538,2026-06-07,Lena Vogel,Vogel & Brandt KG,Zürich,Switzerland,KV-5107,"Barista apron, waxed canvas",retail,3,39.95,119.85
+SO-30539,2026-06-08,Elin Lindqvist,Lindqvist Handel AB,Göteborg,Sweden,KV-5150,"Digital brew scale, 0.1 g",online,10,44.80,448.00
+SO-30540,2026-06-10,Priya Raghavan,Cardamom & Clove Imports,Singapore,Singapore,KV-3315,"Chai latte mix, 400 g tin",retail,2,11.25,22.50
+SO-30541,2026-06-11,Lena Vogel,Vogel & Brandt KG,Zürich,Switzerland,KV-4021,"Double-wall paper cup 12 oz, 1000 ct",online,24,68.00,1632.00

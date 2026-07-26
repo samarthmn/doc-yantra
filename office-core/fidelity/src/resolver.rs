@@ -397,6 +397,7 @@ pub(crate) fn cache_dir() -> std::path::PathBuf {
 pub(crate) fn resolve_for_case(
     case_name: &str,
     source: &[u8],
+    format: office_core::OfficeFormat,
     base_options: &ConvertOptions,
 ) -> Result<ResolvedFonts> {
     let lock_path = lock_path();
@@ -404,11 +405,10 @@ pub(crate) fn resolve_for_case(
         .with_context(|| format!("read fidelity font lock {}", lock_path.display()))?;
     let lock: FontLock = toml::from_str(&lock_contents)
         .with_context(|| format!("parse fidelity font lock {}", lock_path.display()))?;
-    let requests =
-        office_core::font_requests(source, office_core::OfficeFormat::Docx, base_options)
-            .with_context(|| format!("discover fonts for fidelity case {case_name}"))?;
+    let requests = office_core::font_requests(source, format, base_options)
+        .with_context(|| format!("discover fonts for fidelity case {case_name}"))?;
     let (mut provider_requests, satisfied_families) =
-        provider_requests(source, base_options, &requests)?;
+        provider_requests(source, format, base_options, &requests)?;
     let fetcher = HttpFetcher::new()?;
     let mut pinned_options = base_options.clone();
     let pinned_families = attach_pinned_hinted_sources(&requests, &mut pinned_options, &fetcher)?;
@@ -759,7 +759,12 @@ pub(crate) fn refresh_lock(sources: &[(String, Vec<u8>)]) -> Result<usize> {
             &ConvertOptions::default(),
         )
         .with_context(|| format!("discover fonts for fidelity case {case_name}"))?;
-        let (requests, _) = provider_requests(source, &ConvertOptions::default(), &requests)?;
+        let (requests, _) = provider_requests(
+            source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+            &requests,
+        )?;
         for request in &requests {
             for font in desired_artifacts(request)? {
                 desired.entry(font.url()).or_insert(font);
@@ -1030,11 +1035,30 @@ fn mapped_families(requests: &[FontRequest]) -> BTreeSet<String> {
 
 fn provider_requests(
     source: &[u8],
+    format: office_core::OfficeFormat,
     base_options: &ConvertOptions,
     requests: &[FontRequest],
 ) -> Result<(Vec<FontRequest>, BTreeSet<String>)> {
-    let document = office_core::layout::WordDoc::open(source, base_options)
-        .context("open document for fidelity provider resolution")?;
+    // Only the resolved font database is needed; open the format's own
+    // document type so embedded faces surface for every corpus format.
+    let fonts = match format {
+        office_core::OfficeFormat::Pptx => {
+            office_core::pptx::PptxDoc::open(source, base_options)
+                .context("open presentation for fidelity provider resolution")?
+                .fonts
+        }
+        office_core::OfficeFormat::Xlsx => {
+            office_core::xlsx::XlsxDoc::open(source, base_options)
+                .context("open workbook for fidelity provider resolution")?
+                .fonts
+        }
+        _ => {
+            office_core::layout::WordDoc::open(source, base_options)
+                .context("open document for fidelity provider resolution")?
+                .fonts
+        }
+    };
+    let document_fonts = &fonts;
     let mut provider = Vec::new();
     let mut satisfied = BTreeSet::new();
     for request in requests {
@@ -1042,13 +1066,13 @@ fn provider_requests(
             continue;
         };
         let native = office_core::fonts::resolve_exact_or_substitute_with_stretch(
-            &document.fonts,
+            document_fonts,
             &request.family,
             request.weight,
             request.italic,
             request.stretch,
         );
-        if let Some(face) = native.and_then(|face| document.fonts.face(face)) {
+        if let Some(face) = native.and_then(|face| document_fonts.face(face)) {
             satisfied.insert(face.family_name.clone());
         } else {
             catalog_font(id)?;
@@ -1595,9 +1619,13 @@ mod tests {
         )
         .expect("preflight Calibri request");
         assert!(requests.iter().any(|request| request.family == "Calibri"));
-        let (provider, satisfied) =
-            provider_requests(&source, &ConvertOptions::default(), &requests)
-                .expect("filter provider requests");
+        let (provider, satisfied) = provider_requests(
+            &source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+            &requests,
+        )
+        .expect("filter provider requests");
         assert!(
             provider.is_empty(),
             "Carlito is already bundled: {provider:?}"
@@ -1616,9 +1644,13 @@ mod tests {
             &ConvertOptions::default(),
         )
         .expect("preflight Arial request");
-        let (provider, satisfied) =
-            provider_requests(&source, &ConvertOptions::default(), &requests)
-                .expect("filter provider requests");
+        let (provider, satisfied) = provider_requests(
+            &source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+            &requests,
+        )
+        .expect("filter provider requests");
 
         assert!(
             provider.is_empty(),
@@ -1633,8 +1665,13 @@ mod tests {
             r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr><w:t>Family contract</w:t></w:r></w:p>"#,
         );
 
-        let resolved = resolve_for_case("fixture", &source, &ConvertOptions::default())
-            .expect("resolve bundled Arial substitute");
+        let resolved = resolve_for_case(
+            "fixture",
+            &source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+        )
+        .expect("resolve bundled Arial substitute");
         // The unused Arimo alias must never be recorded. On machines with a
         // local Office install the real Arial also registers; the bundled
         // Liberation contract holds either way.
@@ -1659,9 +1696,13 @@ mod tests {
             &ConvertOptions::default(),
         )
         .expect("preflight Arial request");
-        let (provider, satisfied) =
-            provider_requests(&source, &ConvertOptions::default(), &requests)
-                .expect("resolve bundled Arial face");
+        let (provider, satisfied) = provider_requests(
+            &source,
+            office_core::OfficeFormat::Docx,
+            &ConvertOptions::default(),
+            &requests,
+        )
+        .expect("resolve bundled Arial face");
         assert!(provider.is_empty(), "provider must not fetch: {provider:?}");
         assert_eq!(satisfied, BTreeSet::from(["Liberation Sans".to_string()]));
 

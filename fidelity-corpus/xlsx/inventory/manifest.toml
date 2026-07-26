@@ -1,0 +1,11 @@
+title = "Inventory workbook (real-world synthetic)"
+tier = "experimental"
+ssim_threshold = 0.90
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft Excel for the web"
+ground_truth_exported_at = "2026-07-26"
+provenance = "web-export-unattested"
+input_sha256 = "76b94aa4f8afeffaf1df61d19a02854528c22164e21e6fdccb7c5db724f4190f"
+golden_sha256 = "c00e47e21e335aa68aeb8b146c1448f4cb6562d35047ee1027531eb88cf49997"
+notes = "Real-world synthetic fixture exported 2026-07-26 by the maintainer. Office-for-the-web export: the PDF carries no producer metadata (web export, unattested); hashes pin the exact bytes. Workbook sources declare the landscape Letter pageSetup the export used. Calibrated 2026-07-26: baseline weighted SSIM 0.0000; threshold is the 0.90 harness floor and the case stays experimental (non-gating) until it clears it."
