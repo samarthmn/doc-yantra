@@ -748,26 +748,53 @@ pub struct RunFonts {
 }
 
 impl RunFonts {
-    /// Overlays `self` (higher priority) over `base`, field by field.
+    /// Overlays `self` (higher priority) over `base`, one script slot at a
+    /// time. A direct and theme attribute are alternative selectors for the
+    /// same slot, so either selector at this level replaces both inherited
+    /// selectors.
     pub fn merge_over(&self, base: &RunFonts) -> RunFonts {
+        fn slot(
+            direct: &Option<String>,
+            theme: &Option<String>,
+            base_direct: &Option<String>,
+            base_theme: &Option<String>,
+        ) -> (Option<String>, Option<String>) {
+            if direct.is_some() || theme.is_some() {
+                (direct.clone(), theme.clone())
+            } else {
+                (base_direct.clone(), base_theme.clone())
+            }
+        }
+
+        let (ascii, ascii_theme) = slot(
+            &self.ascii,
+            &self.ascii_theme,
+            &base.ascii,
+            &base.ascii_theme,
+        );
+        let (h_ansi, h_ansi_theme) = slot(
+            &self.h_ansi,
+            &self.h_ansi_theme,
+            &base.h_ansi,
+            &base.h_ansi_theme,
+        );
+        let (east_asia, east_asia_theme) = slot(
+            &self.east_asia,
+            &self.east_asia_theme,
+            &base.east_asia,
+            &base.east_asia_theme,
+        );
+        let (cs, cs_theme) = slot(&self.cs, &self.cs_theme, &base.cs, &base.cs_theme);
+
         RunFonts {
-            ascii: self.ascii.clone().or_else(|| base.ascii.clone()),
-            h_ansi: self.h_ansi.clone().or_else(|| base.h_ansi.clone()),
-            east_asia: self.east_asia.clone().or_else(|| base.east_asia.clone()),
-            cs: self.cs.clone().or_else(|| base.cs.clone()),
-            ascii_theme: self
-                .ascii_theme
-                .clone()
-                .or_else(|| base.ascii_theme.clone()),
-            h_ansi_theme: self
-                .h_ansi_theme
-                .clone()
-                .or_else(|| base.h_ansi_theme.clone()),
-            east_asia_theme: self
-                .east_asia_theme
-                .clone()
-                .or_else(|| base.east_asia_theme.clone()),
-            cs_theme: self.cs_theme.clone().or_else(|| base.cs_theme.clone()),
+            ascii,
+            h_ansi,
+            east_asia,
+            cs,
+            ascii_theme,
+            h_ansi_theme,
+            east_asia_theme,
+            cs_theme,
         }
     }
 }

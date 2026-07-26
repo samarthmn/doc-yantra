@@ -1,9 +1,13 @@
-//! Per-face metrics: line height (OS/2 Windows ascent/descent plus the hhea
-//! line gap), glyph lookup, advances, and kerning (legacy `kern` table + GPOS
-//! pair adjustment).
+//! Per-face metrics: Word-compatible line height (OS/2 Windows ascent/descent
+//! plus compatibility leading), glyph lookup, advances, and kerning (legacy
+//! `kern` table + GPOS pair adjustment).
 
 pub use ttf_parser::GlyphId;
 use ttf_parser::gpos::{PairAdjustment, PositioningSubtable};
+
+/// Minimum line box used by Word for the classic 2048-upem Latin metrics:
+/// 1825 Win ascent + 443 Win descent + 87 compatibility leading.
+const WORD_MIN_LINE_BOX_EM: f64 = 2_355.0 / 2_048.0;
 
 /// Metrics for one parsed face. Cheap to construct; wraps a `ttf_parser::Face`.
 pub struct FaceMetrics<'a> {
@@ -13,7 +17,7 @@ pub struct FaceMetrics<'a> {
     ascent: f64,
     /// Descent in font units (positive magnitude, down from baseline).
     descent: f64,
-    /// Line gap in font units.
+    /// Line gap or Word compatibility leading in font units.
     line_gap: f64,
     /// Legacy East Asian class whose per-size line box splits Word measures
     /// from the classic Windows fonts' bitmap-strike metrics (extracted from
@@ -64,10 +68,11 @@ fn legacy_size_split(class: LegacyCjkClass, size_pt: f64) -> Option<(f64, f64)> 
 impl<'a> FaceMetrics<'a> {
     /// Builds metrics from a parsed face. **Prefers OS/2 `usWinAscent`/
     /// `usWinDescent`** (what Word uses for the em box), falling back to hhea,
-    /// and retains the hhea line gap in either case.
+    /// and retains the hhea line gap in either case. Fonts whose reported gap
+    /// would make the line box smaller than Word's classic 2355/2048-em
+    /// minimum receive only the missing compatibility leading.
     pub fn new(face: ttf_parser::Face<'a>) -> FaceMetrics<'a> {
         let units_per_em = face.units_per_em() as f64;
-        let line_gap = face.line_gap() as f64;
         let (ascent, descent) = match face.tables().os2 {
             Some(os2) => {
                 let asc = os2.windows_ascender() as f64;
@@ -76,6 +81,8 @@ impl<'a> FaceMetrics<'a> {
             }
             None => (face.ascender() as f64, (face.descender() as f64).abs()),
         };
+        let line_gap =
+            f64::from(face.line_gap()).max(WORD_MIN_LINE_BOX_EM * units_per_em - ascent - descent);
         FaceMetrics {
             face,
             units_per_em: units_per_em.max(1.0),
@@ -288,6 +295,43 @@ mod tests {
     use super::FaceMetrics;
     use crate::layout::paragraph::apply_line_spacing;
     use crate::oxml::wml::LineSpacing;
+
+    fn with_zero_hhea_line_gap(sfnt: &[u8]) -> Vec<u8> {
+        let mut patched = sfnt.to_vec();
+        let table_count = usize::from(u16::from_be_bytes([patched[4], patched[5]]));
+        for index in 0..table_count {
+            let record = 12 + index * 16;
+            if patched.get(record..record + 4) != Some(b"hhea") {
+                continue;
+            }
+            let offset = u32::from_be_bytes([
+                patched[record + 8],
+                patched[record + 9],
+                patched[record + 10],
+                patched[record + 11],
+            ]) as usize;
+            patched[offset + 8..offset + 10].copy_from_slice(&0_i16.to_be_bytes());
+            return patched;
+        }
+        panic!("fixture must contain hhea");
+    }
+
+    #[test]
+    fn word_line_box_keeps_115_percent_minimum_when_hhea_gap_is_zero() {
+        let bytes = with_zero_hhea_line_gap(include_bytes!(
+            "../../fonts/liberation/LiberationSerif-Regular.ttf"
+        ));
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("patched Liberation Serif face");
+        assert_eq!(face.line_gap(), 0, "fixture must exercise a zero hhea gap");
+        let metrics = FaceMetrics::new(face);
+        let size_pt = 11.0;
+
+        // Word's Times New Roman PDF line box is 2355/2048 em: at 11pt its
+        // natural height is 12.64892578125pt and its baseline is 10.26953125pt
+        // below the line top, even when the supplied face reports hhea gap 0.
+        assert!((metrics.line_height_pt(size_pt) - 12.648_925_781_25).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(size_pt) - 10.269_531_25).abs() < 1e-9);
+    }
 
     #[test]
     fn liberation_sans_natural_and_auto_line_heights_include_hhea_line_gap() {

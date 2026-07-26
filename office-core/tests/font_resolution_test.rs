@@ -446,6 +446,39 @@ fn docx_font_preflight_uses_the_layout_style_and_theme_cascade() {
 }
 
 #[test]
+fn derived_theme_font_replaces_base_direct_font_in_the_same_script_slot() {
+    let document = format!(
+        r#"<w:document{}><w:body><w:p><w:pPr><w:pStyle w:val="Heading"/></w:pPr><w:r><w:t>Theme heading</w:t></w:r></w:p></w:body></w:document>"#,
+        office_core::testkit::DOC_NAMESPACES,
+    );
+    let styles = format!(
+        r#"<w:styles{}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading"><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr></w:style></w:styles>"#,
+        office_core::testkit::DOC_NAMESPACES,
+    );
+    let theme = br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Fixture"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
+    let content_types = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let root_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let bytes = office_core::testkit::zip_package(&[
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("word/document.xml", document.as_bytes()),
+        ("word/styles.xml", styles.as_bytes()),
+        ("word/theme/theme1.xml", theme),
+    ]);
+
+    let requests = font_requests(&bytes, OfficeFormat::Docx, &ConvertOptions::default())
+        .expect("derived theme font preflight");
+    let families: std::collections::BTreeSet<_> = requests
+        .iter()
+        .map(|request| request.family.as_str())
+        .collect();
+
+    // MS-OI29500 §2.1.87: at different hierarchy levels, asciiTheme
+    // overrides an inherited ascii value (and vice versa) for the ASCII slot.
+    assert_eq!(families, std::collections::BTreeSet::from(["Calibri"]));
+}
+
+#[test]
 fn pptx_and_xlsx_preflight_emit_deduplicated_canonical_faces() {
     for (name, bytes, format) in [
         (

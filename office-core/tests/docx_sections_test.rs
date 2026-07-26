@@ -237,6 +237,31 @@ fn next_page_preserves_an_empty_paragraph_section_page() {
 }
 
 #[test]
+fn next_page_section_preserves_collapsed_spacing_before_its_first_paragraph() {
+    let first_baseline = |before_twips: u32| {
+        let body = format!(
+            r#"<w:p><w:pPr><w:spacing w:after="200"/><w:sectPr>{LETTER_SECTION}</w:sectPr></w:pPr></w:p><w:p><w:pPr><w:spacing w:before="{before_twips}"/></w:pPr><w:r><w:t>SECOND</w:t></w:r></w:p><w:sectPr>{LETTER_SECTION}</w:sectPr>"#
+        );
+        let laid = open_layout(&minimal_docx(&body));
+        assert_eq!(laid.pages.len(), 2);
+        text_position(&laid.pages[1], "SECOND").1
+    };
+
+    let after_sized_before = first_baseline(200);
+    let larger_before = first_baseline(480);
+
+    // Word desktop product-brief page 3 starts the first heading baseline at
+    // 99.53pt versus 85.25pt when section-top spacing is suppressed. The
+    // authored 24pt before collapses with the section mark's 10pt after, so
+    // the general transition contribution is their 14pt excess.
+    assert!(
+        ((larger_before - after_sized_before) - 14.0).abs() < 0.01,
+        "section-top spacing must preserve the collapsed before/after excess: \
+         after-sized={after_sized_before}, larger={larger_before}"
+    );
+}
+
+#[test]
 fn next_page_preserves_an_empty_trailing_section_page() {
     let body = format!(
         "{}<w:sectPr>{LETTER_SECTION}</w:sectPr>",

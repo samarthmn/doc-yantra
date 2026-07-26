@@ -44,6 +44,9 @@ struct Unit {
     bottom_slack_pt: f64,
     /// Authored paragraph spacing, suppressed at a fresh page/column top.
     gap_before: f64,
+    /// Collapsed spacing retained only for the first paragraph of a new
+    /// non-continuous section.
+    section_start_gap_before: Option<f64>,
     /// Float clearance that remains active even at a fresh page/column top.
     float_leading: f64,
     items: Vec<LineItem>,
@@ -160,6 +163,7 @@ struct UnitBuildState {
     keep_next_fallback_group: Option<usize>,
     keep_next_chain_len: usize,
     prev_after: f64,
+    section_start_previous_after: Option<f64>,
     table_counter: usize,
     pending_break: bool,
     pending_column_break: bool,
@@ -169,10 +173,12 @@ struct UnitBuildState {
 
 impl UnitBuildState {
     fn reset_for_page_transition(&mut self) {
+        let previous_after = self.prev_after;
         self.keep_next_group = None;
         self.keep_next_fallback_group = None;
         self.keep_next_chain_len = 0;
         self.prev_after = 0.0;
+        self.section_start_previous_after = Some(previous_after);
         self.pending_break = false;
         self.pending_column_break = false;
         self.active_wrap = None;
@@ -906,6 +912,7 @@ fn build_units(
     let mut keep_next_fallback_group = state.keep_next_fallback_group;
     let mut keep_next_chain_len = state.keep_next_chain_len;
     let mut prev_after = state.prev_after;
+    let mut section_start_previous_after = state.section_start_previous_after.take();
     let mut table_counter = state.table_counter;
     let mut pending_break = state.pending_break;
     let mut pending_column_break = state.pending_column_break;
@@ -962,6 +969,9 @@ fn build_units(
                     note_sequence,
                 )?;
                 active_wrap = layout.wrap_after.take();
+                let section_start_gap_before = section_start_previous_after
+                    .take()
+                    .map(|previous_after| (layout.space_before_pt - previous_after).max(0.0));
                 if let Some(frame) = frame {
                     push_frame_unit(
                         layout,
@@ -976,6 +986,7 @@ fn build_units(
                         &mut pending_break,
                         &mut pending_column_break,
                         source_block_index,
+                        section_start_gap_before,
                     )?;
                 } else {
                     push_paragraph_units(
@@ -989,10 +1000,12 @@ fn build_units(
                         &mut pending_break,
                         &mut pending_column_break,
                         source_block_index,
+                        section_start_gap_before,
                     );
                 }
             }
             BlockContent::Table(t) => {
+                section_start_previous_after = None;
                 let scheduled_wrap = page_schedule
                     .and_then(|schedule| schedule.wrap_for_unit(source_block_index, 0, content_w));
                 active_wrap = combine_wraps(active_wrap.take(), scheduled_wrap)?;
@@ -1123,6 +1136,7 @@ fn build_units(
                         },
                         bottom_slack_pt: 0.0,
                         gap_before: table_gap,
+                        section_start_gap_before: None,
                         float_leading: 0.0,
                         items,
                         anchored_items: Vec::new(),
@@ -1179,6 +1193,7 @@ fn build_units(
                         bottom_slack_pt: 0.0,
 
                         gap_before: if first_row { table_gap } else { 0.0 },
+                        section_start_gap_before: None,
                         float_leading: 0.0,
                         items: row_layout.items,
                         anchored_items: Vec::new(),
@@ -1225,6 +1240,7 @@ fn build_units(
     state.keep_next_fallback_group = keep_next_fallback_group;
     state.keep_next_chain_len = keep_next_chain_len;
     state.prev_after = prev_after;
+    state.section_start_previous_after = section_start_previous_after;
     state.table_counter = table_counter;
     state.pending_break = pending_break;
     state.pending_column_break = pending_column_break;
@@ -1268,6 +1284,7 @@ fn clone_unit(u: &Unit) -> Unit {
         height: u.height,
         bottom_slack_pt: u.bottom_slack_pt,
         gap_before: u.gap_before,
+        section_start_gap_before: u.section_start_gap_before,
         float_leading: u.float_leading,
         items: u.items.iter().map(clone_line_item).collect(),
         anchored_items: u
@@ -1346,6 +1363,7 @@ fn push_paragraph_units(
     pending_break: &mut bool,
     pending_column_break: &mut bool,
     block_index: usize,
+    section_start_gap_before: Option<f64>,
 ) {
     let l = layout.lines.len();
     let mut ids = paragraph_group_ids(&layout, l, next_group);
@@ -1388,6 +1406,11 @@ fn push_paragraph_units(
             height: line.height_pt,
             bottom_slack_pt: line.bottom_slack_pt,
             gap_before: if i == 0 { gap } else { 0.0 },
+            section_start_gap_before: if i == 0 {
+                section_start_gap_before
+            } else {
+                None
+            },
             float_leading: if i == 0 { layout.float_leading_pt } else { 0.0 },
             items: line.items,
             anchored_items: line.anchored_items,
@@ -1449,6 +1472,7 @@ fn push_frame_unit(
     pending_break: &mut bool,
     pending_column_break: &mut bool,
     block_index: usize,
+    section_start_gap_before: Option<f64>,
 ) -> Result<()> {
     if !layout.page_floats.is_empty()
         || layout
@@ -1564,6 +1588,7 @@ fn push_frame_unit(
         bottom_slack_pt: 0.0,
 
         gap_before: (*prev_after).max(layout.space_before_pt),
+        section_start_gap_before,
         float_leading: layout.float_leading_pt,
         items,
         anchored_items: Vec::new(),
@@ -2567,7 +2592,7 @@ fn place_page_float(
 
 fn effective_gap_before(unit: &Unit, y: f64, content_top: f64) -> f64 {
     if (y - content_top).abs() <= 0.01 {
-        unit.float_leading
+        unit.section_start_gap_before.unwrap_or(0.0) + unit.float_leading
     } else {
         unit.gap_before + unit.float_leading
     }
@@ -3637,6 +3662,7 @@ mod tests {
             bottom_slack_pt: 0.0,
 
             gap_before: 0.0,
+            section_start_gap_before: None,
             float_leading: 0.0,
             items: Vec::new(),
             anchored_items: Vec::new(),
@@ -3711,6 +3737,7 @@ mod tests {
             &mut pending_break,
             &mut pending_column_break,
             0,
+            None,
         );
         let drop_cap = ParaLayout {
             keep_next: true,
@@ -3730,6 +3757,7 @@ mod tests {
             &mut pending_break,
             &mut pending_column_break,
             1,
+            None,
         );
         let body = ParaLayout {
             widow_control: true,
@@ -3747,6 +3775,7 @@ mod tests {
             &mut pending_break,
             &mut pending_column_break,
             2,
+            None,
         );
 
         let groups = units.iter().map(|unit| unit.group).collect::<Vec<_>>();
@@ -3781,6 +3810,7 @@ mod tests {
             bottom_slack_pt: 0.0,
 
             gap_before: 0.0,
+            section_start_gap_before: None,
             float_leading: 0.0,
             items: Vec::new(),
             anchored_items: Vec::new(),

@@ -1,7 +1,7 @@
 title = "Product brief (real-world synthetic)"
 tier = "core"
 ssim_threshold = 0.90
-expected_fonts = ["Arial", "Liberation Mono"]
+expected_fonts = ["Arial", "Calibri", "Liberation Mono"]
 max_page_count_delta = 0
 word_version = "Microsoft Word"
 ground_truth_exported_at = "2026-07-25"

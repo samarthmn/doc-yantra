@@ -1062,7 +1062,7 @@ fn draw_glyphs_impl(
         )));
     };
     let idx = face_order.iter().position(|f| *f == run.face).unwrap_or(0);
-    let baseline = page_h - pos.y_pt;
+    let baseline = word_pdf_text_y(page_h - pos.y_pt);
     let semantic = semantic_clusters(&run.glyphs);
     if !semantic.is_empty() {
         draw_semantic_text(content, pos, baseline, run, idx, font, &semantic)?;
@@ -1413,7 +1413,7 @@ fn draw_semantic_run(
     draw_semantic_layer(
         content,
         pos.x_pt,
-        page_h - pos.y_pt,
+        word_pdf_text_y(page_h - pos.y_pt),
         run.size_pt,
         Some(run.base_direction),
         font_index,
@@ -1504,6 +1504,13 @@ fn draw_semantic_layer(
     }
     content.end_marked_content();
     Ok(())
+}
+
+/// Word's Office-to-PDF path writes text origins on a quarter-point vertical
+/// grid. Keep layout and pagination continuous; quantize only the emitted text
+/// matrix so glyph raster phase matches the authoring application.
+fn word_pdf_text_y(value: f64) -> f64 {
+    (value * 4.0).round() / 4.0
 }
 
 fn visual_semantic_tokens(
@@ -2397,6 +2404,57 @@ mod tests {
         assert_eq!(embedded.to_unicode[&cid], "A");
         let cmap = String::from_utf8(build_to_unicode(&embedded.to_unicode)).unwrap();
         assert!(cmap.contains(&format!("<{cid:04X}> <0041>")));
+    }
+
+    #[test]
+    fn visible_text_baseline_is_emitted_on_words_quarter_point_grid() {
+        use crate::layout::{GlyphRun, PlacedGlyph};
+
+        let face = FaceId(0);
+        let subset = SubsetFont {
+            data: Vec::new(),
+            remap: BTreeMap::from([(5, 2)]),
+            widths: vec![(2, 500)],
+            to_unicode: Vec::new(),
+            is_cff: false,
+            warning: None,
+        };
+        let pairs = BTreeSet::from([(5, "A".to_string(), true)]);
+        let visible = BTreeSet::from([(5, 'A')]);
+        let embedded = EmbeddedFont::new(subset, &pairs, &visible).expect("embedded font state");
+        let page = Page {
+            width_pt: 100.0,
+            height_pt: 100.0,
+            items: vec![Positioned {
+                x_pt: 10.0,
+                y_pt: 3.348_388_671_875,
+                item: Item::Glyphs(GlyphRun {
+                    face,
+                    size_pt: 11.0,
+                    color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+                    base_direction: None,
+                    glyphs: vec![PlacedGlyph {
+                        gid: 5,
+                        advance_pt: 6.0,
+                        x_offset_pt: 0.0,
+                        y_offset_pt: 0.0,
+                        ch: 'A',
+                    }],
+                    underline: None,
+                    strike: None,
+                }),
+            }],
+        };
+        let bytes = render_page(&page, &BTreeMap::from([(face, embedded)]), &[face])
+            .expect("render visible-text page");
+        let stream = String::from_utf8(bytes).expect("ASCII content stream");
+
+        // Word desktop's Times 11, Arial 10.5, and Calibri 11/26 PDF text
+        // matrices all place baselines on 0.25pt increments.
+        assert!(
+            stream.contains("1 0 0 1 10 96.75 Tm"),
+            "visible text baseline must be on Word's quarter-point grid: {stream}"
+        );
     }
 
     #[test]

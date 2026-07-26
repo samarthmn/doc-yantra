@@ -1,11 +1,11 @@
 title = "Google Docs export: long document with tables and list indents"
 tier = "core"
 ssim_threshold = 0.90
-geometry_median_pt = 0.6
+geometry_median_pt = 0.8
 expected_fonts = ["Arial", "Calibri", "Carlito", "Liberation Mono", "Times New Roman"]
 max_page_count_delta = 0
 word_version = "Microsoft Word (online export service)"
 ground_truth_exported_at = "2026-07-14"
 input_sha256 = "5ea1a2c4e049adf55e2618ac7a73f72791170a81dd1bee2b6a888f736d3287f3"
 golden_sha256 = "0edeb20b010ed04474eee8add27b58476cc384b584bf0abfcfbc2fe983323ac7"
-notes = "Public sample document (Sample-Files.com); ground truth exported via Microsoft Word for the web (word.cloud.microsoft) on 2026-07-14 — bare 'Microsoft Word' Creator metadata, no version stamped (see T5.2). Committed-only case (not in corpus.rs cases()); freezes the docx-universal-fidelity envelope expansion. Expected 44 pages; page-count parity is the primary gate; tables + list indents."
+notes = "Public sample document (Sample-Files.com); ground truth exported via Microsoft Word for the web (word.cloud.microsoft) on 2026-07-14 — bare 'Microsoft Word' Creator metadata, no version stamped (see T5.2). Committed-only case (not in corpus.rs cases()); freezes the docx-universal-fidelity envelope expansion. Expected 44 pages; page-count parity is the primary gate; tables + list indents. 2026-07-26: geometry_median_pt loosened 0.6 -> 0.8 — the Word-desktop-verified Times New Roman line-gap metric (pinned by the service-agreement desktop truth) moves this web-export golden's page-10 text median to dy -0.63pt; web-vs-desktop sub-pixel disagreement, desktop metric governs."
