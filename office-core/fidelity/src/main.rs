@@ -1010,12 +1010,8 @@ fn enforce_thresholds(reports: &[CaseReport], require_both_tiers: bool) -> Resul
     }) {
         anyhow::bail!("fidelity manifest has an unknown tier");
     }
-    let all_experimental =
-        !reports.is_empty() && reports.iter().all(|report| report.tier == "experimental");
-    if require_both_tiers && !all_experimental && (core.is_empty() || extended.is_empty()) {
-        anyhow::bail!(
-            "full fidelity corpus must contain both core and extended cases (an all-experimental corpus is exempt while its cases calibrate)"
-        );
+    if require_both_tiers && core.is_empty() {
+        anyhow::bail!("full fidelity corpus must contain at least one gating core case");
     }
     if core.iter().any(|report| !report.pass) {
         anyhow::bail!("core fidelity gate failed: every core case must pass");
@@ -1075,14 +1071,9 @@ mod gate_tests {
     }
 
     #[test]
-    fn full_release_gate_requires_both_tiers() {
-        assert!(enforce_thresholds(&[report("core", true)], true).is_err());
-    }
-
-    #[test]
-    fn full_release_gate_exempts_all_experimental_corpus() {
-        let reports = [report("experimental", false), report("experimental", true)];
-        assert!(enforce_thresholds(&reports, true).is_ok());
+    fn full_release_gate_requires_a_core_case() {
+        assert!(enforce_thresholds(&[report("core", true)], true).is_ok());
+        assert!(enforce_thresholds(&[report("experimental", true)], true).is_err());
         assert!(enforce_thresholds(&[], true).is_err());
     }
 

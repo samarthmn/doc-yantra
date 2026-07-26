@@ -1,5 +1,5 @@
 title = "Service agreement (real-world synthetic)"
-tier = "experimental"
+tier = "core"
 ssim_threshold = 0.90
 expected_fonts = ["Times New Roman"]
 max_page_count_delta = 0
@@ -7,4 +7,4 @@ word_version = "Microsoft Word"
 ground_truth_exported_at = "2026-07-25"
 input_sha256 = "9bb8c357eccf8f400cf82ae61ae0fb67d1e45949ba3990a127eb222eaad7a369"
 golden_sha256 = "c763d1924e5e4711f90f1b31c2dc0d2fb603c92ae98d12a0c497daacd53adb2b"
-notes = "Real-world synthetic fixture exported 2026-07-26 by the maintainer. PDF Creator metadata attests Microsoft Word. Calibrated 2026-07-26: baseline weighted SSIM 0.6505; threshold is the 0.90 harness floor and the case stays experimental (non-gating) until it clears it."
+notes = "Real-world synthetic fixture exported 2026-07-26 by the maintainer. PDF Creator metadata attests Microsoft Word. Calibrated 2026-07-26: baseline weighted SSIM 0.6505; threshold 0.90 is the gating core bar (user directive 2026-07-26)."
