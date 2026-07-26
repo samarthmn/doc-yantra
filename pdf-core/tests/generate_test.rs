@@ -329,6 +329,8 @@ fn csv_preserves_unbreakable_cell_atoms() {
         "Switzerland",
         "KV-3315",
         "distributor",
+        "unit_price_eur",
+        "line_total_eur",
         "11.25",
         "270.00",
     ] {

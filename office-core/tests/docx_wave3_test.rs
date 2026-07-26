@@ -1691,16 +1691,17 @@ fn style_backed_bottom_paragraph_border_is_painted_and_measured() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Bordered title</w:t></w:r></w:p><w:p><w:r><w:t>Following text</w:t></w:r></w:p>"#;
     let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
     let styles = format!(
-        r#"<?xml version="1.0"?><w:styles{DOC_NAMESPACES}><w:style w:type="paragraph" w:styleId="Title"><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="8" w:space="4" w:color="4F81BD"/></w:pBdr></w:pPr></w:style></w:styles>"#
+        r#"<?xml version="1.0"?><w:styles{DOC_NAMESPACES}><w:style w:type="paragraph" w:styleId="Title"><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="8" w:space="4" w:color="4F81BD"/></w:pBdr><w:ind w:left="360" w:right="360"/></w:pPr></w:style></w:styles>"#
     );
     let bytes = package_with_parts(body, rels, vec![("word/styles.xml", styles.into_bytes())]);
     let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
     let laid = layout_docx(&doc).unwrap().0;
-    let (line_y, line_dx, line_width, line_color) = laid.pages[0]
+    let (line_x, line_y, line_dx, line_width, line_color) = laid.pages[0]
         .items
         .iter()
         .find_map(|positioned| match &positioned.item {
             Item::Line { dx_pt, stroke, .. } => Some((
+                positioned.x_pt,
                 positioned.y_pt,
                 *dx_pt,
                 stroke.width_pt,
@@ -1709,7 +1710,15 @@ fn style_backed_bottom_paragraph_border_is_painted_and_measured() {
             _ => None,
         })
         .expect("bottom paragraph border");
-    assert!((line_dx - 468.0).abs() <= 0.01, "line_dx={line_dx}");
+    assert!(
+        (line_x - 88.5).abs() <= 0.01,
+        "the border must honor the 18pt paragraph indent, then include Word's \
+         1.5pt border-edge overhang: line_x={line_x}"
+    );
+    assert!(
+        (line_dx - 435.0).abs() <= 0.01,
+        "the border must include the edge overhang at both ends: line_dx={line_dx}"
+    );
     assert!((line_width - 1.0).abs() <= 0.01, "line_width={line_width}");
     assert_eq!(line_color, (0x4f, 0x81, 0xbd));
     let following_y = laid.pages[0]
@@ -1723,6 +1732,89 @@ fn style_backed_bottom_paragraph_border_is_painted_and_measured() {
     assert!(
         following_y > line_y,
         "border must contribute to paragraph height"
+    );
+}
+
+#[test]
+fn fractional_table_grid_uses_one_cumulative_edge_for_spanned_cells_and_borders() {
+    // 5924 twips is deliberately not a whole-point total. A spanned cell must
+    // end on the same cumulatively computed boundary as the table border;
+    // summing its component widths independently produces a distinct f64.
+    let bytes = minimal_docx(
+        r#"<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/><w:tblBorders>
+        <w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/>
+        <w:left w:val="single" w:sz="8"/><w:right w:val="single" w:sz="8"/>
+        <w:insideV w:val="single" w:sz="8"/>
+        </w:tblBorders></w:tblPr>
+        <w:tblGrid><w:gridCol w:w="2213"/><w:gridCol w:w="1061"/><w:gridCol w:w="2650"/></w:tblGrid>
+        <w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr>
+        <w:tc><w:tcPr><w:gridSpan w:val="2"/><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr>
+        <w:p><w:r><w:t>SPAN</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let page = &laid.pages[0];
+    let shaded_right = page
+        .items
+        .iter()
+        .find_map(|positioned| match positioned.item {
+            Item::Rect {
+                w_pt,
+                fill: Some(fill),
+                ..
+            } if (fill.r, fill.g, fill.b) == (0xd9, 0xe2, 0xf3) => Some(positioned.x_pt + w_pt),
+            _ => None,
+        })
+        .expect("spanned cell shading");
+    let right_border = page
+        .items
+        .iter()
+        .filter_map(|positioned| match positioned.item {
+            Item::Line { dx_pt, dy_pt, .. } if dx_pt == 0.0 && dy_pt > 0.0 => Some(positioned.x_pt),
+            _ => None,
+        })
+        .max_by(f64::total_cmp)
+        .expect("right table border");
+    assert_eq!(
+        shaded_right, right_border,
+        "cell boxes and border emission must share one cumulative grid edge"
+    );
+}
+
+#[test]
+fn paragraph_style_run_style_color_survives_line_wrapping() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Endpoint"/></w:pPr><w:r><w:t>alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron</w:t></w:r></w:p>"#;
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
+    let styles = format!(
+        r#"<?xml version="1.0"?><w:styles{DOC_NAMESPACES}>
+        <w:style w:type="character" w:styleId="CodeBase"><w:rPr><w:color w:val="A0A0A0"/></w:rPr></w:style>
+        <w:style w:type="character" w:styleId="Code"><w:basedOn w:val="CodeBase"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="Endpoint"><w:pPr><w:ind w:left="3600" w:right="3600"/></w:pPr><w:rPr><w:rStyle w:val="Code"/></w:rPr></w:style>
+        </w:styles>"#
+    );
+    let bytes = package_with_parts(body, rels, vec![("word/styles.xml", styles.into_bytes())]);
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+    let laid = layout_docx(&doc).unwrap().0;
+    let glyph_runs: Vec<_> = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|positioned| match &positioned.item {
+            Item::Glyphs(run) if !run.glyphs.is_empty() => Some((positioned.y_pt, run)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        glyph_runs
+            .iter()
+            .all(|(_, run)| (run.color.r, run.color.g, run.color.b) == (0xa0, 0xa0, 0xa0)),
+        "every physical fragment must retain the inherited character-style color"
+    );
+    let mut baselines: Vec<_> = glyph_runs.iter().map(|(baseline, _)| *baseline).collect();
+    baselines.sort_by(f64::total_cmp);
+    baselines.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    assert!(
+        baselines.len() >= 2,
+        "fixture must wrap so continuation-line color is exercised: {baselines:?}"
     );
 }
 

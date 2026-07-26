@@ -50,6 +50,9 @@ pub struct FieldContext {
 
 /// Word's default size when unresolved (points).
 const DEFAULT_SIZE_PT: f64 = 11.0;
+/// Word projects horizontal paragraph borders 30 twips past each indented
+/// paragraph edge. `w:space` remains the perpendicular text-to-border gap.
+const HORIZONTAL_PARAGRAPH_BORDER_OVERHANG_PT: f64 = 1.5;
 /// Super/subscript size factor.
 const SCRIPT_SCALE: f64 = 0.65;
 /// Super/subscript baseline rise when a face has no OS/2 script metrics.
@@ -1394,11 +1397,15 @@ fn layout_paragraph_with_wrap_context(
     {
         let width_pt = border.size_pt.max(0.25);
         let border_y = last_line.height_pt + border.space_pt + width_pt / 2.0;
+        let border_left = left - HORIZONTAL_PARAGRAPH_BORDER_OVERHANG_PT;
+        let border_width = (avail_width_pt - left - right_indent
+            + 2.0 * HORIZONTAL_PARAGRAPH_BORDER_OVERHANG_PT)
+            .max(0.0);
         last_line.items.push(LineItem {
-            x_pt: left,
+            x_pt: border_left,
             y_pt: border_y,
             item: Item::Line {
-                dx_pt: (avail_width_pt - left - right_indent).max(0.0),
+                dx_pt: border_width,
                 dy_pt: 0.0,
                 stroke: Stroke {
                     width_pt,

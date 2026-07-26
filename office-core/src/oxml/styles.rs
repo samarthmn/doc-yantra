@@ -323,6 +323,35 @@ impl StyleResolver {
         acc
     }
 
+    /// Applies one run-property layer, resolving an effective `w:rStyle`
+    /// reference before the layer's own properties. This includes `rStyle`
+    /// authored inside paragraph/table style `rPr`, not only direct run `rPr`.
+    fn merge_run_layer(&self, layer: &RunProps, base: &RunProps) -> RunProps {
+        fn merge_inner(
+            resolver: &StyleResolver,
+            layer: &RunProps,
+            base: &RunProps,
+            seen: &mut std::collections::HashSet<String>,
+            depth: usize,
+        ) -> RunProps {
+            let mut acc = base.clone();
+            if depth < MAX_CHAIN
+                && let Some(style_id) = layer.style_id.as_deref()
+                && seen.insert(style_id.to_string())
+                && resolver
+                    .styles
+                    .get(style_id)
+                    .is_some_and(|style| style.style_type == StyleType::Character)
+            {
+                let referenced = resolver.resolved_style_rpr(style_id);
+                acc = merge_inner(resolver, &referenced, &acc, seen, depth + 1);
+            }
+            layer.merge_over(&acc)
+        }
+
+        merge_inner(self, layer, base, &mut std::collections::HashSet::new(), 0)
+    }
+
     /// Resolves a style's paragraph properties through its `basedOn` chain.
     fn resolved_style_ppr(&self, id: &str) -> ParaProps {
         let mut chain = self.chain(id);
@@ -376,18 +405,15 @@ impl StyleResolver {
     pub fn run_props(&self, para: &ParaProps, run: &RunProps) -> RunProps {
         let mut acc = self.default_rpr.clone();
         if let Some(table) = &para.tbl_style {
-            acc = table.rpr.merge_over(&acc);
+            acc = self.merge_run_layer(&table.rpr, &acc);
         }
         if let Some(dp) = &self.default_para_style {
-            acc = self.resolved_style_rpr(dp).merge_over(&acc);
+            acc = self.merge_run_layer(&self.resolved_style_rpr(dp), &acc);
         }
         if let Some(ps) = &para.style_id {
-            acc = self.resolved_style_rpr(ps).merge_over(&acc);
+            acc = self.merge_run_layer(&self.resolved_style_rpr(ps), &acc);
         }
-        if let Some(cs) = &run.style_id {
-            acc = self.resolved_style_rpr(cs).merge_over(&acc);
-        }
-        acc = run.merge_over(&acc);
+        acc = self.merge_run_layer(run, &acc);
         if acc.size_pt.is_none() {
             acc.size_pt = Some(DEFAULT_SIZE_PT);
         }

@@ -1153,18 +1153,27 @@ impl TableStyle {
 
 /// Measures the content-driven width targets for every column at `size`.
 ///
-/// `natural` is the widest explicit line in the column. `minimum` is the
-/// widest indivisible atom plus cell padding: body words (including dates,
-/// numbers, and hyphen/underscore-joined identifiers) stay whole, while
-/// snake_case headers may wrap only after an underscore.
+/// `natural` is the widest explicit line in the column. `header` is the
+/// header's widest explicit line. `minimum` is the widest indivisible atom
+/// plus cell padding: body words (including dates, numbers, and
+/// hyphen/underscore-joined identifiers) stay whole, while snake_case headers
+/// may wrap only after an underscore.
+struct TableColumnWidths {
+    natural: Vec<f64>,
+    header: Vec<f64>,
+    minimum: Vec<f64>,
+    visible: Vec<f64>,
+}
+
 fn table_column_widths(
     rows: &[Vec<ResolvedRun>],
     ncols: usize,
     size: f64,
     pad: f64,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+) -> Result<TableColumnWidths> {
     let padded_empty = 2.0 * pad;
     let mut natural = vec![padded_empty; ncols];
+    let mut header = vec![padded_empty; ncols];
     let mut minimum = vec![padded_empty; ncols];
     let mut visible = vec![padded_empty; ncols];
     for (ri, row) in rows.iter().enumerate() {
@@ -1177,6 +1186,9 @@ fn table_column_widths(
                 let line = line.trim_matches(' ');
                 let width = cell.choice.text_width_pt(line, cell.font, size)? + 2.0 * pad;
                 natural[ci] = natural[ci].max(width);
+                if ri == 0 {
+                    header[ci] = header[ci].max(width);
+                }
 
                 for word in line.split_whitespace() {
                     if ri == 0 {
@@ -1196,7 +1208,12 @@ fn table_column_widths(
     for (visible, minimum) in visible.iter_mut().zip(&minimum) {
         *visible = visible.min(*minimum);
     }
-    Ok((natural, minimum, visible))
+    Ok(TableColumnWidths {
+        natural,
+        header,
+        minimum,
+        visible,
+    })
 }
 
 /// Allocates width from `minimum` toward `natural` using capped water-filling.
@@ -1265,28 +1282,62 @@ fn table_layout(
 ) -> Result<(f64, Vec<f64>, bool)> {
     let mut size = base_size;
     let mut pad = size * style.pad_factor();
-    let (mut natural, mut minimum, mut visible) = table_column_widths(rows, ncols, size, pad)?;
-    let mut minimum_total: f64 = minimum.iter().sum();
-    if minimum_total > usable {
+    let mut metrics = table_column_widths(rows, ncols, size, pad)?;
+    let mut minimum_total: f64 = metrics.minimum.iter().sum();
+    let mut preferred_total = match style {
+        TableStyle::Csv => metrics
+            .header
+            .iter()
+            .zip(&metrics.minimum)
+            .map(|(header, minimum)| header.max(*minimum))
+            .sum(),
+        TableStyle::Markdown => minimum_total,
+    };
+    if preferred_total > usable {
         // All metrics are linear in font size, so this factor is exact.
-        size = (size * usable / minimum_total).max(TABLE_MIN_FONT_PT);
+        size = (size * usable / preferred_total).max(TABLE_MIN_FONT_PT);
         pad = size * style.pad_factor();
-        (natural, minimum, visible) = table_column_widths(rows, ncols, size, pad)?;
-        minimum_total = minimum.iter().sum();
+        metrics = table_column_widths(rows, ncols, size, pad)?;
+        minimum_total = metrics.minimum.iter().sum();
+        preferred_total = match style {
+            TableStyle::Csv => metrics
+                .header
+                .iter()
+                .zip(&metrics.minimum)
+                .map(|(header, minimum)| header.max(*minimum))
+                .sum(),
+            TableStyle::Markdown => minimum_total,
+        };
     }
     let clip_oversized_atoms = size <= TABLE_MIN_FONT_PT + 0.01 && minimum_total > usable + 0.01;
     let widths = if clip_oversized_atoms {
-        let visible_total: f64 = visible.iter().sum();
+        let visible_total: f64 = metrics.visible.iter().sum();
         if visible_total > usable + 0.01 {
             return Err(PdfCoreError::ResourceLimit(format!(
                 "table has {ncols} columns whose minimum visible widths \
                  exceed the available page width"
             )));
         }
-        fair_share_widths(&visible, &minimum, usable)
+        fair_share_widths(&metrics.visible, &metrics.minimum, usable)
+    } else if matches!(style, TableStyle::Csv) {
+        // Body atom minima remain mandatory. Slack first removes avoidable
+        // header wrapping, then continues toward overall natural widths.
+        let header_targets = metrics
+            .header
+            .iter()
+            .zip(&metrics.minimum)
+            .map(|(header, minimum)| header.max(*minimum))
+            .collect::<Vec<_>>();
+        let header_widths = fair_share_widths(&metrics.minimum, &header_targets, usable);
+        fair_share_widths(&header_widths, &metrics.natural, usable)
     } else {
-        fair_share_widths(&minimum, &natural, usable)
+        fair_share_widths(&metrics.minimum, &metrics.natural, usable)
     };
+    debug_assert!(
+        !matches!(style, TableStyle::Csv)
+            || size <= TABLE_MIN_FONT_PT + 0.01
+            || preferred_total <= usable + 0.01
+    );
     Ok((size, widths, clip_oversized_atoms))
 }
 

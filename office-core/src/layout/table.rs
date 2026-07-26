@@ -29,6 +29,10 @@ const DEFAULT_CELL_MARGIN_PT: f64 = 5.4;
 /// `TableNormal` default used by stored-grid tables, a bare synthetic table
 /// exported by Word places text 0.5pt inside the grid centerline.
 const AUTOFIT_CELL_MARGIN_PT: f64 = 0.5;
+/// Word-created, non-fixed stored grids use an 11-bit fixed-point emission
+/// scale. Keeping the cumulative edges in full precision reproduces the one
+/// extra unit per 2048 units that Word carries to the final PDF boundary.
+const WORD_STORED_GRID_EMISSION_SCALE: f64 = 2049.0 / 2048.0;
 
 /// A laid-out table row: items positioned relative to the row's top-left
 /// (row-left is the table's left edge in content coordinates).
@@ -191,12 +195,11 @@ pub(crate) fn layout_table_with_width(
         } else {
             0.0
         };
-    let col_x = column_offsets(&cols, grid_left);
+    let column_edges = cumulative_column_edges(&cols, grid_left)?;
     let mut rows = Vec::new();
 
-    let horizontal_boundaries =
-        horizontal_boundary_plan(doc, &visible_rows, table, &cols, grid_left);
-    let vertical_boundaries = vertical_boundary_plan(doc, &visible_rows, table, &cols, grid_left);
+    let horizontal_boundaries = horizontal_boundary_plan(doc, &visible_rows, table, &column_edges);
+    let vertical_boundaries = vertical_boundary_plan(doc, &visible_rows, table, &column_edges);
 
     let mut prepared_rows = Vec::with_capacity(visible_rows.len());
     for (row_index, row) in visible_rows.iter().copied().enumerate() {
@@ -207,8 +210,12 @@ pub(crate) fn layout_table_with_width(
         for cell in &row.cells {
             let span =
                 (cell.props.grid_span.max(1) as usize).min(cols.len().saturating_sub(col).max(1));
-            let x = col_x.get(col).copied().unwrap_or(table_left);
-            let width: f64 = cols.iter().skip(col).take(span).sum();
+            let end = checked_count_add("Word table cell grid end", col, span)?.min(cols.len());
+            let x = column_edges.get(col).copied().unwrap_or(table_left);
+            let width = column_edges
+                .get(col)
+                .zip(column_edges.get(end))
+                .map_or(0.0, |(start, end)| (end - start).max(0.0));
             let (m_l, m_r, m_t, m_b) = cell_margins(cell, table);
             let content_w = (width - m_l - m_r).max(1.0);
 
@@ -231,11 +238,10 @@ pub(crate) fn layout_table_with_width(
                     note_sequence,
                 )?
             };
-            let border_top = horizontal_boundaries[row_index].half_width_for_span(col, col + span);
-            let border_bottom =
-                horizontal_boundaries[row_index + 1].half_width_for_span(col, col + span);
+            let border_top = horizontal_boundaries[row_index].half_width_for_span(col, end);
+            let border_bottom = horizontal_boundaries[row_index + 1].half_width_for_span(col, end);
             let content_border_bottom =
-                horizontal_boundaries[merge_end_row + 1].half_width_for_span(col, col + span);
+                horizontal_boundaries[merge_end_row + 1].half_width_for_span(col, end);
             if !is_continue && merge_end_row == row_index {
                 row_content_h =
                     row_content_h.max(content.height_pt + m_t + m_b + border_top + border_bottom);
@@ -720,23 +726,33 @@ fn resolve_columns(
     avail: f64,
     note_sequence: Option<&NoteSequence>,
 ) -> Result<Vec<f64>> {
-    if should_autofit(table) {
+    let autofit = should_autofit(table);
+    let stored_autofit_grid = if autofit {
         // Word runs content AutoFit and writes the result back into
         // `tblGrid`, so in a Word-authored file (rsids present) a grid that
         // spans every column IS the rendered layout. Other producers
         // (converters, generators) store speculative grids, so intrinsic
         // measurement stays authoritative for them.
-        let columns = table_column_count(table)?;
-        if doc.settings.word_authored
-            && columns > 0
-            && table.grid.len() == columns
+        let column_count = table_column_count(table)?;
+        doc.settings.word_authored
+            && column_count > 0
+            && table.grid.len() == column_count
             && table.grid.iter().all(|w| *w > 0.0)
-        {
-            return resolve_stored_columns(table, avail);
+    } else {
+        false
+    };
+    let uses_stored_grid = !autofit || stored_autofit_grid;
+    let mut columns = if uses_stored_grid {
+        resolve_stored_columns(table, avail)?
+    } else {
+        autofit_columns(doc, warnings, table, rels, avail, note_sequence)?
+    };
+    if doc.settings.word_authored && uses_stored_grid && !table.props.layout_fixed {
+        for width in &mut columns {
+            *width *= WORD_STORED_GRID_EMISSION_SCALE;
         }
-        return autofit_columns(doc, warnings, table, rels, avail, note_sequence);
     }
-    resolve_stored_columns(table, avail)
+    Ok(columns)
 }
 
 fn table_column_count(table: &Table) -> Result<usize> {
@@ -1060,15 +1076,22 @@ fn width_points(width: TblWidth, available: f64) -> Option<f64> {
     }
 }
 
-/// Left x of each column (relative to content-left), given the table's left.
-fn column_offsets(cols: &[f64], table_left: f64) -> Vec<f64> {
-    let mut xs = Vec::with_capacity(cols.len());
+/// Canonical cumulative grid edges, including both outer edges.
+///
+/// Cells and every border planner consume this vector so fractional authored
+/// widths are accumulated exactly once instead of being re-summed with
+/// different floating-point groupings.
+fn cumulative_column_edges(cols: &[f64], table_left: f64) -> Result<Vec<f64>> {
+    let edge_count = checked_count_add("Word table grid edge count", cols.len(), 1)?;
+    let mut edges = Vec::new();
+    try_reserve(&mut edges, edge_count, "Word table grid edges")?;
     let mut x = table_left;
+    edges.push(x);
     for &w in cols {
-        xs.push(x);
         x += w;
+        edges.push(x);
     }
-    xs
+    Ok(edges)
 }
 
 fn cell_margins(cell: &Cell, table: &Table) -> (f64, f64, f64, f64) {
@@ -1158,24 +1181,16 @@ fn horizontal_boundary_plan(
     doc: &WordDoc,
     rows: &[&Row],
     table: &Table,
-    cols: &[f64],
-    table_left: f64,
+    edges: &[f64],
 ) -> Vec<HorizontalBoundary> {
     if rows.is_empty() {
         return vec![HorizontalBoundary::default()];
     }
-
-    let mut edges = Vec::with_capacity(cols.len() + 1);
-    let mut x = table_left;
-    edges.push(x);
-    for width in cols {
-        x += *width;
-        edges.push(x);
-    }
+    let column_count = edges.len().saturating_sub(1);
 
     (0..=rows.len())
         .map(|boundary| {
-            let strokes: Vec<Option<Stroke>> = (0..cols.len())
+            let strokes: Vec<Option<Stroke>> = (0..column_count)
                 .map(|column| {
                     let state = if boundary == 0 {
                         let placement = row_cell_placement(rows[0], column);
@@ -1266,21 +1281,14 @@ fn vertical_boundary_plan(
     doc: &WordDoc,
     rows: &[&Row],
     table: &Table,
-    cols: &[f64],
-    grid_left: f64,
+    edges: &[f64],
 ) -> Vec<Vec<VerticalBoundarySegment>> {
-    let mut edges = Vec::with_capacity(cols.len() + 1);
-    let mut x = grid_left;
-    edges.push(x);
-    for width in cols {
-        x += *width;
-        edges.push(x);
-    }
+    let column_count = edges.len().saturating_sub(1);
     rows.iter()
         .map(|row| {
-            (0..=cols.len())
+            (0..=column_count)
                 .filter_map(|boundary| {
-                    let state = vertical_boundary_state(row, table, boundary, cols.len(), doc);
+                    let state = vertical_boundary_state(row, table, boundary, column_count, doc);
                     stroke_from_state(&state, doc).map(|stroke| VerticalBoundarySegment {
                         x_pt: edges[boundary],
                         stroke,

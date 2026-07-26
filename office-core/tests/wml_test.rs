@@ -4,11 +4,11 @@ use office_core::opc::Package;
 use office_core::oxml::numbering::{NumFmt, Numbering};
 use office_core::oxml::styles::StyleResolver;
 use office_core::oxml::wml::{
-    BlockContent, InlineContent, NoteKind, ParaProps, RunContent, RunProps, VMerge, parse_document,
-    parse_hdr_ftr, parse_notes,
+    BlockContent, InlineContent, NoteKind, ParaProps, RunColor, RunContent, RunProps, VMerge,
+    parse_document, parse_hdr_ftr, parse_notes,
 };
 use office_core::testkit::{minimal_docx, wrap_document, wrap_numbering, wrap_styles};
-use office_core::{OfficeError, UnsupportedCode};
+use office_core::{OfficeError, UnsupportedCode, oxml::Rgb};
 use std::path::Path;
 
 /// Concatenates all text across a run's content.
@@ -587,5 +587,49 @@ fn character_style_overrides_paragraph_style() {
         resolver.run_props(&para, &direct).size_pt,
         Some(9.0),
         "direct wins over all"
+    );
+}
+
+#[test]
+fn paragraph_style_run_style_resolves_its_character_style_chain() {
+    let styles = wrap_styles(
+        r#"
+        <w:style w:type="character" w:styleId="CodeBase">
+          <w:name w:val="Code Base"/><w:rPr><w:color w:val="A0A0A0"/></w:rPr>
+        </w:style>
+        <w:style w:type="character" w:styleId="Code">
+          <w:name w:val="Code"/><w:basedOn w:val="CodeBase"/>
+          <w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr>
+        </w:style>
+        <w:style w:type="paragraph" w:styleId="Endpoint">
+          <w:name w:val="Endpoint"/><w:rPr><w:rStyle w:val="Code"/></w:rPr>
+        </w:style>
+        "#,
+    );
+    let resolver = StyleResolver::parse(&styles).unwrap();
+    let para = ParaProps {
+        style_id: Some("Endpoint".into()),
+        ..Default::default()
+    };
+    let inherited = resolver.run_props(&para, &RunProps::default());
+    assert_eq!(
+        inherited.color,
+        Some(RunColor::Rgb(Rgb::new(0xa0, 0xa0, 0xa0))),
+        "a character style referenced by paragraph-style rPr must contribute color"
+    );
+    assert_eq!(
+        inherited.fonts.ascii.as_deref(),
+        Some("Courier New"),
+        "the referenced character style must contribute its full basedOn chain"
+    );
+
+    let direct = RunProps {
+        color: Some(RunColor::Rgb(Rgb::new(0x20, 0x30, 0x40))),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolver.run_props(&para, &direct).color,
+        direct.color,
+        "direct run properties must remain the final cascade layer"
     );
 }
