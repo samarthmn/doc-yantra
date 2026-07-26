@@ -16,7 +16,7 @@ use crate::oxml::pml::{
     TextListStyleLevel,
 };
 use crate::oxml::theme::Theme;
-use crate::oxml::{A, P, attr, child, children, parse_f64, parse_i64};
+use crate::oxml::{A, P, attr, child, children, emu_to_pt, parse_f64, parse_i64};
 use crate::pptx::table_style::{TableCellStyle, TableStyleList};
 use crate::{ConvertOptions, OfficeError, Result, UnsupportedCode};
 use std::collections::{BTreeSet, HashMap};
@@ -558,10 +558,11 @@ fn effective_color_map(master: &Slide, layout: &Slide, slide: &Slide) -> HashMap
     mapping
 }
 
-/// Parses master `p:txStyles` into default sizes plus tolerant bullet and
-/// alignment level styles per bucket. Tolerance matters: real masters always
-/// decorate these levels with buClr/buFont/spcBef and similar cosmetics; only
-/// the pieces the engine renders (bullet declaration, alignment) are lifted,
+/// Parses master `p:txStyles` into default sizes plus tolerant bullet,
+/// alignment, and indent-geometry (marL/indent) level styles per bucket.
+/// Tolerance matters: real masters always decorate these levels with
+/// buClr/buFont/spcBef and similar cosmetics; only the pieces the engine
+/// renders (bullet declaration, alignment, list indent geometry) are lifted,
 /// everything else is deliberately ignored rather than failed.
 fn parse_text_defaults(xml: &str) -> TextDefaults {
     let mut defs = TextDefaults::default();
@@ -600,6 +601,8 @@ fn parse_text_defaults(xml: &str) -> TextDefaults {
                 sizes.push(sz);
                 let mut style = TextListStyleLevel {
                     align: attr(lvl, A, "algn").map(str::to_string),
+                    mar_l_pt: parse_i64(attr(lvl, A, "marL")).map(emu_to_pt),
+                    indent_pt: parse_i64(attr(lvl, A, "indent")).map(emu_to_pt),
                     ..TextListStyleLevel::default()
                 };
                 for property in children(lvl) {
@@ -622,7 +625,11 @@ fn parse_text_defaults(xml: &str) -> TextDefaults {
                         _ => {}
                     }
                 }
-                if style.align.is_some() || style.bullet.is_some() {
+                if style.align.is_some()
+                    || style.bullet.is_some()
+                    || style.mar_l_pt.is_some()
+                    || style.indent_pt.is_some()
+                {
                     levels[index] = Some(style);
                 }
             }

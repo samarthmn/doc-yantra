@@ -75,6 +75,12 @@ fn apply_list_level(
             .flatten()
             .find_map(|style| style.align.clone());
     }
+    if paragraph.mar_l_pt.is_none() {
+        paragraph.mar_l_pt = styles.iter().flatten().find_map(|style| style.mar_l_pt);
+    }
+    if paragraph.indent_pt.is_none() {
+        paragraph.indent_pt = styles.iter().flatten().find_map(|style| style.indent_pt);
+    }
     if !paragraph.bullet_none
         && paragraph.bullet_char.is_none()
         && paragraph.bullet_auto_num.is_none()

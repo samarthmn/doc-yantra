@@ -6,6 +6,30 @@
       "reason_code": "OFFICE_LINK_URI_SERIALIZATION",
       "justification": "The frozen LibreOffice PDF serializes `https://example.com/`; the source and local engine serialize `https://example.com`. URI normalization proves both navigate to the exact `https://example.com` origin target.",
       "user_visible_effect": "The link reaches the same origin, but its serialized PDF URI differs from the legacy output."
+    },
+    {
+      "fixture_id": "office/xlsx/file1.xlsx",
+      "reason_code": "OFFICE_PAGE_DIMENSIONS",
+      "justification": "The frozen LibreOffice goldens rendered these pageSetup-less sheets on LibreOffice's own A4 default (595.3x841.9pt). ECMA-376 18.3.1.63 defines paperSize default 1 (US Letter, 612x792pt), which Excel applies; the engine now follows the spec, so the page dimensions legitimately diverge from the A4-era goldens.",
+      "user_visible_effect": "Pages print on US Letter instead of A4 for workbooks that declare no pageSetup, matching Excel's default; content per page shifts accordingly versus the frozen LibreOffice rendering."
+    },
+    {
+      "fixture_id": "office/xlsx/file2.xlsx",
+      "reason_code": "OFFICE_PAGE_DIMENSIONS",
+      "justification": "The frozen LibreOffice goldens rendered these pageSetup-less sheets on LibreOffice's own A4 default (595.3x841.9pt). ECMA-376 18.3.1.63 defines paperSize default 1 (US Letter, 612x792pt), which Excel applies; the engine now follows the spec, so the page dimensions legitimately diverge from the A4-era goldens.",
+      "user_visible_effect": "Pages print on US Letter instead of A4 for workbooks that declare no pageSetup, matching Excel's default; content per page shifts accordingly versus the frozen LibreOffice rendering."
+    },
+    {
+      "fixture_id": "office/xlsm/file1.xlsm",
+      "reason_code": "OFFICE_PAGE_DIMENSIONS",
+      "justification": "The frozen LibreOffice goldens rendered these pageSetup-less sheets on LibreOffice's own A4 default (595.3x841.9pt). ECMA-376 18.3.1.63 defines paperSize default 1 (US Letter, 612x792pt), which Excel applies; the engine now follows the spec, so the page dimensions legitimately diverge from the A4-era goldens.",
+      "user_visible_effect": "Pages print on US Letter instead of A4 for workbooks that declare no pageSetup, matching Excel's default; content per page shifts accordingly versus the frozen LibreOffice rendering."
+    },
+    {
+      "fixture_id": "office/xlsm/file2.xlsm",
+      "reason_code": "OFFICE_PAGE_DIMENSIONS",
+      "justification": "The frozen LibreOffice goldens rendered these pageSetup-less sheets on LibreOffice's own A4 default (595.3x841.9pt). ECMA-376 18.3.1.63 defines paperSize default 1 (US Letter, 612x792pt), which Excel applies; the engine now follows the spec, so the page dimensions legitimately diverge from the A4-era goldens.",
+      "user_visible_effect": "Pages print on US Letter instead of A4 for workbooks that declare no pageSetup, matching Excel's default; content per page shifts accordingly versus the frozen LibreOffice rendering."
     }
   ],
   "known_failures": [

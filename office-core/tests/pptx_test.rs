@@ -573,11 +573,22 @@ fn three_slide_pptx_with_corrupt_second() -> Vec<u8> {
 /// bullets. The lvl props also carry buClr/buFont/spcBef noise that real
 /// masters always include; those must be tolerated, not fail the deck.
 fn body_placeholder_deck_with_master_txstyles_bullets() -> Vec<u8> {
+    body_placeholder_deck_with_paragraphs(
+        r#"<a:p><a:r><a:t>First point</a:t></a:r></a:p><a:p><a:pPr lvl="1"/><a:r><a:t>Nested detail</a:t></a:r></a:p>"#,
+    )
+}
+
+/// Same deck as [`body_placeholder_deck_with_master_txstyles_bullets`] with the
+/// body placeholder's paragraphs replaced by `paragraphs` (raw `a:p` XML).
+fn body_placeholder_deck_with_paragraphs(paragraphs: &str) -> Vec<u8> {
     let ct = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/></Types>"#;
     let root_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
     let pres = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId2"/></p:sldMasterIdLst></p:presentation>"#;
     let pres_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/></Relationships>"#;
-    let slide = br#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6096000" cy="3657600"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>First point</a:t></a:r></a:p><a:p><a:pPr lvl="1"/><a:r><a:t>Nested detail</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+    let slide = format!(
+        r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6096000" cy="3657600"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{paragraphs}</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+    );
+    let slide = slide.as_bytes();
     let slide_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
     let layout = br#"<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sldLayout>"#;
     let layout_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
@@ -617,6 +628,130 @@ fn body_placeholder_inherits_master_txstyles_bullets() {
     );
     assert!(text.contains("First point"), "{text:?}");
     assert!(text.contains("Nested detail"), "{text:?}");
+}
+
+/// List indent geometry, measured against LibreOffice truth to 0.014pt (loop-1
+/// pptx-indent investigation): per resolved level style the bullet glyph draws
+/// at `marL + indent` (negative indent = hanging) and the first-line TEXT
+/// starts at `marL`. The master's standard Office bodyStyle geometry is
+/// lvl1 marL=342900 EMU (27pt) indent=-342900 (-27pt), lvl2 marL=742950
+/// (58.5pt) indent=-285750 (-22.5pt), so relative to the content-box left edge
+/// the lvl1 bullet sits at +0 with its text at +27pt, and the lvl2 dash at
+/// +36pt with its text at +58.5pt.
+#[test]
+fn master_txstyles_marl_indent_position_bullets_and_text() {
+    let bytes = body_placeholder_deck_with_master_txstyles_bullets();
+    let doc = PptxDoc::open(&bytes, &ConvertOptions::default()).expect("open deck");
+    let (laid, _) = render_pptx(&doc).expect("render deck");
+    let runs = page_glyph_runs(&laid.pages[0]);
+    // Placeholder xfrm off x = 914400 EMU = 72pt plus the default 7.2pt lIns.
+    let box_left = 72.0 + 7.2;
+    let x_of = |needle: &str| -> f64 {
+        runs.iter()
+            .find(|(_, run)| run_text(run).starts_with(needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no glyph run starting with {needle:?}; runs: {:?}",
+                    runs.iter()
+                        .map(|(x, run)| (*x, run_text(run)))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .0
+    };
+    for (needle, offset, what) in [
+        ("\u{2022}", 0.0, "lvl1 bullet at marL+indent"),
+        ("First point", 27.0, "lvl1 first-line text at marL"),
+        ("\u{2013}", 36.0, "lvl2 bullet at marL+indent"),
+        ("Nested detail", 58.5, "lvl2 first-line text at marL"),
+    ] {
+        let x = x_of(needle);
+        let want = box_left + offset;
+        assert!(
+            (x - want).abs() <= 0.1,
+            "{what}: x = {x:.3}pt, want {want:.3}pt (box_left {box_left} + {offset})"
+        );
+    }
+}
+
+/// Hanging indent on wrap, measured against LibreOffice truth: every wrapped
+/// continuation line of a bulleted paragraph starts at `marL` (27pt past the
+/// content-box left edge for lvl1), never back at the bullet margin.
+#[test]
+fn wrapped_bullet_continuation_lines_start_at_marl() {
+    let long = "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi \
+                omicron pi rho sigma tau upsilon";
+    let bytes = body_placeholder_deck_with_paragraphs(&format!(
+        r#"<a:p><a:r><a:t>{long}</a:t></a:r></a:p>"#
+    ));
+    let doc = PptxDoc::open(&bytes, &ConvertOptions::default()).expect("open deck");
+    let (laid, _) = render_pptx(&doc).expect("render deck");
+    let runs = page_glyph_runs(&laid.pages[0]);
+    let box_left = 72.0 + 7.2;
+    let text_xs: Vec<f64> = runs
+        .iter()
+        .filter(|(_, run)| run_text(run).starts_with(|c: char| c.is_ascii_alphabetic()))
+        .map(|(x, _)| *x)
+        .collect();
+    assert!(
+        text_xs.len() >= 2,
+        "long bullet paragraph must wrap into 2+ text lines; runs: {:?}",
+        runs.iter()
+            .map(|(x, run)| (*x, run_text(run)))
+            .collect::<Vec<_>>()
+    );
+    let want = box_left + 27.0;
+    for x in text_xs {
+        assert!(
+            (x - want).abs() <= 0.1,
+            "every text line of a bulleted paragraph starts at marL: x = {x:.3}pt, want {want:.3}pt"
+        );
+    }
+}
+
+/// Explicit `a:pPr@marL/@indent` on a slide paragraph used to fail the whole
+/// deck closed (`a:pPr@marL` in the unsupported list); they are now the
+/// highest-precedence rung of the indent-geometry chain. A non-placeholder
+/// text box (no inheritance chain at all) must convert and place the bullet at
+/// marL+indent (36-18 = 18pt) with its text at marL (36pt).
+#[test]
+fn explicit_ppr_marl_indent_converts_and_positions_text() {
+    let shapes = r#"<p:sp><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6096000" cy="3657600"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr marL="457200" indent="-228600"><a:buChar char="&#8226;"/></a:pPr><a:r><a:t>Explicit indent</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let bytes = minimal_pptx(shapes);
+    let out = convert(&bytes, OfficeFormat::Pptx, &opts())
+        .expect("explicit paragraph indents are inside the envelope");
+    assert!(out.pdf.starts_with(b"%PDF-"));
+
+    let doc = PptxDoc::open(&bytes, &ConvertOptions::default()).expect("open deck");
+    let (laid, _) = render_pptx(&doc).expect("render deck");
+    let runs = page_glyph_runs(&laid.pages[0]);
+    let box_left = 72.0 + 7.2;
+    let x_of = |needle: &str| -> f64 {
+        runs.iter()
+            .find(|(_, run)| run_text(run).starts_with(needle))
+            .unwrap_or_else(|| panic!("no glyph run starting with {needle:?}"))
+            .0
+    };
+    let bullet_x = x_of("\u{2022}");
+    let text_x = x_of("Explicit indent");
+    assert!(
+        (bullet_x - (box_left + 18.0)).abs() <= 0.1,
+        "bullet at marL+indent: x = {bullet_x:.3}pt, want {:.3}pt",
+        box_left + 18.0
+    );
+    assert!(
+        (text_x - (box_left + 36.0)).abs() <= 0.1,
+        "first-line text at marL: x = {text_x:.3}pt, want {:.3}pt",
+        box_left + 36.0
+    );
+}
+
+fn run_text(run: &office_core::layout::GlyphRun) -> String {
+    run.glyphs
+        .iter()
+        .filter(|glyph| glyph.ch != '\0')
+        .map(|glyph| glyph.ch)
+        .collect()
 }
 
 fn page_text(page: &Page) -> String {

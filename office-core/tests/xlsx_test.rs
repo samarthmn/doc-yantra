@@ -1052,6 +1052,25 @@ fn print_area_excludes_cells_outside_named_range() {
     assert!(!text.contains("DROP"));
 }
 
+/// ECMA-376 18.3.1.63: the `paperSize` default is 1 (US Letter). A worksheet
+/// with no `<pageSetup>` must therefore paginate on 612x792pt pages — Excel
+/// and LibreOffice both do — not on A4 (previous behavior), which shifted
+/// every page break of pageSetup-less workbooks.
+#[test]
+fn absent_page_setup_defaults_to_letter_paper() {
+    let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>X</t></is></c></row></sheetData></worksheet>"#;
+    let bytes = minimal_xlsx(sheet, None);
+    let doc = XlsxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_xlsx(&doc).unwrap();
+    assert!(
+        (laid.pages[0].width_pt - 612.0).abs() < 0.01
+            && (laid.pages[0].height_pt - 792.0).abs() < 0.01,
+        "pageSetup-less sheets must default to Letter: {}x{}",
+        laid.pages[0].width_pt,
+        laid.pages[0].height_pt
+    );
+}
+
 #[test]
 fn header_footer_codes_expand_deterministically_and_unknown_code_drops_ampersand() {
     let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><headerFooter><oddHeader>&amp;L&amp;P/&amp;N &amp;D &amp;T &amp;F &amp;A &amp;Z</oddHeader></headerFooter></worksheet>"#;

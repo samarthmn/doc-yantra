@@ -383,6 +383,10 @@ pub struct TextParagraph {
     pub level: u8,
     /// Alignment (`l`/`ctr`/`r`/`just`).
     pub align: Option<String>,
+    /// Left margin in points (`a:pPr @marL`).
+    pub mar_l_pt: Option<f64>,
+    /// First-line indent in points (`a:pPr @indent`; negative = hanging).
+    pub indent_pt: Option<f64>,
     /// Right-to-left paragraph base direction.
     pub rtl: bool,
     /// Whether a bullet is suppressed (`a:buNone`).
@@ -413,6 +417,10 @@ pub enum TextBulletStyle {
 pub struct TextListStyleLevel {
     /// Paragraph alignment.
     pub align: Option<String>,
+    /// Left margin in points (`@marL`).
+    pub mar_l_pt: Option<f64>,
+    /// First-line indent in points (`@indent`; negative = hanging).
+    pub indent_pt: Option<f64>,
     /// Bullet declaration.
     pub bullet: Option<TextBulletStyle>,
     /// Default run properties for this level.
@@ -1352,6 +1360,8 @@ fn parse_list_style(node: Node) -> (Vec<Option<TextListStyleLevel>>, Vec<String>
         };
         let mut style = TextListStyleLevel {
             align: attr(level_node, A, "algn").map(str::to_string),
+            mar_l_pt: parse_i64(attr(level_node, A, "marL")).map(emu_to_pt),
+            indent_pt: parse_i64(attr(level_node, A, "indent")).map(emu_to_pt),
             ..TextListStyleLevel::default()
         };
         for property in children(level_node) {
@@ -1403,10 +1413,10 @@ fn parse_text_paragraph(node: Node) -> TextParagraph {
                 para.level = parse_i64(attr(c, A, "lvl")).unwrap_or(0).clamp(0, 8) as u8;
                 para.align = attr(c, A, "algn").map(str::to_string);
                 para.rtl = attr(c, A, "rtl").is_some_and(|value| value == "1" || value == "true");
-                for attribute in ["marL", "indent", "defTabSz"] {
-                    if parse_i64(attr(c, A, attribute)).is_some_and(|value| value != 0) {
-                        para.unsupported.push(format!("a:pPr@{attribute}"));
-                    }
+                para.mar_l_pt = parse_i64(attr(c, A, "marL")).map(emu_to_pt);
+                para.indent_pt = parse_i64(attr(c, A, "indent")).map(emu_to_pt);
+                if parse_i64(attr(c, A, "defTabSz")).is_some_and(|value| value != 0) {
+                    para.unsupported.push("a:pPr@defTabSz".to_string());
                 }
                 if attr(c, A, "fontAlgn").is_some() {
                     para.unsupported.push("a:pPr@fontAlgn".to_string());

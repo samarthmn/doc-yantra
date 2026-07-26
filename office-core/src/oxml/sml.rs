@@ -655,7 +655,8 @@ pub struct PageSetup {
 impl Default for PageSetup {
     fn default() -> Self {
         Self {
-            paper_size: 9,
+            // ECMA-376 18.3.1.63: paperSize defaults to 1 (US Letter).
+            paper_size: 1,
             landscape: false,
             scale: None,
             fit_to_width: None,
@@ -876,7 +877,7 @@ impl Worksheet {
         }
         if let Some(setup) = child(root, S, "pageSetup") {
             ws.page_setup.paper_size =
-                parse_i64(attr(setup, S, "paperSize")).unwrap_or(9).max(0) as u32;
+                parse_i64(attr(setup, S, "paperSize")).unwrap_or(1).max(0) as u32;
             ws.page_setup.landscape = attr(setup, S, "orientation") == Some("landscape");
             ws.page_setup.scale = parse_f64(attr(setup, S, "scale"))
                 .filter(|scale| *scale > 0.0)

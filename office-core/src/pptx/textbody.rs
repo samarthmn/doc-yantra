@@ -47,10 +47,9 @@ pub fn layout_textbody(
             .align
             .as_deref()
             .unwrap_or(if para.rtl { "r" } else { "l" });
-        let indent = para.level as f64 * 18.0;
-        let avail = (content_w - indent).max(1.0);
+        let (mar_l, indent) = resolve_indent_geometry(para, body, defaults, category);
 
-        let atoms = shape_paragraph(
+        let (atoms, bullet_len) = shape_paragraph(
             fonts,
             theme,
             defaults,
@@ -66,8 +65,37 @@ pub fn layout_textbody(
             y += defaults.size(category, para.level) * scale * 1.2;
             continue;
         }
-        for line in break_lines(&atoms, avail) {
-            let (line_items, line_h) = place(&atoms, &line, indent, avail, align, y, para.rtl);
+        // The bullet glyph draws at marL+indent (negative indent = hanging);
+        // first-line text starts at marL, pushed right only when the bullet's
+        // advance overflows the hang zone. Continuation lines start at marL.
+        let bullet_w: f64 = atoms[..bullet_len].iter().map(|a| a.advance_pt).sum();
+        let bullet_x = (mar_l + indent).max(0.0);
+        let (first_x, rest_x) = if bullet_len > 0 {
+            (f64::max(mar_l, bullet_x + bullet_w), mar_l)
+        } else {
+            ((mar_l + indent).max(0.0), mar_l)
+        };
+        let avail_first = (content_w - first_x).max(1.0);
+        let avail_rest = (content_w - rest_x).max(1.0);
+        let bullet_indices: Vec<usize> = (0..bullet_len).collect();
+
+        let mut lines = break_lines(&atoms, bullet_len, avail_first, avail_rest);
+        if lines.is_empty() && bullet_len > 0 {
+            // A bulleted paragraph with no text still renders its bullet.
+            lines.push(Vec::new());
+        }
+        for (index, line) in lines.iter().enumerate() {
+            let (base_x, line_avail) = if index == 0 {
+                (first_x, avail_first)
+            } else {
+                (rest_x, avail_rest)
+            };
+            let mut segments: Vec<(f64, &[usize])> = Vec::new();
+            if index == 0 && bullet_len > 0 {
+                segments.push((bullet_x, &bullet_indices));
+            }
+            segments.push((base_x, line));
+            let (line_items, line_h) = place(&atoms, &segments, line_avail, align, y, para.rtl);
             items.extend(line_items);
             y += line_h;
         }
@@ -76,6 +104,36 @@ pub fn layout_textbody(
         items,
         height_pt: y,
     })
+}
+
+/// Resolves a paragraph's `(marL, indent)` in points. Placeholder paragraphs
+/// arrive with the own→layout→master→txStyles chain already folded in by
+/// `inherit::resolve_text_body`; non-placeholder shapes and table cells skip
+/// that pass, so the body's own `a:lstStyle` and the master `p:txStyles`
+/// bucket are consulted here as fallbacks. Only when the entire chain is
+/// silent does the legacy 18pt-per-level step apply (keeps masters without
+/// indent geometry stable).
+fn resolve_indent_geometry(
+    para: &TextParagraph,
+    body: &TextBody,
+    defaults: &TextDefaults,
+    category: Category,
+) -> (f64, f64) {
+    let level = para.level as usize;
+    let own_style = body.list_style.get(level).and_then(Option::as_ref);
+    let txstyles_style = defaults.level_style(category, level);
+    let mar_l = para
+        .mar_l_pt
+        .or_else(|| own_style.and_then(|style| style.mar_l_pt))
+        .or_else(|| txstyles_style.and_then(|style| style.mar_l_pt));
+    let indent = para
+        .indent_pt
+        .or_else(|| own_style.and_then(|style| style.indent_pt))
+        .or_else(|| txstyles_style.and_then(|style| style.indent_pt));
+    match (mar_l, indent) {
+        (None, None) => (para.level as f64 * 18.0, 0.0),
+        (mar_l, indent) => (mar_l.unwrap_or(0.0).max(0.0), indent.unwrap_or(0.0)),
+    }
 }
 
 /// A shaped glyph atom.
@@ -117,12 +175,14 @@ fn shape_paragraph(
     scale: f64,
     bullet: Option<&str>,
     link_resolver: &dyn Fn(&str) -> Option<LinkTarget>,
-) -> Result<Vec<Atom>> {
+) -> Result<(Vec<Atom>, usize)> {
     let mut atoms = Vec::new();
-    // Bullet as a leading run using the first run's style (or defaults).
+    // Bullet as a leading run using the first run's style (or defaults). It is
+    // positioned independently of the text (at marL+indent), so it is shaped
+    // bare — no inlined separator.
     if let Some(b) = bullet {
         let synthetic = TextRun {
-            text: format!("{b}  "),
+            text: b.to_string(),
             ..para.runs.first().cloned().unwrap_or_default()
         };
         shape_run(
@@ -138,6 +198,7 @@ fn shape_paragraph(
             &mut atoms,
         )?;
     }
+    let bullet_len = atoms.len();
     for run in &para.runs {
         shape_run(
             fonts,
@@ -152,7 +213,7 @@ fn shape_paragraph(
             &mut atoms,
         )?;
     }
-    Ok(atoms)
+    Ok((atoms, bullet_len))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,12 +398,20 @@ fn bullet_prefix(para: &TextParagraph, numbering: &mut [u32; 9]) -> Option<Strin
     })
 }
 
-fn break_lines(atoms: &[Atom], width: f64) -> Vec<Vec<usize>> {
-    let mut lines = Vec::new();
+/// Breaks the text atoms (past the leading `skip` bullet atoms) into lines.
+/// The first line wraps at `first_width` (text starts at marL, or past an
+/// overflowing bullet); continuation lines wrap at `rest_width` (marL-based).
+fn break_lines(atoms: &[Atom], skip: usize, first_width: f64, rest_width: f64) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut current = Vec::new();
     let mut used = 0.0;
     let mut last_space = None;
-    for (i, a) in atoms.iter().enumerate() {
+    for (i, a) in atoms.iter().enumerate().skip(skip) {
+        let width = if lines.is_empty() {
+            first_width
+        } else {
+            rest_width
+        };
         if a.ch == '\n' {
             lines.push(std::mem::take(&mut current));
             used = 0.0;
@@ -373,31 +442,36 @@ fn break_lines(atoms: &[Atom], width: f64) -> Vec<Vec<usize>> {
     lines
 }
 
+/// Places one line's segments. Each segment is `(base_x, atom indices)`; a
+/// bulleted first line carries the bullet as its own segment at marL+indent
+/// ahead of the text segment at marL. Alignment offsets are computed from the
+/// text (last) segment's natural width against `avail`, the marL-reduced
+/// content width, and shift every segment together.
 fn place(
     atoms: &[Atom],
-    indices: &[usize],
-    indent: f64,
+    segments: &[(f64, &[usize])],
     avail: f64,
     align: &str,
     y_top: f64,
     rtl: bool,
 ) -> (Vec<LineItem>, f64) {
-    let natural: f64 = indices.iter().map(|&k| atoms[k].advance_pt).sum();
-    let ascent = indices
-        .iter()
+    let all_indices = || segments.iter().flat_map(|(_, indices)| indices.iter());
+    let natural: f64 = segments
+        .last()
+        .map(|(_, indices)| indices.iter().map(|&k| atoms[k].advance_pt).sum())
+        .unwrap_or(0.0);
+    let ascent = all_indices()
         .map(|&k| atoms[k].ascent_pt)
         .fold(0.0, f64::max);
-    let height = indices
-        .iter()
+    let height = all_indices()
         .map(|&k| atoms[k].line_height_pt)
         .fold(0.0, f64::max);
     let height = if height <= 0.0 { 14.0 } else { height };
-    let start = indent
-        + match align {
-            "ctr" => (avail - natural).max(0.0) / 2.0,
-            "r" => (avail - natural).max(0.0),
-            _ => 0.0,
-        };
+    let align_offset = match align {
+        "ctr" => (avail - natural).max(0.0) / 2.0,
+        "r" => (avail - natural).max(0.0),
+        _ => 0.0,
+    };
 
     let mut items = Vec::new();
     // The secondary key lets a semantic run sort before a visible glyph run
@@ -405,7 +479,7 @@ fn place(
     // cluster starts a same-style run followed by directly mapped text; the
     // visible run otherwise exposes the later direct text first to copy/search.
     let mut text_items: Vec<(usize, u8, LineItem)> = Vec::new();
-    let mut x = start;
+    let mut x = 0.0;
     let mut pending: Vec<PlacedGlyph> = Vec::new();
     let mut pstyle: Option<(FaceId, f64, Rgba, bool, Option<LinkTarget>)> = None;
     let mut pending_order: Option<usize> = None;
@@ -461,55 +535,59 @@ fn place(
         }
     };
 
-    for &k in indices {
-        let a = &atoms[k];
-        let key = (a.face, a.size_pt, a.color, a.underline, a.link.clone());
-        let same_style = pstyle.as_ref().is_some_and(|style| {
-            style.0 == key.0
-                && style.1 == key.1
-                && style.2 == key.2
-                && style.3 == key.3
-                && same_link(style.4.as_ref(), key.4.as_ref())
-        });
-        if !same_style {
-            flush(
-                &mut pending,
-                &mut pstyle,
-                &mut pending_order,
-                px,
-                &mut items,
-                &mut text_items,
-            );
-            pstyle = Some(key);
-            pending_order = Some(k.saturating_add(1));
-            px = x;
-        } else {
-            pending_order = Some(pending_order.unwrap_or(usize::MAX).min(k.saturating_add(1)));
+    for &(segment_x, indices) in segments {
+        x = segment_x + align_offset;
+        for &k in indices {
+            let a = &atoms[k];
+            let key = (a.face, a.size_pt, a.color, a.underline, a.link.clone());
+            let same_style = pstyle.as_ref().is_some_and(|style| {
+                style.0 == key.0
+                    && style.1 == key.1
+                    && style.2 == key.2
+                    && style.3 == key.3
+                    && same_link(style.4.as_ref(), key.4.as_ref())
+            });
+            if !same_style {
+                flush(
+                    &mut pending,
+                    &mut pstyle,
+                    &mut pending_order,
+                    px,
+                    &mut items,
+                    &mut text_items,
+                );
+                pstyle = Some(key);
+                pending_order = Some(k.saturating_add(1));
+                px = x;
+            } else {
+                pending_order = Some(pending_order.unwrap_or(usize::MAX).min(k.saturating_add(1)));
+            }
+            let advance_end = x + a.advance_pt;
+            for owned in &a.semantic {
+                line_semantics
+                    .entry(owned.group_id)
+                    .or_default()
+                    .push((advance_end - owned.cluster.advance_pt, owned.clone()));
+            }
+            pending.push(PlacedGlyph {
+                gid: a.gid,
+                advance_pt: a.advance_pt,
+                x_offset_pt: a.x_offset_pt,
+                y_offset_pt: a.y_offset_pt,
+                ch: a.ch,
+            });
+            x += a.advance_pt;
         }
-        let advance_end = x + a.advance_pt;
-        for owned in &a.semantic {
-            line_semantics
-                .entry(owned.group_id)
-                .or_default()
-                .push((advance_end - owned.cluster.advance_pt, owned.clone()));
-        }
-        pending.push(PlacedGlyph {
-            gid: a.gid,
-            advance_pt: a.advance_pt,
-            x_offset_pt: a.x_offset_pt,
-            y_offset_pt: a.y_offset_pt,
-            ch: a.ch,
-        });
-        x += a.advance_pt;
+        // A segment boundary is a positioning jump; never merge runs across it.
+        flush(
+            &mut pending,
+            &mut pstyle,
+            &mut pending_order,
+            px,
+            &mut items,
+            &mut text_items,
+        );
     }
-    flush(
-        &mut pending,
-        &mut pstyle,
-        &mut pending_order,
-        px,
-        &mut items,
-        &mut text_items,
-    );
     for (_, mut semantic) in line_semantics {
         semantic.sort_by_key(|(_, owned)| owned.source_order);
         let Some((_, first)) = semantic.first() else {

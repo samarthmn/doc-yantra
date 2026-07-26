@@ -927,6 +927,149 @@ fn markdown_footnote_definitions_render_backreference_arrow() {
     );
 }
 
+#[test]
+fn markdown_heading_group_keeps_with_next_across_page_boundary() {
+    // Regression: headings drew with no look-ahead, so a chained heading
+    // group (H2 immediately followed by H3) could strand at the bottom of a
+    // page — the group at the page foot with its first body line orphaned on
+    // the next page, or the H3 split from its H2. The whole contiguous
+    // heading group must instead move together with at least one body line.
+    // Sweep the filler count so the group crosses the boundary at several
+    // offsets; the invariant must hold for every one of them.
+    for filler in 18..=28 {
+        let mut md = String::new();
+        for i in 0..filler {
+            md.push_str(&format!("Filler paragraph number {i}.\n\n"));
+        }
+        md.push_str("## Keep Heading\n\n### Keep Subheading\n\n- keep item one\n- keep item two\n");
+        let bytes = markdown_to_pdf(&md, &DocOptions::default()).unwrap();
+        let doc = load(&bytes);
+        let n_pages = doc.get_pages().len();
+        let page_of = |needle: &str| -> usize {
+            (0..n_pages)
+                .find(|&i| {
+                    show_strings(&page_content_str(&doc, i))
+                        .iter()
+                        .any(|s| s.contains(needle))
+                })
+                .unwrap_or_else(|| panic!("{needle:?} missing (filler={filler})"))
+        };
+        let h2_page = page_of("Keep Heading");
+        let h3_page = page_of("Keep Subheading");
+        let item_page = page_of("keep item one");
+        assert_eq!(
+            h3_page, h2_page,
+            "H3 must stay on the H2's page (filler={filler})"
+        );
+        assert_eq!(
+            item_page, h2_page,
+            "first body line must stay with its heading group (filler={filler})"
+        );
+    }
+}
+
+#[test]
+fn markdown_blockquote_paragraphs_indent_relative_to_body() {
+    // Regression: blockquotes were flattened to full-width body paragraphs.
+    // Quoted text must indent 18pt per quote level and return to the body
+    // margin after the quote closes.
+    let md = "Plain body paragraph.\n\n> Quoted body paragraph.\n\n\
+              > > Deeply quoted paragraph.\n\nAfter body paragraph.\n";
+    let bytes = markdown_to_pdf(md, &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let ops = text_ops(&page_content_str(&doc, 0));
+    let x_of = |needle: &str| -> f64 {
+        ops.iter()
+            .find(|(_, _, text)| text.contains(needle))
+            .map(|(x, _, _)| *x)
+            .unwrap_or_else(|| panic!("{needle:?} missing as a text op: {ops:?}"))
+    };
+    let plain_x = x_of("Plain body paragraph.");
+    let quote_x = x_of("Quoted body paragraph.");
+    let deep_x = x_of("Deeply quoted paragraph.");
+    let after_x = x_of("After body paragraph.");
+    assert!(
+        (quote_x - plain_x - 18.0).abs() < 0.5,
+        "blockquote must indent 18pt from body: body x={plain_x}, quote x={quote_x}"
+    );
+    assert!(
+        (deep_x - plain_x - 36.0).abs() < 0.5,
+        "nested blockquote must indent 36pt from body: body x={plain_x}, deep x={deep_x}"
+    );
+    assert!(
+        (after_x - plain_x).abs() < 0.01,
+        "indent must reset after the quote closes: body x={plain_x}, after x={after_x}"
+    );
+}
+
+#[test]
+fn hostile_markdown_blockquote_nesting_returns_typed_limit_without_panic() {
+    let markdown = format!("{}deeply quoted\n", "> ".repeat(500));
+    let result = std::panic::catch_unwind(|| markdown_to_pdf(&markdown, &DocOptions::default()));
+    let error = result.expect("must not panic").expect_err("nesting limit");
+    assert!(matches!(error, PdfCoreError::InvalidInput(ref message) if message.contains("limit")));
+}
+
+#[test]
+fn markdown_code_block_at_page_boundary_stays_atomic() {
+    // Regression: a fenced block near the page bottom split mid-block even
+    // when the whole block fit a fresh page. Same policy as CSV row
+    // atomicity: a block that fits a full page moves whole to the next page;
+    // only blocks taller than a full page may split.
+    for filler in 18..=26 {
+        let mut md = String::new();
+        for i in 0..filler {
+            md.push_str(&format!("Filler paragraph number {i}.\n\n"));
+        }
+        md.push_str("```\n");
+        for n in 1..=8 {
+            md.push_str(&format!("atomfence-{n}\n"));
+        }
+        md.push_str("```\n");
+        let bytes = markdown_to_pdf(&md, &DocOptions::default()).unwrap();
+        let doc = load(&bytes);
+        let n_pages = doc.get_pages().len();
+        let line_pages: Vec<usize> = (1..=8)
+            .map(|n| {
+                let needle = format!("atomfence-{n}");
+                (0..n_pages)
+                    .find(|&i| {
+                        show_strings(&page_content_str(&doc, i))
+                            .iter()
+                            .any(|s| s.contains(&needle))
+                    })
+                    .unwrap_or_else(|| panic!("{needle:?} missing (filler={filler})"))
+            })
+            .collect();
+        assert!(
+            line_pages.iter().all(|&p| p == line_pages[0]),
+            "code block that fits a fresh page must not split \
+             (filler={filler}): line pages {line_pages:?}"
+        );
+    }
+
+    // A block taller than a full page must still split rather than loop or
+    // drop lines: every line renders exactly once, across at least 2 pages.
+    let mut md = String::from("```\n");
+    for n in 1..=60 {
+        md.push_str(&format!("tallfence-{n:02}\n"));
+    }
+    md.push_str("```\n");
+    let bytes = markdown_to_pdf(&md, &DocOptions::default()).unwrap();
+    let doc = load(&bytes);
+    let n_pages = doc.get_pages().len();
+    assert!(
+        n_pages >= 2,
+        "60 code lines exceed one page and must paginate"
+    );
+    let all = all_show_strings(&doc);
+    for n in 1..=60 {
+        let needle = format!("tallfence-{n:02}");
+        let count = all.iter().filter(|s| s.contains(&needle)).count();
+        assert_eq!(count, 1, "{needle} must render exactly once");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // images_to_pdf
 // ---------------------------------------------------------------------------

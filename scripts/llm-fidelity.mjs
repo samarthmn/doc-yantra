@@ -154,7 +154,7 @@ function judgeCase(engine, name) {
       "-m",
       "gpt-5.6-sol",
       "-c",
-      "model_reasoning_effort=medium",
+      "model_reasoning_effort=xhigh",
       "--output-schema",
       schemaPath,
       "-o",

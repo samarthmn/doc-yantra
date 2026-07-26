@@ -783,8 +783,18 @@ fn layout_paragraph_with_wrap_context(
     let label_left = label.as_ref().and_then(|l| l.left_pt);
     let label_hanging = label.as_ref().and_then(|l| l.hanging_pt);
     let direct_indent = &para.props.indent;
+    // A direct `w:numPr` with `w:numId w:val="0"` removes style-hierarchy
+    // numbering (ECMA-376 numId "removal" semantics); Word additionally
+    // drops every style-hierarchy `w:ind` contribution and honors only the
+    // paragraph's own direct `w:ind` (korean fidelity ground truth).
+    let numbering_removed = para
+        .props
+        .numbering
+        .is_some_and(|num_ref| num_ref.num_id == 0);
     let (left, left_origin) = if let Some(value) = direct_indent.left_pt {
         (value, NumberingGeometryOrigin::DirectParagraph)
+    } else if numbering_removed {
+        (0.0, NumberingGeometryOrigin::Default)
     } else if let Some(value) = own_style_indent.and_then(|indent| indent.left_pt) {
         (value, NumberingGeometryOrigin::ParagraphStyle)
     } else if let Some(value) = label_left {
@@ -813,6 +823,8 @@ fn layout_paragraph_with_wrap_context(
                 direct_indent.hanging_pt.unwrap_or(0.0),
                 NumberingGeometryOrigin::DirectParagraph,
             )
+        } else if numbering_removed {
+            (0.0, 0.0, NumberingGeometryOrigin::Default)
         } else if let Some(own) = own_style_pair {
             (
                 own.first_line_pt.unwrap_or(0.0),

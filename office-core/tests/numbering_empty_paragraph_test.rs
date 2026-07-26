@@ -41,6 +41,67 @@ fn extracted_text(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// ECMA-376 numId=0 "removal" semantics, pinned by the korean Word ground
+/// truth: a direct `w:numPr` with `numId=0` drops every style-hierarchy
+/// `w:ind` contribution (left AND firstLine/hanging); only the paragraph's
+/// own direct `w:ind` applies.
+#[test]
+fn num_id_zero_drops_style_indents_but_keeps_direct_left() {
+    let styles = format!(
+        r#"<?xml version="1.0"?><w:styles{DOC_NAMESPACES}><w:style w:type="paragraph" w:styleId="NumBody"><w:name w:val="NumBody"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:left="357" w:hanging="357"/></w:pPr></w:style></w:styles>"#
+    );
+    let document = format!(
+        r#"<?xml version="1.0"?><w:document{DOC_NAMESPACES}><w:body><w:p><w:pPr><w:pStyle w:val="NumBody"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="0"/></w:numPr><w:ind w:left="360"/></w:pPr><w:r><w:t>removed numbering text</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    let numbering = format!(
+        r#"<?xml version="1.0"?><w:numbering{DOC_NAMESPACES}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="[%1]"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let bytes = zip_package(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/styles.xml", styles.as_bytes()),
+        ("word/numbering.xml", numbering.as_bytes()),
+    ]);
+    let doc = WordDoc::open(&bytes, &ConvertOptions::default()).expect("open numId=0 fixture");
+    let (laid, _) = layout_docx(&doc).expect("layout numId=0 fixture");
+    let text_x = laid.pages[0]
+        .items
+        .iter()
+        .find_map(|pos| match &pos.item {
+            Item::Glyphs(run)
+                if run
+                    .glyphs
+                    .iter()
+                    .map(|g| g.ch)
+                    .collect::<String>()
+                    .contains("removed") =>
+            {
+                Some(pos.x_pt)
+            }
+            _ => None,
+        })
+        .expect("paragraph text placed");
+    // 360 twips = 18pt direct left; the style's hanging=357 must NOT pull the
+    // first line back to the margin. Default body margin is 72pt.
+    assert!(
+        (text_x - 90.0).abs() < 0.5,
+        "first line must sit at margin + direct left (90pt), got {text_x}"
+    );
+    // No numbering label may render (numId=0 removes it).
+    let all_text: String = laid.pages[0]
+        .items
+        .iter()
+        .filter_map(|pos| match &pos.item {
+            Item::Glyphs(run) => Some(run.glyphs.iter().map(|g| g.ch).collect::<String>()),
+            _ => None,
+        })
+        .collect();
+    assert!(!all_text.contains("[1]"), "{all_text:?}");
+}
+
 #[test]
 fn empty_numbered_paragraph_still_displays_its_label() {
     let body = format!(

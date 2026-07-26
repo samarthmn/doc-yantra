@@ -1560,6 +1560,63 @@ fn collect_footnotes(markdown: &str) -> Vec<(String, String)> {
     definitions
 }
 
+/// Pre-scans the event stream (same pattern as [`collect_footnotes`]) and
+/// returns one keep-with-next reserve per heading occurrence, in document
+/// order. The first heading of each contiguous heading group carries the
+/// height of the whole group (pre-gap plus one 1.6-leading line per heading)
+/// plus one following body line; chained followers carry 0.0. Reserving the
+/// group as a unit is deliberate: per-heading reserves would break between
+/// chained headings and strand the earlier ones, and content already drawn
+/// cannot be rewound.
+fn collect_heading_reserves(markdown: &str, base: f64) -> Vec<f64> {
+    let mut heights: Vec<f64> = Vec::new();
+    let mut group_starts: Vec<usize> = Vec::new();
+    let mut pending = false;
+    let mut footnote_depth: u32 = 0;
+    for event in Parser::new_ext(markdown, markdown_options()) {
+        if footnote_depth > 0 {
+            match event {
+                Event::Start(_) => footnote_depth += 1,
+                Event::End(_) => footnote_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                let pre_gap = if pending {
+                    base * adjacent_heading_gap_factor(level)
+                } else {
+                    group_starts.push(heights.len());
+                    base * 0.8
+                };
+                heights.push(pre_gap + base * heading_scale(level) * 1.6);
+                pending = false;
+            }
+            Event::End(TagEnd::Heading(_)) => pending = true,
+            Event::Start(Tag::FootnoteDefinition(_)) => footnote_depth = 1,
+            // Any other block start (or rule / inert HTML event) consumes the
+            // heading margin in the render loop, closing the group.
+            Event::Start(_) | Event::Rule | Event::Html(_) | Event::InlineHtml(_) => {
+                pending = false;
+            }
+            _ => {}
+        }
+    }
+    // One post-heading body line: the consumed heading margin plus a text
+    // line at the body leading.
+    let body_line = base * 0.85 + base * MARKDOWN_LINE_HEIGHT_FACTOR;
+    let mut reserves = vec![0.0; heights.len()];
+    for (index, &start) in group_starts.iter().enumerate() {
+        let end = group_starts
+            .get(index + 1)
+            .copied()
+            .unwrap_or(heights.len());
+        reserves[start] = heights[start..end].iter().sum::<f64>() + body_line;
+    }
+    reserves
+}
+
 /// Renders Markdown (headings, paragraphs, bold/italic, lists, GFM tables,
 /// code blocks, raw-HTML text content, horizontal rules) into a paginated
 /// PDF.
@@ -1579,12 +1636,17 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
     let mut pending_heading_margin: Option<HeadingLevel> = None;
     // Each entry is a list level; Some(n) = next ordered index, None = bullet.
     let mut lists: Vec<Option<u64>> = Vec::new();
+    // Open block quote levels; each indents its content like a list level.
+    let mut blockquote_depth: usize = 0;
     let mut pending_marker: Option<ListMarker> = None;
     let mut in_code_block = false;
     let mut code_buf = String::new();
     let mut skip_depth: u32 = 0; // inside ignored constructs (images)
     let mut footnote_depth: u32 = 0;
     let footnote_definitions = collect_footnotes(markdown);
+    // Keep-with-next: per-heading-group reserves from a look-ahead pass.
+    let heading_reserves = collect_heading_reserves(markdown, base);
+    let mut heading_index = 0_usize;
     let mut footnote_numbers: BTreeMap<String, usize> = BTreeMap::new();
     let mut next_footnote = 1_usize;
     // Raw-HTML block accumulator (source renders literally as a paragraph).
@@ -1646,6 +1708,18 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
+                    // At a group start, reserve room for the whole contiguous
+                    // heading group plus one body line (capped at a fresh
+                    // page, mirroring emit_paragraph's break-before guard) so
+                    // headings never strand at the bottom of a page.
+                    if let Some(&reserve) = heading_reserves.get(heading_index)
+                        && reserve > 0.0
+                    {
+                        let fresh_page_height =
+                            eng.page_h - eng.continuation_top_margin - eng.bottom_margin;
+                        eng.ensure_room(reserve.min(fresh_page_height));
+                    }
+                    heading_index += 1;
                     in_heading = Some(level);
                     if pending_heading_margin.take().is_some() {
                         eng.advance(base * adjacent_heading_gap_factor(level));
@@ -1674,7 +1748,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                             &mut eng,
                             &mut runs,
                             base,
-                            18.0 * lists.len() as f64,
+                            18.0 * (lists.len() + blockquote_depth) as f64,
                             MARKDOWN_LINE_HEIGHT_FACTOR,
                             &mut pending_marker,
                             base * 0.2,
@@ -1690,7 +1764,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                             &mut eng,
                             &mut runs,
                             base,
-                            18.0 * lists.len() as f64,
+                            18.0 * (lists.len() + blockquote_depth) as f64,
                             MARKDOWN_LINE_HEIGHT_FACTOR,
                             &mut pending_marker,
                             base * 0.2,
@@ -1743,8 +1817,16 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                     active_link = safe_link_uri(&dest_url);
                 }
                 Tag::FootnoteDefinition(_) => footnote_depth = 1,
-                // Block quotes render as plain content; footnotes and
-                // everything else are ignored gracefully.
+                Tag::BlockQuote(_) => {
+                    consume_heading_margin(&mut eng, &mut pending_heading_margin, base);
+                    if lists.len() + blockquote_depth >= MAX_MARKDOWN_NESTING {
+                        return Err(PdfCoreError::InvalidInput(format!(
+                            "Markdown nesting depth exceeds limit {MAX_MARKDOWN_NESTING}"
+                        )));
+                    }
+                    blockquote_depth += 1;
+                }
+                // Everything else is ignored gracefully.
                 _ => {}
             },
             Event::End(tag_end) => match tag_end {
@@ -1754,7 +1836,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                         &mut eng,
                         &mut runs,
                         size,
-                        18.0 * lists.len() as f64,
+                        18.0 * (lists.len() + blockquote_depth) as f64,
                         1.6,
                         &mut pending_marker,
                         0.0,
@@ -1763,7 +1845,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                     pending_heading_margin = Some(level);
                 }
                 TagEnd::Paragraph => {
-                    let indent = 18.0 * lists.len() as f64;
+                    let indent = 18.0 * (lists.len() + blockquote_depth) as f64;
                     let gap = if lists.is_empty() { base } else { 0.0 };
                     flush_block(
                         &mut eng,
@@ -1777,7 +1859,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 }
                 TagEnd::Item => {
                     // Tight list items carry inline text without a Paragraph.
-                    let indent = 18.0 * lists.len() as f64;
+                    let indent = 18.0 * (lists.len() + blockquote_depth) as f64;
                     flush_block(
                         &mut eng,
                         &mut runs,
@@ -1799,7 +1881,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 TagEnd::Strikethrough => strike = strike.saturating_sub(1),
                 TagEnd::CodeBlock => {
                     in_code_block = false;
-                    let indent = 18.0 * lists.len() as f64;
+                    let indent = 18.0 * (lists.len() + blockquote_depth) as f64;
                     render_code_block(&mut eng, &code_buf, base, indent)?;
                     code_buf.clear();
                 }
@@ -1812,7 +1894,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                                 text,
                                 style: RunStyle::default(),
                             }];
-                            let indent = 18.0 * lists.len() as f64;
+                            let indent = 18.0 * (lists.len() + blockquote_depth) as f64;
                             eng.emit_paragraph(
                                 &block,
                                 base,
@@ -1847,6 +1929,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
                 }
                 TagEnd::Image => skip_depth = skip_depth.saturating_sub(1),
                 TagEnd::Link => active_link = None,
+                TagEnd::BlockQuote(_) => blockquote_depth = blockquote_depth.saturating_sub(1),
                 _ => {}
             },
             Event::Text(text) => {
@@ -1999,7 +2082,7 @@ pub fn markdown_to_pdf(markdown: &str, opts: &DocOptions) -> Result<Vec<u8>> {
     }
     // Flush any dangling inline content (defensive; parser normally closes).
     if !runs.is_empty() {
-        let indent = 18.0 * lists.len() as f64;
+        let indent = 18.0 * (lists.len() + blockquote_depth) as f64;
         flush_block(
             &mut eng,
             &mut runs,
@@ -2131,6 +2214,15 @@ fn render_code_block(eng: &mut LayoutEngine, code: &str, base: f64, indent: f64)
     }
 
     eng.advance(base * 0.35);
+    // Blocks are atomic across page breaks: a block that does not fit in the
+    // remaining space moves whole to the next page instead of splitting
+    // mid-block (same policy as CSV logical rows). Only blocks taller than a
+    // full page may split in the loop below.
+    let block_height = 2.0 * pad + lead * lines.len() as f64;
+    let fresh_page_height = eng.page_h - eng.continuation_top_margin - eng.bottom_margin;
+    if block_height <= fresh_page_height + 0.01 && eng.y - block_height < eng.bottom_margin - 0.01 {
+        eng.break_page();
+    }
     let left = eng.left() + indent;
     let mut line_index = 0;
     while line_index < lines.len() {
