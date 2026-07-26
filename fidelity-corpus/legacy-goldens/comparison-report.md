@@ -165,10 +165,10 @@ typed metric exception; any independent red keeps the row in the red count.
 | 2 | office/docx/file2.docx |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
 | 3 | office/pptx/file1.pptx |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
 | 4 | office/pptx/file2.pptx |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
-| 5 | office/xlsx/file1.xlsx |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
-| 6 | office/xlsx/file2.xlsx |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
-| 7 | office/xlsm/file1.xlsm |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
-| 8 | office/xlsm/file2.xlsm |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set |
+| 5 | office/xlsx/file1.xlsx |  | `OFFICE_PAGE_DIMENSIONS`: LO-era golden fixed A4; engine now applies the ECMA-376 default (paperSize 1, Letter) when pageSetup omits it | `OFFICE_VISUAL_PARITY` | same office assertion set |
+| 6 | office/xlsx/file2.xlsx |  | `OFFICE_PAGE_DIMENSIONS`: LO-era golden fixed A4; engine now applies the ECMA-376 default (paperSize 1, Letter) when pageSetup omits it | `OFFICE_VISUAL_PARITY` | same office assertion set |
+| 7 | office/xlsm/file1.xlsm |  | `OFFICE_PAGE_DIMENSIONS`: LO-era golden fixed A4; engine now applies the ECMA-376 default (paperSize 1, Letter) when pageSetup omits it | `OFFICE_VISUAL_PARITY` | same office assertion set |
+| 8 | office/xlsm/file2.xlsm |  | `OFFICE_PAGE_DIMENSIONS`: LO-era golden fixed A4; engine now applies the ECMA-376 default (paperSize 1, Letter) when pageSetup omits it | `OFFICE_VISUAL_PARITY` | same office assertion set |
 | 9 | office/fidelity-docx/fonts-substitution |  |  | `OFFICE_VISUAL_PARITY` | same office assertion set; font-run text |
 | 10 | office/fidelity-docx/headers-footers | ✓ |  |  | same office assertion set; header/footer text |
 | 11 | office/fidelity-docx/hyperlinks |  | `OFFICE_LINK_URI_SERIALIZATION`: golden `https://example.com/`, current `https://example.com`, normalized target exact | `OFFICE_VISUAL_PARITY` | same office assertion set; raw and normalized URI sets |

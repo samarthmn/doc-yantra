@@ -86,14 +86,18 @@ impl RuntimeFontRegistry {
         hash_pinned: bool,
         sha256: &str,
     ) -> Result<bool> {
-        if let Some(existing) = self
-            .fonts
-            .iter_mut()
-            .find(|font| font.sha256 == sha256 && font.face_index == face_index)
-        {
-            existing.hash_pinned |= hash_pinned;
-            return Ok(false);
-        }
+        let insert_at = match self.fonts.binary_search_by(|font| {
+            font.sha256
+                .as_str()
+                .cmp(sha256)
+                .then_with(|| font.face_index.cmp(&face_index))
+        }) {
+            Ok(existing) => {
+                self.fonts[existing].hash_pinned |= hash_pinned;
+                return Ok(false);
+            }
+            Err(insert_at) => insert_at,
+        };
 
         let next_face_count =
             resource_limits::checked_count_add("runtime font faces", self.fonts.len(), 1)?;
@@ -131,12 +135,15 @@ impl RuntimeFontRegistry {
                 Arc::new(owned)
             }
         };
-        self.fonts.push(RuntimeFont {
-            bytes: stored_bytes,
-            face_index,
-            hash_pinned,
-            sha256: sha256.to_owned(),
-        });
+        self.fonts.insert(
+            insert_at,
+            RuntimeFont {
+                bytes: stored_bytes,
+                face_index,
+                hash_pinned,
+                sha256: sha256.to_owned(),
+            },
+        );
         self.aggregate_bytes = next_aggregate_bytes;
         Ok(true)
     }
@@ -543,6 +550,25 @@ mod runtime_font_tests {
             &original_bytes,
             &registry.fonts[0].bytes
         ));
+    }
+
+    #[test]
+    fn local_runtime_font_registry_order_is_canonical() {
+        let mut registry = RuntimeFontRegistry::with_limits(3, 3);
+        registry.insert(b"z", 0, false, "zeta").unwrap();
+        registry.insert(b"a", 2, false, "alpha").unwrap();
+        registry.insert(b"a", 0, false, "alpha").unwrap();
+
+        let identities = registry
+            .fonts
+            .iter()
+            .map(|font| (font.sha256.as_str(), font.face_index))
+            .collect::<Vec<_>>();
+
+        // FontDb assigns FaceId in registration order, and the PDF emitter uses
+        // FaceId order for font resources. Canonical registry order therefore
+        // keeps identical inputs byte-stable after unrelated warm-up converts.
+        assert_eq!(identities, vec![("alpha", 0), ("alpha", 2), ("zeta", 0)]);
     }
 
     #[test]

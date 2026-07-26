@@ -15,6 +15,13 @@ pub fn category(ph: &Placeholder) -> Category {
     }
 }
 
+/// Chooses the text-style bucket for a shape. A placeholder with an omitted
+/// `@type` is a body placeholder, while a shape with no `p:ph` at all is
+/// freeform text and uses the master's `otherStyle`.
+pub fn shape_category(ph: Option<&Placeholder>) -> Category {
+    ph.map(category).unwrap_or(Category::Other)
+}
+
 /// Finds the `xfrm` for a slide placeholder, searching the layout then master.
 pub fn resolve_xfrm(ph: &Placeholder, own: Option<Xfrm>, layout: &Slide, master: &Slide) -> Xfrm {
     if let Some(x) = own.filter(|x| x.present && x.w_pt > 0.0) {
@@ -38,6 +45,27 @@ pub fn resolve_text_body(
     let layout_body = find_ph_text(ph, layout);
     let master_body = find_ph_text(ph, master);
     let mut resolved = own.clone();
+    resolved.anchor = own
+        .anchor
+        .clone()
+        .or_else(|| layout_body.and_then(|body| body.anchor.clone()))
+        .or_else(|| master_body.and_then(|body| body.anchor.clone()));
+    let autofit_source = [Some(own), layout_body, master_body]
+        .into_iter()
+        .flatten()
+        .find(|body| body.norm_autofit.is_some());
+    resolved.norm_autofit = autofit_source.and_then(|body| body.norm_autofit);
+    resolved.font_scale = autofit_source
+        .filter(|body| body.norm_autofit == Some(true))
+        .and_then(|body| body.font_scale);
+    inherit_insets(&mut resolved, own, layout_body, master_body);
+    for inherited in [layout_body, master_body].into_iter().flatten() {
+        for detail in &inherited.unsupported {
+            if !resolved.unsupported.contains(detail) {
+                resolved.unsupported.push(detail.clone());
+            }
+        }
+    }
     for paragraph in &mut resolved.paragraphs {
         let level = paragraph.level as usize;
         let own_style = own.list_style.get(level).and_then(Option::as_ref);
@@ -61,6 +89,64 @@ pub fn resolve_text_body(
     resolved
 }
 
+fn inherit_insets(
+    resolved: &mut TextBody,
+    own: &TextBody,
+    layout: Option<&TextBody>,
+    master: Option<&TextBody>,
+) {
+    let horizontal = [
+        (
+            own.inset_lr.0,
+            own.inset_lr_explicit.0,
+            layout.map(|body| (body.inset_lr.0, body.inset_lr_explicit.0)),
+            master.map(|body| (body.inset_lr.0, body.inset_lr_explicit.0)),
+        ),
+        (
+            own.inset_lr.1,
+            own.inset_lr_explicit.1,
+            layout.map(|body| (body.inset_lr.1, body.inset_lr_explicit.1)),
+            master.map(|body| (body.inset_lr.1, body.inset_lr_explicit.1)),
+        ),
+    ];
+    let vertical = [
+        (
+            own.inset_tb.0,
+            own.inset_tb_explicit.0,
+            layout.map(|body| (body.inset_tb.0, body.inset_tb_explicit.0)),
+            master.map(|body| (body.inset_tb.0, body.inset_tb_explicit.0)),
+        ),
+        (
+            own.inset_tb.1,
+            own.inset_tb_explicit.1,
+            layout.map(|body| (body.inset_tb.1, body.inset_tb_explicit.1)),
+            master.map(|body| (body.inset_tb.1, body.inset_tb_explicit.1)),
+        ),
+    ];
+    resolved.inset_lr = (
+        inherited_inset(horizontal[0]),
+        inherited_inset(horizontal[1]),
+    );
+    resolved.inset_tb = (inherited_inset(vertical[0]), inherited_inset(vertical[1]));
+    resolved.inset_lr_explicit = (true, true);
+    resolved.inset_tb_explicit = (true, true);
+}
+
+type InsetValue = (f64, bool);
+type InsetInheritance = (f64, bool, Option<InsetValue>, Option<InsetValue>);
+
+fn inherited_inset((own_value, own_explicit, layout, master): InsetInheritance) -> f64 {
+    if own_explicit {
+        own_value
+    } else if let Some((value, true)) = layout {
+        value
+    } else if let Some((value, true)) = master {
+        value
+    } else {
+        own_value
+    }
+}
+
 fn apply_list_level(
     paragraph: &mut crate::oxml::pml::TextParagraph,
     own: Option<&TextListStyleLevel>,
@@ -80,6 +166,12 @@ fn apply_list_level(
     }
     if paragraph.indent_pt.is_none() {
         paragraph.indent_pt = styles.iter().flatten().find_map(|style| style.indent_pt);
+    }
+    if paragraph.space_before.is_none() {
+        paragraph.space_before = styles.iter().flatten().find_map(|style| style.space_before);
+    }
+    if paragraph.space_after.is_none() {
+        paragraph.space_after = styles.iter().flatten().find_map(|style| style.space_after);
     }
     if !paragraph.bullet_none
         && paragraph.bullet_char.is_none()
@@ -143,7 +235,7 @@ fn find_ph_xfrm(ph: &Placeholder, slide: &Slide) -> Option<Xfrm> {
             if other.idx.is_some() && other.idx == ph.idx {
                 return Some(x);
             }
-            if by_type.is_none() && other.ph_type == ph.ph_type {
+            if by_type.is_none() && equivalent_placeholder_type(other, ph) {
                 by_type = Some(x);
             }
         }
@@ -163,12 +255,20 @@ fn find_ph_text<'a>(ph: &Placeholder, slide: &'a Slide) -> Option<&'a TextBody> 
             if other.idx.is_some() && other.idx == ph.idx {
                 return Some(text);
             }
-            if by_type.is_none() && other.ph_type == ph.ph_type {
+            if by_type.is_none() && equivalent_placeholder_type(other, ph) {
                 by_type = Some(text);
             }
         }
     }
     by_type
+}
+
+fn equivalent_placeholder_type(left: &Placeholder, right: &Placeholder) -> bool {
+    left.ph_type == right.ph_type
+        || matches!(
+            (left.ph_type.as_deref(), right.ph_type.as_deref()),
+            (Some("title"), Some("ctrTitle")) | (Some("ctrTitle"), Some("title"))
+        )
 }
 
 /// A default placeholder box (points) when nothing is inherited — sized for the
@@ -191,5 +291,138 @@ fn default_box(ph: &Placeholder) -> Xfrm {
             present: true,
             ..Default::default()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oxml::pml::ShapeProps;
+
+    fn placeholder_shape(ph_type: &str, anchor: Option<&str>) -> ShapeElem {
+        placeholder_shape_with_body(
+            ph_type,
+            TextBody {
+                anchor: anchor.map(str::to_string),
+                ..TextBody::default()
+            },
+        )
+    }
+
+    fn placeholder_shape_with_body(ph_type: &str, body: TextBody) -> ShapeElem {
+        ShapeElem::Shape {
+            ph: Some(Placeholder {
+                ph_type: Some(ph_type.to_string()),
+                idx: None,
+            }),
+            props: ShapeProps::default(),
+            text: Some(body),
+        }
+    }
+
+    #[test]
+    fn centered_title_placeholder_inherits_equivalent_master_title_anchor() {
+        let ph = Placeholder {
+            ph_type: Some("ctrTitle".to_string()),
+            idx: None,
+        };
+        let layout = Slide {
+            shapes: vec![placeholder_shape("ctrTitle", None)],
+            ..Slide::default()
+        };
+        let master = Slide {
+            shapes: vec![ShapeElem::Shape {
+                ph: Some(Placeholder {
+                    ph_type: Some("title".to_string()),
+                    idx: None,
+                }),
+                props: ShapeProps::default(),
+                text: Some(TextBody {
+                    anchor: Some("ctr".to_string()),
+                    norm_autofit: Some(true),
+                    ..TextBody::default()
+                }),
+            }],
+            ..Slide::default()
+        };
+
+        let resolved = resolve_text_body(
+            Some(&ph),
+            &TextBody::default(),
+            &layout,
+            &master,
+            &TextDefaults::default(),
+        );
+
+        assert_eq!(
+            resolved.anchor.as_deref(),
+            Some("ctr"),
+            "ctrTitle and title are equivalent placeholder kinds for bodyPr inheritance"
+        );
+        assert_eq!(
+            resolved.norm_autofit,
+            Some(true),
+            "the equivalent master title's normalized-autofit line rule must inherit"
+        );
+    }
+
+    #[test]
+    fn freeform_shape_uses_other_style_but_typeless_placeholder_uses_body_style() {
+        assert_eq!(shape_category(None), Category::Other);
+        assert_eq!(
+            shape_category(Some(&Placeholder::default())),
+            Category::Body
+        );
+    }
+
+    #[test]
+    fn explicit_zero_inset_and_no_autofit_override_inherited_body_properties() {
+        let ph = Placeholder {
+            ph_type: Some("body".to_string()),
+            idx: None,
+        };
+        let own = TextBody {
+            norm_autofit: Some(false),
+            inset_lr: (0.0, 7.2),
+            inset_tb: (3.6, 3.6),
+            inset_lr_explicit: (true, false),
+            ..TextBody::default()
+        };
+        let layout = Slide {
+            shapes: vec![placeholder_shape_with_body(
+                "body",
+                TextBody {
+                    inset_lr: (9.0, 10.0),
+                    inset_tb: (11.0, 12.0),
+                    inset_lr_explicit: (false, true),
+                    inset_tb_explicit: (true, false),
+                    ..TextBody::default()
+                },
+            )],
+            ..Slide::default()
+        };
+        let master = Slide {
+            shapes: vec![placeholder_shape_with_body(
+                "body",
+                TextBody {
+                    norm_autofit: Some(true),
+                    font_scale: Some(0.7),
+                    inset_lr: (20.0, 20.0),
+                    inset_tb: (20.0, 20.0),
+                    inset_lr_explicit: (true, true),
+                    inset_tb_explicit: (true, true),
+                    ..TextBody::default()
+                },
+            )],
+            ..Slide::default()
+        };
+
+        let resolved =
+            resolve_text_body(Some(&ph), &own, &layout, &master, &TextDefaults::default());
+
+        assert_eq!(resolved.norm_autofit, Some(false));
+        assert_eq!(resolved.font_scale, None);
+        assert_eq!(resolved.inset_lr, (0.0, 10.0));
+        assert_eq!(resolved.inset_tb, (11.0, 20.0));
     }
 }

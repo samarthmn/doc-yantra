@@ -582,10 +582,7 @@ fn profile_pptx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
                                 resolve_text_body(ph.as_ref(), body, layout, master, defaults)
                             },
                         );
-                        let category = ph
-                            .as_ref()
-                            .map(crate::pptx::inherit::category)
-                            .unwrap_or(Category::Other);
+                        let category = crate::pptx::inherit::shape_category(ph.as_ref());
                         walk_body(
                             &resolved_body,
                             profile,

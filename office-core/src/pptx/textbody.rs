@@ -8,12 +8,18 @@ use crate::fonts::metrics::FaceMetrics;
 use crate::fonts::{FaceId, FontDb, matching};
 use crate::layout::paragraph::LineItem;
 use crate::layout::{Decor, GlyphRun, Item, LinkTarget, PlacedGlyph, SemanticCluster, SemanticRun};
-use crate::oxml::pml::{TextBody, TextParagraph, TextRun};
+use crate::oxml::pml::{TextBody, TextParagraph, TextRun, TextSpacing};
 use crate::oxml::theme::Theme;
 use crate::oxml::{Rgb, Rgba};
 use crate::profile::Warning;
 use crate::text::shape;
 use std::collections::{BTreeMap, HashMap};
+
+/// PowerPoint's normalized-autofit DrawingML line box is 1.20 times the
+/// largest font size on the physical line. The frozen PowerPoint-web truths
+/// inherit `<a:normAutofit/>` and measure 24.05pt at 20pt. Ordinary text keeps
+/// the face's natural line box (Carlito's Win box is 1.220703em).
+const NORMALIZED_LINE_HEIGHT_EM: f64 = 1.2;
 
 /// The laid-out text of a body: items (relative to the content box top-left) and
 /// total height.
@@ -41,15 +47,17 @@ pub fn layout_textbody(
     let mut y = 0.0_f64;
     let mut numbering = [0u32; 9];
 
-    for para in &body.paragraphs {
+    for (paragraph_index, para) in body.paragraphs.iter().enumerate() {
+        let has_following_paragraph = paragraph_index < body.paragraphs.len().saturating_sub(1);
         let bullet = bullet_prefix(para, &mut numbering);
         let align = para
             .align
             .as_deref()
             .unwrap_or(if para.rtl { "r" } else { "l" });
         let (mar_l, indent) = resolve_indent_geometry(para, body, defaults, category);
+        let (space_before, space_after) = resolve_paragraph_spacing(para, body, defaults, category);
 
-        let (atoms, bullet_len) = shape_paragraph(
+        let (mut atoms, bullet_len) = shape_paragraph(
             fonts,
             theme,
             defaults,
@@ -60,9 +68,29 @@ pub fn layout_textbody(
             bullet.as_deref(),
             &link_resolver,
         )?;
+        if body.norm_autofit == Some(true) {
+            for atom in &mut atoms {
+                atom.line_height_pt = normalized_line_height(atom.size_pt);
+            }
+        }
+        let shaped_line_height = atoms
+            .iter()
+            .map(|atom| atom.line_height_pt)
+            .fold(0.0, f64::max);
+        let paragraph_line_height = if shaped_line_height > 0.0 {
+            shaped_line_height
+        } else {
+            normalized_line_height(defaults.size(category, para.level) * scale)
+        };
+        if paragraph_index > 0 {
+            y += resolve_spacing(space_before, paragraph_line_height);
+        }
         if atoms.is_empty() {
             // Empty paragraph still advances by a default line.
-            y += defaults.size(category, para.level) * scale * 1.2;
+            y += paragraph_line_height;
+            if has_following_paragraph {
+                y += resolve_spacing(space_after, paragraph_line_height);
+            }
             continue;
         }
         // The bullet glyph draws at marL+indent (negative indent = hanging);
@@ -99,11 +127,46 @@ pub fn layout_textbody(
             items.extend(line_items);
             y += line_h;
         }
+        if has_following_paragraph {
+            y += resolve_spacing(space_after, paragraph_line_height);
+        }
     }
     Ok(BodyLayout {
         items,
         height_pt: y,
     })
+}
+
+fn normalized_line_height(size_pt: f64) -> f64 {
+    size_pt * NORMALIZED_LINE_HEIGHT_EM
+}
+
+fn resolve_spacing(spacing: Option<TextSpacing>, line_height_pt: f64) -> f64 {
+    match spacing {
+        Some(TextSpacing::Percent(fraction)) => line_height_pt * fraction,
+        Some(TextSpacing::Points(points)) => points,
+        None => 0.0,
+    }
+}
+
+fn resolve_paragraph_spacing(
+    para: &TextParagraph,
+    body: &TextBody,
+    defaults: &TextDefaults,
+    category: Category,
+) -> (Option<TextSpacing>, Option<TextSpacing>) {
+    let level = para.level as usize;
+    let own_style = body.list_style.get(level).and_then(Option::as_ref);
+    let txstyles_style = defaults.level_style(category, level);
+    let before = para
+        .space_before
+        .or_else(|| own_style.and_then(|style| style.space_before))
+        .or_else(|| txstyles_style.and_then(|style| style.space_before));
+    let after = para
+        .space_after
+        .or_else(|| own_style.and_then(|style| style.space_after))
+        .or_else(|| txstyles_style.and_then(|style| style.space_after));
+    (before, after)
 }
 
 /// Resolves a paragraph's `(marL, indent)` in points. Placeholder paragraphs
@@ -336,7 +399,7 @@ fn shape_run(
                 line_height_pt: metrics
                     .as_ref()
                     .map(|metrics| metrics.line_height_pt(size))
-                    .unwrap_or(size * 1.2),
+                    .unwrap_or_else(|| normalized_line_height(size)),
                 link: link.clone(),
                 semantic: semantic_by_owner.remove(&visible_index).unwrap_or_default(),
             });
@@ -362,7 +425,7 @@ fn shape_run(
                     .face(face)
                     .and_then(|font| font.parsed())
                     .map(|parsed| FaceMetrics::new(parsed).line_height_pt(size))
-                    .unwrap_or(size * 1.2),
+                    .unwrap_or_else(|| normalized_line_height(size)),
                 link: link.clone(),
                 semantic: Vec::new(),
             });

@@ -581,18 +581,33 @@ fn body_placeholder_deck_with_master_txstyles_bullets() -> Vec<u8> {
 /// Same deck as [`body_placeholder_deck_with_master_txstyles_bullets`] with the
 /// body placeholder's paragraphs replaced by `paragraphs` (raw `a:p` XML).
 fn body_placeholder_deck_with_paragraphs(paragraphs: &str) -> Vec<u8> {
+    body_placeholder_deck_with_body_pr(paragraphs, "<a:bodyPr/>")
+}
+
+fn body_placeholder_deck_with_body_pr(paragraphs: &str, body_pr: &str) -> Vec<u8> {
+    body_placeholder_deck_with_body_pr_and_master_spacing(paragraphs, body_pr, "20000")
+}
+
+fn body_placeholder_deck_with_body_pr_and_master_spacing(
+    paragraphs: &str,
+    body_pr: &str,
+    master_spacing: &str,
+) -> Vec<u8> {
     let ct = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/></Types>"#;
     let root_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
     let pres = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId2"/></p:sldMasterIdLst></p:presentation>"#;
     let pres_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/></Relationships>"#;
     let slide = format!(
-        r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6096000" cy="3657600"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>{paragraphs}</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+        r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6096000" cy="3657600"/></a:xfrm></p:spPr><p:txBody>{body_pr}<a:lstStyle/>{paragraphs}</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
     );
     let slide = slide.as_bytes();
     let slide_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
     let layout = br#"<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sldLayout>"#;
     let layout_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
-    let master = br#"<?xml version="1.0"?><p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree/></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr marL="342900" indent="-342900" algn="l"><a:spcBef><a:spcPct val="20000"/></a:spcBef><a:buClr><a:schemeClr val="accent1"/></a:buClr><a:buFont typeface="Arial" pitchFamily="34" charset="0"/><a:buChar char="&#8226;"/><a:defRPr sz="3200"/></a:lvl1pPr><a:lvl2pPr marL="742950" indent="-285750"><a:buFont typeface="Arial"/><a:buChar char="&#8211;"/><a:defRPr sz="2800"/></a:lvl2pPr></p:bodyStyle><p:otherStyle/></p:txStyles></p:sldMaster>"#;
+    let master = format!(
+        r#"<?xml version="1.0"?><p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree/></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr marL="342900" indent="-342900" algn="l"><a:spcBef><a:spcPct val="{master_spacing}"/></a:spcBef><a:buClr><a:schemeClr val="accent1"/></a:buClr><a:buFont typeface="Arial" pitchFamily="34" charset="0"/><a:buChar char="&#8226;"/><a:defRPr sz="3200"/></a:lvl1pPr><a:lvl2pPr marL="742950" indent="-285750"><a:buFont typeface="Arial"/><a:buChar char="&#8211;"/><a:defRPr sz="2800"/></a:lvl2pPr></p:bodyStyle><p:otherStyle/></p:txStyles></p:sldMaster>"#
+    );
+    let master = master.as_bytes();
     let master_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
     zip_package(&[
         ("[Content_Types].xml", ct),
@@ -628,6 +643,173 @@ fn body_placeholder_inherits_master_txstyles_bullets() {
     );
     assert!(text.contains("First point"), "{text:?}");
     assert!(text.contains("Nested detail"), "{text:?}");
+}
+
+/// PowerPoint-web measurement lock for normalized and natural DrawingML line
+/// boxes.
+///
+/// In the frozen Project Status truth, the two physical lines of the 20pt
+/// "Risk: certification..." paragraph are 24.05pt apart. Across the two frozen
+/// decks, master `spcBef=20%` makes separate 16/18/20pt paragraphs advance
+/// 23.28/26.28/28.55pt respectively. Those observations fit PowerPoint's
+/// normalized-autofit 1.20em line box and percentage spacing against that box:
+/// 20pt * 1.20 = 24pt, then 24pt * 1.20 = 28.8pt between paragraphs.
+/// Without `<a:normAutofit/>`, Carlito's natural Win line box remains
+/// 2500/2048em.
+#[test]
+fn powerpoint_line_box_and_percent_paragraph_spacing_match_web_export() {
+    let paragraphs = "<a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr sz=\"2000\"/>\
+                      <a:t>First physical line\nSecond physical line</a:t></a:r></a:p>\
+                      <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr sz=\"2000\"/>\
+                      <a:t>Next paragraph</a:t></a:r></a:p>";
+    let measure = |bytes: &[u8]| {
+        let doc = PptxDoc::open(bytes, &ConvertOptions::default()).expect("open deck");
+        let (laid, _) = render_pptx(&doc).expect("render deck");
+        let runs = page_glyph_placements(&laid.pages[0]);
+        let baseline = |needle: &str| {
+            runs.iter()
+                .find(|(_, _, run)| run_text(run).starts_with(needle))
+                .unwrap_or_else(|| panic!("missing run {needle:?}"))
+                .1
+        };
+        (
+            baseline("First physical line"),
+            baseline("Second physical line"),
+            baseline("Next paragraph"),
+        )
+    };
+    let normalized =
+        body_placeholder_deck_with_body_pr(paragraphs, "<a:bodyPr><a:normAutofit/></a:bodyPr>");
+    let (first, second, next) = measure(&normalized);
+
+    assert!(
+        ((second - first) - 24.0).abs() <= 0.05,
+        "20pt PowerPoint line box: got {:.3}pt, want 24.000pt",
+        second - first
+    );
+    assert!(
+        ((next - second) - 28.8).abs() <= 0.05,
+        "20% paragraph-before must scale the 24pt line box: got {:.3}pt, want 28.800pt",
+        next - second
+    );
+
+    let natural = body_placeholder_deck_with_paragraphs(paragraphs);
+    let (first, second, next) = measure(&natural);
+    let natural_line = 20.0 * 2500.0 / 2048.0;
+    assert!(
+        ((second - first) - natural_line).abs() <= 0.05,
+        "non-autofit text must keep Carlito's natural Win box: got {:.3}pt, want {natural_line:.3}pt",
+        second - first
+    );
+    assert!(
+        ((next - second) - natural_line * 1.2).abs() <= 0.05,
+        "percentage spacing must scale the natural line box: got {:.3}pt, want {:.3}pt",
+        next - second,
+        natural_line * 1.2
+    );
+}
+
+#[test]
+fn powerpoint_point_spacing_applies_between_paragraphs_but_not_after_the_text_body() {
+    let body_pr = r#"<a:bodyPr anchor="ctr"><a:normAutofit/></a:bodyPr>"#;
+    let baseline = |paragraphs: &str, needle: &str| {
+        let bytes = body_placeholder_deck_with_body_pr(paragraphs, body_pr);
+        let doc = PptxDoc::open(&bytes, &ConvertOptions::default()).expect("open spacing deck");
+        let (laid, _) = render_pptx(&doc).expect("render spacing deck");
+        page_glyph_placements(&laid.pages[0])
+            .into_iter()
+            .find(|(_, _, run)| run_text(run).starts_with(needle))
+            .unwrap_or_else(|| panic!("missing run {needle:?}"))
+            .1
+    };
+    let plain = "<a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr sz=\"2000\"/>\
+                 <a:t>First</a:t></a:r></a:p>\
+                 <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr sz=\"2000\"/>\
+                 <a:t>Second</a:t></a:r></a:p>";
+    let spaced = "<a:p><a:pPr><a:buNone/><a:spcAft><a:spcPts val=\"350\"/>\
+                  </a:spcAft></a:pPr><a:r><a:rPr sz=\"2000\"/><a:t>First</a:t>\
+                  </a:r></a:p><a:p><a:pPr><a:buNone/></a:pPr><a:r>\
+                  <a:rPr sz=\"2000\"/><a:t>Second</a:t></a:r></a:p>";
+    let point_delta = baseline(spaced, "Second") - baseline(plain, "Second");
+    assert!(
+        (point_delta - 1.75).abs() <= 0.05,
+        "3.5pt interparagraph spacing shifts centered two-line text by half the added height: \
+         got {point_delta:.3}pt, want 1.750pt"
+    );
+
+    let terminal_plain = "<a:p><a:pPr><a:buNone/></a:pPr><a:r>\
+                          <a:rPr sz=\"2000\"/><a:t>Only</a:t></a:r></a:p>";
+    let terminal_after = "<a:p><a:pPr><a:buNone/><a:spcAft><a:spcPts val=\"5000\"/>\
+                          </a:spcAft></a:pPr><a:r><a:rPr sz=\"2000\"/>\
+                          <a:t>Only</a:t></a:r></a:p>";
+    assert!(
+        (baseline(terminal_plain, "Only") - baseline(terminal_after, "Only")).abs() <= 0.05,
+        "terminal spcAft must not change a centered text body's anchor height"
+    );
+}
+
+#[test]
+fn malformed_master_paragraph_spacing_fails_closed() {
+    let bytes = body_placeholder_deck_with_body_pr_and_master_spacing(
+        "<a:p><a:r><a:t>Visible text</a:t></a:r></a:p>",
+        "<a:bodyPr/>",
+        "1e309",
+    );
+    let error = convert(&bytes, OfficeFormat::Pptx, &opts()).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            office_core::OfficeError::Unsupported {
+                code: UnsupportedCode::UnknownElement,
+                ..
+            }
+        ),
+        "malformed visible master spacing must not disappear: {error:?}"
+    );
+}
+
+#[test]
+fn malformed_text_body_anchor_and_insets_fail_closed() {
+    for body_pr in [
+        r#"<a:bodyPr anchor="garbage"/>"#,
+        r#"<a:bodyPr lIns="not-an-integer"/>"#,
+        r#"<a:bodyPr rIns="-1"/>"#,
+        r#"<a:bodyPr tIns="2147483648"/>"#,
+    ] {
+        let shape = format!(
+            r#"<p:sp><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></a:xfrm></p:spPr><p:txBody>{body_pr}<a:lstStyle/><a:p><a:r><a:t>Visible text</a:t></a:r></a:p></p:txBody></p:sp>"#
+        );
+        let bytes = minimal_pptx(&shape);
+        let error = convert(&bytes, OfficeFormat::Pptx, &opts()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                office_core::OfficeError::Unsupported {
+                    code: UnsupportedCode::UnknownElement,
+                    ..
+                }
+            ),
+            "malformed bodyPr geometry must stay typed unsupported: {body_pr}: {error:?}"
+        );
+    }
+}
+
+/// PowerPoint's Calibri descriptor reports a 952-unit ascent. The descriptor
+/// controls extracted word boxes: the former synthetic 800-unit ascent moved
+/// 20pt body bboxes down by about 3.0pt even when the painted baseline was
+/// correct (129.25pt truth versus 132.75pt before this regression lock).
+#[test]
+fn pptx_subset_descriptor_uses_registered_face_vertical_metrics() {
+    let bytes = minimal_pptx(
+        r#"<p:sp><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2000"><a:latin typeface="Calibri"/></a:rPr><a:t>Measured ascent</a:t></a:r></a:p></p:txBody></p:sp>"#,
+    );
+    let output = convert(&bytes, OfficeFormat::Pptx, &opts()).expect("convert descriptor fixture");
+    let pdf = String::from_utf8_lossy(&output.pdf);
+
+    assert!(
+        pdf.contains("/Ascent 952"),
+        "Carlito (Calibri-compatible) subset must expose its 952-unit ascent: {pdf}"
+    );
 }
 
 /// List indent geometry, measured against LibreOffice truth to 0.014pt (loop-1
@@ -807,6 +989,36 @@ fn page_has_rgb(page: &Page, expected: (u8, u8, u8)) -> bool {
     page.items
         .iter()
         .any(|positioned| item_has_rgb(&positioned.item, expected))
+}
+
+fn page_glyph_placements(page: &Page) -> Vec<(f64, f64, &office_core::layout::GlyphRun)> {
+    fn collect<'a>(
+        x: f64,
+        y: f64,
+        item: &'a Item,
+        runs: &mut Vec<(f64, f64, &'a office_core::layout::GlyphRun)>,
+    ) {
+        match item {
+            Item::Transform { item, .. } => collect(x, y, item, runs),
+            Item::Glyphs(run) => runs.push((x, y, run)),
+            Item::Clip { items, .. } => {
+                for child in items {
+                    collect(x + child.x_pt, y + child.y_pt, &child.item, runs);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut runs = Vec::new();
+    for positioned in &page.items {
+        collect(
+            positioned.x_pt,
+            positioned.y_pt,
+            &positioned.item,
+            &mut runs,
+        );
+    }
+    runs
 }
 
 fn page_glyph_runs(page: &Page) -> Vec<(f64, &office_core::layout::GlyphRun)> {

@@ -387,6 +387,10 @@ pub struct TextParagraph {
     pub mar_l_pt: Option<f64>,
     /// First-line indent in points (`a:pPr @indent`; negative = hanging).
     pub indent_pt: Option<f64>,
+    /// Space before this paragraph.
+    pub space_before: Option<TextSpacing>,
+    /// Space after this paragraph.
+    pub space_after: Option<TextSpacing>,
     /// Right-to-left paragraph base direction.
     pub rtl: bool,
     /// Whether a bullet is suppressed (`a:buNone`).
@@ -412,6 +416,16 @@ pub enum TextBulletStyle {
     AutoNumber(String, u32),
 }
 
+/// DrawingML paragraph spacing, either relative to the paragraph line box or
+/// an absolute point value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextSpacing {
+    /// A fraction of the paragraph line box (`a:spcPct`, 100000 = 100%).
+    Percent(f64),
+    /// Absolute points (`a:spcPts`, hundredths of a point in the XML).
+    Points(f64),
+}
+
 /// One paragraph level from `a:lstStyle`.
 #[derive(Debug, Clone, Default)]
 pub struct TextListStyleLevel {
@@ -421,6 +435,10 @@ pub struct TextListStyleLevel {
     pub mar_l_pt: Option<f64>,
     /// First-line indent in points (`@indent`; negative = hanging).
     pub indent_pt: Option<f64>,
+    /// Space before paragraphs at this level.
+    pub space_before: Option<TextSpacing>,
+    /// Space after paragraphs at this level.
+    pub space_after: Option<TextSpacing>,
     /// Bullet declaration.
     pub bullet: Option<TextBulletStyle>,
     /// Default run properties for this level.
@@ -438,10 +456,20 @@ pub struct TextBody {
     pub anchor: Option<String>,
     /// Autofit font scale (thousandths of a percent) if `normAutofit`.
     pub font_scale: Option<f64>,
+    /// Explicit autofit choice: normalized (`true`), disabled (`false`), or
+    /// inherited (`None`).
+    #[doc(hidden)]
+    pub norm_autofit: Option<bool>,
     /// Left/right inset in points.
     pub inset_lr: (f64, f64),
     /// Top/bottom inset in points.
     pub inset_tb: (f64, f64),
+    /// Which left/right inset values were explicitly authored.
+    #[doc(hidden)]
+    pub inset_lr_explicit: (bool, bool),
+    /// Which top/bottom inset values were explicitly authored.
+    #[doc(hidden)]
+    pub inset_tb_explicit: (bool, bool),
     /// Visible body constructs recognized but not renderable.
     pub unsupported: Vec<String>,
 }
@@ -1292,7 +1320,13 @@ fn parse_txbody(node: Node) -> TextBody {
     for c in children(node) {
         match c.tag_name().name() {
             "bodyPr" => {
-                body.anchor = attr(c, A, "anchor").map(str::to_string);
+                if let Some(anchor) = attr(c, A, "anchor") {
+                    if matches!(anchor, "t" | "ctr" | "b") {
+                        body.anchor = Some(anchor.to_string());
+                    } else {
+                        body.unsupported.push(format!("a:bodyPr@anchor={anchor}"));
+                    }
+                }
                 for attribute in ["vert", "rot", "numCol", "spcCol", "wrap"] {
                     if let Some(value) = attr(c, A, attribute) {
                         let neutral = matches!(
@@ -1309,20 +1343,60 @@ fn parse_txbody(node: Node) -> TextBody {
                         }
                     }
                 }
-                if let Some(l) = parse_i64(attr(c, A, "lIns")) {
-                    body.inset_lr.0 = emu_to_pt(l);
+                parse_text_body_inset(
+                    c,
+                    "lIns",
+                    &mut body.inset_lr.0,
+                    &mut body.inset_lr_explicit.0,
+                    &mut body.unsupported,
+                );
+                parse_text_body_inset(
+                    c,
+                    "rIns",
+                    &mut body.inset_lr.1,
+                    &mut body.inset_lr_explicit.1,
+                    &mut body.unsupported,
+                );
+                parse_text_body_inset(
+                    c,
+                    "tIns",
+                    &mut body.inset_tb.0,
+                    &mut body.inset_tb_explicit.0,
+                    &mut body.unsupported,
+                );
+                parse_text_body_inset(
+                    c,
+                    "bIns",
+                    &mut body.inset_tb.1,
+                    &mut body.inset_tb_explicit.1,
+                    &mut body.unsupported,
+                );
+                let normalized = child(c, A, "normAutofit");
+                let disabled = child(c, A, "noAutofit");
+                if normalized.is_some() && disabled.is_some() {
+                    body.unsupported
+                        .push("a:bodyPr/a:autofit-choice".to_string());
                 }
-                if let Some(r) = parse_i64(attr(c, A, "rIns")) {
-                    body.inset_lr.1 = emu_to_pt(r);
-                }
-                if let Some(t) = parse_i64(attr(c, A, "tIns")) {
-                    body.inset_tb.0 = emu_to_pt(t);
-                }
-                if let Some(b) = parse_i64(attr(c, A, "bIns")) {
-                    body.inset_tb.1 = emu_to_pt(b);
-                }
-                if let Some(na) = child(c, A, "normAutofit") {
-                    body.font_scale = parse_f64(attr(na, A, "fontScale")).map(|f| f / 100_000.0);
+                if let Some(na) = normalized {
+                    body.norm_autofit = Some(true);
+                    if let Some(raw_scale) = attr(na, A, "fontScale") {
+                        match parse_i64(Some(raw_scale))
+                            .filter(|scale| (1_000..=100_000).contains(scale))
+                        {
+                            Some(scale) => body.font_scale = Some(scale as f64 / 100_000.0),
+                            None => body
+                                .unsupported
+                                .push("a:bodyPr/a:normAutofit@fontScale".to_string()),
+                        }
+                    }
+                    if attr(na, A, "lnSpcReduction")
+                        .is_some_and(|raw| parse_i64(Some(raw)) != Some(0))
+                    {
+                        body.unsupported
+                            .push("a:bodyPr/a:normAutofit@lnSpcReduction".to_string());
+                    }
+                } else if disabled.is_some() {
+                    body.norm_autofit = Some(false);
                 }
                 for visible_child in ["spAutoFit", "scene3d", "flatTx"] {
                     if child(c, A, visible_child).is_some() {
@@ -1341,6 +1415,28 @@ fn parse_txbody(node: Node) -> TextBody {
         }
     }
     body
+}
+
+fn parse_text_body_inset(
+    body_pr: Node,
+    name: &str,
+    value: &mut f64,
+    explicit: &mut bool,
+    unsupported: &mut Vec<String>,
+) {
+    let Some(raw) = attr(body_pr, A, name) else {
+        return;
+    };
+    match parse_i64(Some(raw))
+        .and_then(|parsed| i32::try_from(parsed).ok())
+        .filter(|parsed| *parsed >= 0)
+    {
+        Some(parsed) => {
+            *value = emu_to_pt(i64::from(parsed));
+            *explicit = true;
+        }
+        None => unsupported.push(format!("a:bodyPr@{name}={raw}")),
+    }
 }
 
 fn parse_list_style(node: Node) -> (Vec<Option<TextListStyleLevel>>, Vec<String>) {
@@ -1380,9 +1476,17 @@ fn parse_list_style(node: Node) -> (Vec<Option<TextListStyleLevel>>, Vec<String>
                         )
                     })
                 }
+                "spcBef" => match parse_text_spacing(property) {
+                    Some(spacing) => style.space_before = Some(spacing),
+                    None => unsupported.push(format!("a:lstStyle/a:{name}/a:spcBef")),
+                },
+                "spcAft" => match parse_text_spacing(property) {
+                    Some(spacing) => style.space_after = Some(spacing),
+                    None => unsupported.push(format!("a:lstStyle/a:{name}/a:spcAft")),
+                },
                 "defRPr" => parse_list_default_run(property, &mut style.default_run),
-                "spcBef" | "spcAft" | "buClr" | "buClrTx" | "buFont" | "buFontTx" | "buSzPct"
-                | "buSzPts" | "buSzTx" | "tabLst" => unsupported.push(format!(
+                "buClr" | "buClrTx" | "buFont" | "buFontTx" | "buSzPct" | "buSzPts" | "buSzTx"
+                | "tabLst" => unsupported.push(format!(
                     "a:lstStyle/a:{name}/a:{}",
                     property.tag_name().name()
                 )),
@@ -1392,6 +1496,26 @@ fn parse_list_style(node: Node) -> (Vec<Option<TextListStyleLevel>>, Vec<String>
         levels[level] = Some(style);
     }
     (levels, unsupported)
+}
+
+/// Parses a DrawingML `a:spcBef`/`a:spcAft` value. The schema values are
+/// integers; parsing them as bounded `i64`s also prevents exponent-sized
+/// untrusted values from reaching layout arithmetic. Negative, missing, or
+/// structurally ambiguous values stay outside the supported envelope.
+pub(crate) fn parse_text_spacing(node: Node) -> Option<TextSpacing> {
+    let mut values = children(node);
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let parsed = parse_i64(attr(value, A, "val"))
+        .and_then(|parsed| i32::try_from(parsed).ok())
+        .filter(|value| *value >= 0)?;
+    match (value.tag_name().namespace(), value.tag_name().name()) {
+        (Some(A), "spcPct") => Some(TextSpacing::Percent(f64::from(parsed) / 100_000.0)),
+        (Some(A), "spcPts") => Some(TextSpacing::Points(f64::from(parsed) / 100.0)),
+        _ => None,
+    }
 }
 
 fn parse_list_default_run(node: Node, run: &mut TextRun) {
@@ -1431,6 +1555,14 @@ fn parse_text_paragraph(node: Node) -> TextParagraph {
                                 parse_i64(attr(b, A, "startAt")).unwrap_or(1).max(1) as u32,
                             ));
                         }
+                        "spcBef" => match parse_text_spacing(b) {
+                            Some(spacing) => para.space_before = Some(spacing),
+                            None => para.unsupported.push("a:pPr/a:spcBef".to_string()),
+                        },
+                        "spcAft" => match parse_text_spacing(b) {
+                            Some(spacing) => para.space_after = Some(spacing),
+                            None => para.unsupported.push("a:pPr/a:spcAft".to_string()),
+                        },
                         "buBlip" => para.unsupported.push("a:buBlip".to_string()),
                         "extLst" => {}
                         other => para.unsupported.push(format!("a:pPr/a:{other}")),

@@ -13,7 +13,7 @@ use crate::layout::{DocDates, EncodedImage, ImageId, LinkTarget};
 use crate::opc::Package;
 use crate::oxml::pml::{
     ColorMapOverride, CropRect, Fill, Presentation, ShapeElem, Slide, TextBulletStyle,
-    TextListStyleLevel,
+    TextListStyleLevel, parse_text_spacing,
 };
 use crate::oxml::theme::Theme;
 use crate::oxml::{A, P, attr, child, children, emu_to_pt, parse_f64, parse_i64};
@@ -226,12 +226,14 @@ impl PptxDoc {
             };
             let color_map = effective_color_map(&master, &layout, &slide);
             let theme = base_theme.with_color_map(&color_map);
-            let text_defaults = master_part
+            let text_defaults = match master_part
                 .as_deref()
                 .and_then(|part| pkg.part(part))
                 .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                .map(parse_text_defaults)
-                .unwrap_or_default();
+            {
+                Some(xml) => parse_text_defaults(xml)?,
+                None => TextDefaults::default(),
+            };
             slides.push(ResolvedSlide {
                 slide,
                 layout,
@@ -559,15 +561,16 @@ fn effective_color_map(master: &Slide, layout: &Slide, slide: &Slide) -> HashMap
 }
 
 /// Parses master `p:txStyles` into default sizes plus tolerant bullet,
-/// alignment, and indent-geometry (marL/indent) level styles per bucket.
+/// alignment, spacing, and indent-geometry (marL/indent) level styles per bucket.
 /// Tolerance matters: real masters always decorate these levels with
-/// buClr/buFont/spcBef and similar cosmetics; only the pieces the engine
-/// renders (bullet declaration, alignment, list indent geometry) are lifted,
-/// everything else is deliberately ignored rather than failed.
-fn parse_text_defaults(xml: &str) -> TextDefaults {
+/// buClr/buFont and similar cosmetics; only the pieces the engine renders are
+/// lifted. Malformed spacing fails closed because it changes visible geometry.
+fn parse_text_defaults(xml: &str) -> Result<TextDefaults> {
     let mut defs = TextDefaults::default();
     let Ok(doc) = roxmltree::Document::parse(xml) else {
-        return defs;
+        return Err(OfficeError::Invalid(
+            "slide master text defaults are malformed XML".to_string(),
+        ));
     };
     for node in doc.root_element().descendants() {
         if !crate::oxml::is(node, P, "txStyles") {
@@ -622,6 +625,30 @@ fn parse_text_defaults(xml: &str) -> TextDefaults {
                                 )
                             })
                         }
+                        "spcBef" => {
+                            style.space_before =
+                                Some(parse_text_spacing(property).ok_or_else(|| {
+                                    OfficeError::unsupported(
+                                        UnsupportedCode::UnknownElement,
+                                        format!(
+                                            "p:txStyles/{}/a:{name}/a:spcBef is malformed",
+                                            bucket.tag_name().name()
+                                        ),
+                                    )
+                                })?)
+                        }
+                        "spcAft" => {
+                            style.space_after =
+                                Some(parse_text_spacing(property).ok_or_else(|| {
+                                    OfficeError::unsupported(
+                                        UnsupportedCode::UnknownElement,
+                                        format!(
+                                            "p:txStyles/{}/a:{name}/a:spcAft is malformed",
+                                            bucket.tag_name().name()
+                                        ),
+                                    )
+                                })?)
+                        }
                         _ => {}
                     }
                 }
@@ -629,13 +656,15 @@ fn parse_text_defaults(xml: &str) -> TextDefaults {
                     || style.bullet.is_some()
                     || style.mar_l_pt.is_some()
                     || style.indent_pt.is_some()
+                    || style.space_before.is_some()
+                    || style.space_after.is_some()
                 {
                     levels[index] = Some(style);
                 }
             }
         }
     }
-    defs
+    Ok(defs)
 }
 
 type ImageErrors = HashMap<String, (UnsupportedCode, String)>;

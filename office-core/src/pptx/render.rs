@@ -3,7 +3,7 @@
 
 use super::assemble::{Category, PptxDoc, ResolvedSlide};
 use super::geometry::{Contour, evaluate_shape, resolve_colorspec, solid_fill_color};
-use super::inherit::{category, resolve_text_body, resolve_xfrm};
+use super::inherit::{resolve_text_body, resolve_xfrm, shape_category};
 use super::table_style::CellBounds;
 use super::textbody::layout_textbody;
 use crate::layout::{FillRule, Item, LaidOutDocument, Page, PathPaint, Positioned, Stroke};
@@ -138,7 +138,7 @@ fn render_elem(
                     rs,
                     rels,
                     &body,
-                    category(&ph_ref),
+                    shape_category(ph.as_ref()),
                     x,
                     y,
                     xfrm,

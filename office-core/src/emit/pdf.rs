@@ -3,7 +3,7 @@
 //! `/ID` from a hash of the input, dates from the document or a fixed literal).
 
 use crate::fonts::subset::{SubsetFont, subset_for_pdf};
-use crate::fonts::{FaceId, FontDb};
+use crate::fonts::{FaceId, FaceMetrics, FontDb};
 use crate::layout::{
     EncodedImage, FillRule, Item, LaidOutDocument, LinkTarget, Page, PathCommand, PathPaint,
     Positioned, ResolvedInternalLink, Stroke,
@@ -659,15 +659,21 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) -> Result<()> {
 
     // Descriptor + font file.
     {
+        let metrics = font_descriptor_metrics(&f.subset.data);
         let mut descriptor = pdf.font_descriptor(f.descriptor);
         descriptor
             .name(Name(b"OfficeCoreSubset"))
             .flags(pdf_writer::types::FontFlags::NON_SYMBOLIC)
-            .bbox(Rect::new(-200.0, -200.0, 1000.0, 900.0))
+            .bbox(Rect::new(
+                metrics.x_min,
+                metrics.y_min,
+                metrics.x_max,
+                metrics.y_max,
+            ))
             .italic_angle(0.0)
-            .ascent(800.0)
-            .descent(-200.0)
-            .cap_height(700.0)
+            .ascent(metrics.ascent)
+            .descent(metrics.descent)
+            .cap_height(metrics.cap_height)
             .stem_v(80.0);
         if is_cff {
             // A bare CFF program carries no SFNT name table, so the
@@ -727,6 +733,67 @@ fn write_font(pdf: &mut Pdf, f: &EmbeddedFont, family: &str) -> Result<()> {
         pdf.stream(f.mapping, &build_cid_to_gid(&f.cid_to_gid));
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct FontDescriptorMetrics {
+    x_min: f32,
+    y_min: f32,
+    x_max: f32,
+    y_max: f32,
+    ascent: f32,
+    descent: f32,
+    cap_height: f32,
+}
+
+/// Returns the embedded face's real 1000-em descriptor metrics. PDF text
+/// extraction derives word boxes from these values; synthetic 800/-200 values
+/// displaced geometry even though the painted glyph baseline was correct.
+fn font_descriptor_metrics(sfnt: &[u8]) -> FontDescriptorMetrics {
+    let fallback = FontDescriptorMetrics {
+        x_min: -200.0,
+        y_min: -200.0,
+        x_max: 1000.0,
+        y_max: 900.0,
+        ascent: 800.0,
+        descent: -200.0,
+        cap_height: 700.0,
+    };
+    let Ok(face) = ttf_parser::Face::parse(sfnt, 0) else {
+        return fallback;
+    };
+    let metrics = FaceMetrics::new(face);
+    let face = metrics.face();
+    let scale = 1000.0 / f32::from(face.units_per_em().max(1));
+    let bounds = face.global_bounding_box();
+    let descriptor = FontDescriptorMetrics {
+        x_min: f32::from(bounds.x_min) * scale,
+        y_min: f32::from(bounds.y_min) * scale,
+        x_max: f32::from(bounds.x_max) * scale,
+        y_max: f32::from(bounds.y_max) * scale,
+        ascent: metrics.ascent_pt(1000.0).round() as f32,
+        descent: -(metrics.descent_pt(1000.0).round() as f32),
+        cap_height: face
+            .capital_height()
+            .map(|height| (f32::from(height) * scale).round())
+            .unwrap_or_else(|| metrics.ascent_pt(1000.0).round() as f32),
+    };
+    if [
+        descriptor.x_min,
+        descriptor.y_min,
+        descriptor.x_max,
+        descriptor.y_max,
+        descriptor.ascent,
+        descriptor.descent,
+        descriptor.cap_height,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
+        descriptor
+    } else {
+        fallback
+    }
 }
 
 /// True when the glyph's outline draws anything (any contour segment exists).
