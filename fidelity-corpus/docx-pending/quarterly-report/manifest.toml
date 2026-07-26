@@ -1,0 +1,10 @@
+title = "Quarterly operations report (real-world synthetic)"
+tier = "experimental"
+ssim_threshold = 0.85
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Not recorded"
+ground_truth_exported_at = "Not recorded"
+input_sha256 = "3f0fa62a71babecda84297e5c8ecbd6f0cf8528fa65ce91177a571b763aa21d6"
+golden_sha256 = "Not recorded"
+notes = "Synthetic real-world fixture (loop-1 corpus). PENDING Word ground truth: export source.docx to PDF with Microsoft Word (default settings, no scaling), save as ground-truth.pdf beside this manifest; provenance, golden hash, expected fonts, and the frozen threshold are then calibrated before the case moves into fidelity-corpus/docx/. LibreOffice reference: 4 pages."
