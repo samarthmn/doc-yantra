@@ -27,6 +27,12 @@ use std::collections::HashMap;
 
 const PAGE_W: f64 = 595.28;
 const PAGE_H: f64 = 841.89;
+const EXCEL_WEB_PRINT_ORIGIN_OFFSET_PT: f64 = 0.480469;
+const EXCEL_WEB_HORIZONTAL_CELL_PADDING_PT: f64 = 2.0;
+const EXCEL_WEB_VERTICAL_CELL_PADDING_PT: f64 = 1.5;
+const EXCEL_WEB_UNSCALED_BASELINE_OFFSET_PT: f64 = 0.42;
+const EXCEL_WEB_SCALED_BASELINE_OFFSET_PT: f64 = 0.54;
+const EXCEL_WEB_FONT_SIZE_QUANTUM_PT: f64 = 0.12;
 const GRID: Rgba = Rgba {
     r: 190,
     g: 190,
@@ -44,7 +50,7 @@ struct PageGeometry {
     content_h: f64,
 }
 
-fn page_geometry(ws: &Worksheet) -> PageGeometry {
+fn page_geometry(ws: &Worksheet) -> Result<PageGeometry> {
     // Excel/ECMA paper IDs: Letter=1, Legal=5, A3=8, A4=9. A4 is the
     // deterministic no-pageSetup default used by this engine.
     let (mut width, mut height) = match ws.page_setup.paper_size {
@@ -57,14 +63,109 @@ fn page_geometry(ws: &Worksheet) -> PageGeometry {
         std::mem::swap(&mut width, &mut height);
     }
     let margins = ws.page_margins;
-    PageGeometry {
+    let content_w = width - margins.left - margins.right;
+    let content_h = height - margins.top - margins.bottom;
+    if !content_w.is_finite() || !content_h.is_finite() || content_w <= 0.0 || content_h <= 0.0 {
+        return Err(OfficeError::Invalid(
+            "worksheet page margins consume the printable page".into(),
+        ));
+    }
+    Ok(PageGeometry {
         width,
         height,
         left: margins.left,
         top: margins.top,
-        content_w: (width - margins.left - margins.right).max(1.0),
-        content_h: (height - margins.top - margins.bottom).max(1.0),
+        content_w,
+        content_h,
+    })
+}
+
+fn floor_to_whole_percent(ratio: f64) -> f64 {
+    (ratio * 100.0).floor() / 100.0
+}
+
+fn excel_web_sheet_left(nominal_left: f64, scale: f64) -> f64 {
+    nominal_left + EXCEL_WEB_PRINT_ORIGIN_OFFSET_PT / scale
+}
+
+fn excel_web_content_height(printable_height: f64, scale: f64) -> f64 {
+    (printable_height - EXCEL_WEB_PRINT_ORIGIN_OFFSET_PT).max(1.0) / scale
+}
+
+fn excel_web_printed_font_size(logical_size: f64, scale: f64) -> f64 {
+    (logical_size * scale / EXCEL_WEB_FONT_SIZE_QUANTUM_PT).round() * EXCEL_WEB_FONT_SIZE_QUANTUM_PT
+}
+
+fn excel_web_row_leading(font_size: f64) -> f64 {
+    font_size * 9.0 / 88.0
+}
+
+fn excel_web_logical_row_height(logical_height: f64, scale: f64) -> f64 {
+    (logical_height * scale / EXCEL_WEB_FONT_SIZE_QUANTUM_PT).round()
+        * EXCEL_WEB_FONT_SIZE_QUANTUM_PT
+        / scale
+}
+
+fn excel_web_continuation_offset(scale: f64) -> f64 {
+    EXCEL_WEB_PRINT_ORIGIN_OFFSET_PT / scale
+}
+
+fn excel_web_baseline_offset(scale: f64) -> f64 {
+    if (scale - 1.0).abs() < f64::EPSILON {
+        EXCEL_WEB_UNSCALED_BASELINE_OFFSET_PT
+    } else {
+        EXCEL_WEB_SCALED_BASELINE_OFFSET_PT / scale
     }
+}
+
+fn excel_web_fill_bleed(scale: f64) -> f64 {
+    EXCEL_WEB_FONT_SIZE_QUANTUM_PT / scale
+}
+
+fn excel_web_right_padding_extra(scale: f64) -> f64 {
+    EXCEL_WEB_FONT_SIZE_QUANTUM_PT / scale
+}
+
+fn select_sheet_scale(
+    ws: &Worksheet,
+    printable_width: f64,
+    printable_height: f64,
+    total_width: f64,
+    total_height: f64,
+) -> f64 {
+    // Some producers retain stale fit attributes while scale mode is active.
+    // A fit-only worksheet remains compatible even when it omits fitToPage,
+    // but an explicit scale wins unless pageSetUpPr selects fit mode.
+    let use_fit = ws.page_setup.fit_to_page || ws.page_setup.scale.is_none();
+    let fit_width = if use_fit {
+        ws.page_setup
+            .fit_to_width
+            .filter(|pages| *pages > 0)
+            .map(|pages| f64::from(pages) * printable_width / total_width.max(1.0))
+    } else {
+        None
+    };
+    let fit_height = if use_fit {
+        ws.page_setup
+            .fit_to_height
+            .filter(|pages| *pages > 0)
+            .map(|pages| f64::from(pages) * printable_height / total_height.max(1.0))
+    } else {
+        None
+    };
+    let scale = match (fit_width, fit_height) {
+        (Some(width), Some(height)) => floor_to_whole_percent(width.min(height)),
+        (Some(width), None) => floor_to_whole_percent(width),
+        (None, Some(height)) => floor_to_whole_percent(height),
+        (None, None) => ws.page_setup.scale.unwrap_or_else(|| {
+            if ws.page_setup.present {
+                floor_to_whole_percent((printable_width / total_width.max(1.0)).min(1.0))
+            } else {
+                1.0
+            }
+        }),
+    };
+    scale.clamp(0.1, 4.0)
 }
 
 /// Renders all sheets into a laid-out document.
@@ -125,7 +226,7 @@ fn render_sheet(
     page_budget: &mut PageBudget,
 ) -> Result<()> {
     let first_page = pages.len();
-    let geometry = page_geometry(ws);
+    let geometry = page_geometry(ws)?;
     let (mut max_row, mut max_col) = ws.dim;
     for drawing in drawings {
         if let Some((col, row)) = drawing_last_marker(drawing) {
@@ -150,33 +251,42 @@ fn render_sheet(
 
     // Cell lookup.
     let cells: HashMap<(u32, u32), &Cell> = ws.cells.iter().map(|c| ((c.row, c.col), c)).collect();
-    let row_heights = effective_row_heights(doc, ws, &cells, &col_w, max_row)?;
+    let unscaled_row_heights = effective_row_heights(doc, ws, &cells, &col_w, max_row)?;
     let total_width: f64 = col_w[min_col as usize..=max_col as usize].iter().sum();
-    let total_height: f64 = row_heights[min_row as usize..=max_row as usize]
+    let total_height: f64 = unscaled_row_heights[min_row as usize..=max_row as usize]
         .iter()
         .enumerate()
         .filter(|(offset, _)| !ws.hidden_rows.contains(&(min_row + *offset as u32)))
         .map(|(_, height)| *height)
         .sum();
-    let fit_width = ws
-        .page_setup
-        .fit_to_width
-        .filter(|pages| *pages > 0)
-        .map(|pages| f64::from(pages) * geometry.content_w / total_width.max(1.0));
-    let fit_height = ws
-        .page_setup
-        .fit_to_height
-        .filter(|pages| *pages > 0)
-        .map(|pages| f64::from(pages) * geometry.content_h / total_height.max(1.0));
-    let scale = match (fit_width, fit_height) {
-        (Some(width), Some(height)) => width.min(height),
-        (Some(width), None) => width,
-        (None, Some(height)) => height,
-        (None, None) => ws.page_setup.scale.unwrap_or(1.0),
-    }
-    .clamp(0.1, 4.0);
+    let scale = select_sheet_scale(
+        ws,
+        geometry.content_w,
+        geometry.content_h,
+        total_width,
+        total_height,
+    );
+    let row_heights: Vec<f64> = unscaled_row_heights
+        .into_iter()
+        .map(|height| excel_web_logical_row_height(height, scale))
+        .collect();
+    let drawing_row_heights: Vec<f64> = row_heights
+        .iter()
+        .enumerate()
+        .map(|(row, height)| {
+            // DrawingML cell markers address the authored worksheet grid, not
+            // the Excel-web print line box used to paint automatic text rows.
+            // Preserve the declared default for anchors while explicit row
+            // heights remain authoritative in both coordinate models.
+            ws.row_heights
+                .get(&(row as u32))
+                .copied()
+                .unwrap_or_else(|| height.max(ws.default_row_height))
+        })
+        .collect();
     let content_w = geometry.content_w / scale;
-    let content_h = geometry.content_h / scale;
+    let content_h = excel_web_content_height(geometry.content_h, scale);
+    let sheet_left = excel_web_sheet_left(geometry.left, scale);
 
     // Column bands (each fits content width).
     let bands = split_bands_range(
@@ -199,6 +309,9 @@ fn render_sheet(
                 items: Vec::new(),
             };
             let mut y = geometry.top;
+            if r != min_row && ws.print_title_rows.is_none() {
+                y += excel_web_continuation_offset(scale);
+            }
             let mut data_rows_on_page = 0;
             if r != min_row
                 && let Some((first_title, last_title)) = ws.print_title_rows
@@ -219,9 +332,10 @@ fn render_sheet(
                         &col_w,
                         &row_heights,
                         title_row,
-                        geometry.left,
+                        sheet_left,
                         y,
                         title_h,
+                        scale,
                         &mut page,
                         warnings,
                     )?;
@@ -248,9 +362,10 @@ fn render_sheet(
                     &col_w,
                     &row_heights,
                     r,
-                    geometry.left,
+                    sheet_left,
                     y,
                     h,
+                    scale,
                     &mut page,
                     warnings,
                 )?;
@@ -268,7 +383,7 @@ fn render_sheet(
                 min_col,
                 min_row,
                 &col_w,
-                &row_heights,
+                &drawing_row_heights,
                 geometry,
                 content_w,
                 content_h,
@@ -315,6 +430,7 @@ fn render_paginated_row(
     x0: f64,
     y: f64,
     h: f64,
+    print_scale: f64,
     page: &mut Page,
     warnings: &mut Vec<Warning>,
 ) -> Result<()> {
@@ -338,6 +454,7 @@ fn render_paginated_row(
                 x0,
                 y,
                 h,
+                print_scale,
                 page,
                 warnings,
             )?;
@@ -357,6 +474,7 @@ fn render_paginated_row(
         body_x,
         y,
         h,
+        print_scale,
         page,
         warnings,
     )
@@ -680,7 +798,7 @@ fn render_header_footer(
             ws.header_footer.odd_footer.as_deref(),
         )
     };
-    let geometry = page_geometry(ws);
+    let geometry = page_geometry(ws)?;
     if let Some(header) = header {
         render_header_footer_band(
             doc,
@@ -901,6 +1019,7 @@ fn render_row(
     x0: f64,
     y: f64,
     h: f64,
+    print_scale: f64,
     page: &mut Page,
     warnings: &mut Vec<Warning>,
 ) -> Result<()> {
@@ -911,6 +1030,10 @@ fn render_row(
             .get(col as usize)
             .copied()
             .unwrap_or(default_width_pt());
+        if w <= 0.0 {
+            col += 1;
+            continue;
+        }
         let merge = ws.merges.iter().find(|merge| merge.contains(row, col));
         if let Some(merge) = merge
             && !merge.is_anchor(row, col)
@@ -954,7 +1077,7 @@ fn render_row(
                     y_pt: y,
                     item: Item::Rect {
                         w_pt: cell_w,
-                        h_pt: cell_h,
+                        h_pt: cell_h + excel_web_fill_bleed(print_scale),
                         fill: Some(Rgba::opaque(fill)),
                         stroke: None,
                     },
@@ -972,7 +1095,18 @@ fn render_row(
                     },
                 });
             }
-            render_cell_text(doc, cell, &style, x, y, cell_w, cell_h, page, warnings)?;
+            render_cell_text(
+                doc,
+                cell,
+                &style,
+                x,
+                y,
+                cell_w,
+                cell_h,
+                print_scale,
+                page,
+                warnings,
+            )?;
         }
         render_cell_borders(&style, ws.print_grid_lines, x, y, cell_w, cell_h, page);
         x += cell_w;
@@ -1361,6 +1495,7 @@ fn render_cell_text(
     y: f64,
     w: f64,
     h: f64,
+    print_scale: f64,
     page: &mut Page,
     warnings: &mut Vec<Warning>,
 ) -> Result<()> {
@@ -1378,11 +1513,12 @@ fn render_cell_text(
     if text.is_empty() {
         return Ok(());
     }
-    let size = if style.font_size > 0.0 {
+    let authored_size = if style.font_size > 0.0 {
         style.font_size
     } else {
         11.0
     };
+    let size = excel_web_printed_font_size(authored_size, print_scale) / print_scale;
     let weight = if style.bold { 700 } else { 400 };
     let family = style.font_name.as_deref().unwrap_or("Calibri");
     let resolved = matching::resolve(&doc.fonts, family, weight, style.italic);
@@ -1403,19 +1539,27 @@ fn render_cell_text(
     let metrics = FaceMetrics::new(parsed);
     let (fallback_ids, fallback_faces) = coverage_faces(doc, face, weight, style.italic);
     let align = style.align.as_deref().unwrap_or(default_align);
-    let pad = 2.0;
+    let horizontal_pad = EXCEL_WEB_HORIZONTAL_CELL_PADDING_PT;
     let lines = if style.wrap || text.contains('\n') {
-        wrap_lines(&text, &fallback_faces, size, (w - 2.0 * pad).max(1.0))?
+        wrap_lines(
+            &text,
+            &fallback_faces,
+            size,
+            (w - 2.0 * horizontal_pad).max(1.0),
+        )?
     } else {
         vec![text]
     };
     let line_height = metrics.line_height_pt(size);
     let block_height = line_height * lines.len() as f64;
     let first_baseline = match style.vertical_align.as_deref().unwrap_or("bottom") {
-        "top" => y + pad + metrics.ascent_pt(size),
+        "top" => y + EXCEL_WEB_VERTICAL_CELL_PADDING_PT + metrics.ascent_pt(size),
         "center" => y + ((h - block_height) / 2.0).max(0.0) + metrics.ascent_pt(size),
-        _ => y + (h - block_height - pad).max(0.0) + metrics.ascent_pt(size),
-    };
+        _ => {
+            y + (h - block_height - EXCEL_WEB_VERTICAL_CELL_PADDING_PT).max(0.0)
+                + metrics.ascent_pt(size)
+        }
+    } + excel_web_baseline_offset(print_scale);
     let text_color = color.unwrap_or(Rgba::opaque(Rgb::new(0, 0, 0)));
     for (line_index, line) in lines.iter().enumerate() {
         let shaped = shape::require_glyphs(shape::shape_with_fallback(
@@ -1429,10 +1573,15 @@ fn render_cell_text(
         let mut semantics = Some(mapped.semantic);
         let tx = match align {
             "center" => x + (w - shaped.width_pt) / 2.0,
-            "right" => x + w - shaped.width_pt - pad,
-            _ => x + pad,
+            "right" => {
+                x + w
+                    - shaped.width_pt
+                    - horizontal_pad
+                    - excel_web_right_padding_extra(print_scale)
+            }
+            _ => x + horizontal_pad,
         };
-        let mut cursor = tx.max(x + pad);
+        let mut cursor = tx.max(x + horizontal_pad);
         let baseline = first_baseline + line_index as f64 * line_height;
         let mut run_start = cursor;
         let mut run_face = None;
@@ -1590,6 +1739,24 @@ fn wrap_lines(text: &str, faces: &[&Face], size: f64, max_width: f64) -> Result<
     Ok(lines)
 }
 
+fn automatic_row_height_for_style(doc: &XlsxDoc, style: &CellStyle) -> Option<f64> {
+    let size = if style.font_size > 0.0 {
+        style.font_size
+    } else {
+        11.0
+    };
+    let weight = if style.bold { 700 } else { 400 };
+    let resolved = matching::resolve(
+        &doc.fonts,
+        style.font_name.as_deref().unwrap_or("Calibri"),
+        weight,
+        style.italic,
+    );
+    let font_face = doc.fonts.face(resolved.face?)?;
+    let metrics = FaceMetrics::new(font_face.parsed()?);
+    Some(metrics.line_height_pt(size) + excel_web_row_leading(size))
+}
+
 fn effective_row_heights(
     doc: &XlsxDoc,
     ws: &Worksheet,
@@ -1608,12 +1775,30 @@ fn effective_row_heights(
         })?;
     let mut heights = Vec::new();
     try_reserve(&mut heights, height_count, "xlsx row heights")?;
-    heights.extend((0..=max_row).map(|row| {
-        ws.row_heights
-            .get(&row)
-            .copied()
-            .unwrap_or(ws.default_row_height)
-    }));
+    let normal_height = if ws.default_row_height_custom {
+        ws.default_row_height
+    } else {
+        automatic_row_height_for_style(doc, &doc.styles.cell(0)).unwrap_or(ws.default_row_height)
+    };
+    heights.extend(
+        (0..=max_row).map(|row| ws.row_heights.get(&row).copied().unwrap_or(normal_height)),
+    );
+
+    if !ws.default_row_height_custom {
+        let mut style_heights = HashMap::new();
+        for (&(row, _), cell) in cells {
+            if ws.row_heights.contains_key(&row) {
+                continue;
+            }
+            let height = *style_heights.entry(cell.style_idx).or_insert_with(|| {
+                automatic_row_height_for_style(doc, &doc.styles.cell(cell.style_idx))
+            });
+            if let Some(height) = height {
+                heights[row as usize] = heights[row as usize].max(height);
+            }
+        }
+    }
+
     for (&(row, col), cell) in cells {
         let style = doc.styles.cell(cell.style_idx);
         if !style.wrap || ws.row_heights.contains_key(&row) {
@@ -1782,6 +1967,217 @@ mod tests {
     use crate::resource_limits::PageBudget;
     use crate::testkit::zip_package;
     use crate::{ConvertOptions, OfficeError, UnsupportedCode};
+
+    #[test]
+    fn excel_web_fit_ratios_floor_to_whole_percentages() {
+        // Authoritative Excel-web column geometry pins sales at 98.55% -> 98%
+        // and inventory at 80.81% -> 80%, never fractional percentages.
+        assert!((floor_to_whole_percent(0.9855) - 0.98).abs() < f64::EPSILON);
+        assert!((floor_to_whole_percent(0.8081) - 0.80).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn page_geometry_rejects_margins_that_consume_the_sheet() {
+        let mut worksheet = Worksheet::default();
+        worksheet.page_margins.left = 400.0;
+        worksheet.page_margins.right = 400.0;
+        assert!(page_geometry(&worksheet).is_err());
+
+        worksheet.page_margins = Default::default();
+        worksheet.page_margins.top = 500.0;
+        worksheet.page_margins.bottom = 500.0;
+        assert!(page_geometry(&worksheet).is_err());
+    }
+
+    #[test]
+    fn absent_print_scale_only_shrinks_overwide_content() {
+        let mut worksheet = Worksheet::default();
+        assert!(
+            (select_sheet_scale(&worksheet, 684.0, 468.0, 575.28, 300.0) - 1.0).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (select_sheet_scale(&worksheet, 684.0, 468.0, 694.037109375, 300.0) - 1.0).abs()
+                < f64::EPSILON,
+            "a missing pageSetup preserves legacy multi-band pagination"
+        );
+        worksheet.page_setup.present = true;
+        assert!(
+            (select_sheet_scale(&worksheet, 684.0, 468.0, 694.037109375, 300.0) - 0.98).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn explicit_fit_floors_but_explicit_scale_remains_authored() {
+        let mut fit = Worksheet::default();
+        fit.page_setup.fit_to_width = Some(1);
+        assert!((select_sheet_scale(&fit, 684.0, 468.0, 846.0, 300.0) - 0.80).abs() < f64::EPSILON);
+
+        let mut scaled = Worksheet::default();
+        scaled.page_setup.scale = Some(0.75);
+        assert!(
+            (select_sheet_scale(&scaled, 684.0, 468.0, 846.0, 300.0) - 0.75).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn fit_mode_decides_between_coexisting_fit_and_scale_attributes() {
+        let mut worksheet = Worksheet::default();
+        worksheet.page_setup.present = true;
+        worksheet.page_setup.scale = Some(0.75);
+        worksheet.page_setup.fit_to_width = Some(1);
+        assert!(
+            (select_sheet_scale(&worksheet, 684.0, 468.0, 846.0, 300.0) - 0.75).abs()
+                < f64::EPSILON
+        );
+
+        worksheet.page_setup.fit_to_page = true;
+        assert!(
+            (select_sheet_scale(&worksheet, 684.0, 468.0, 846.0, 300.0) - 0.80).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn excel_web_sheet_origin_stays_on_the_same_pdf_coordinate_after_scaling() {
+        // All three authoritative PDFs start their table paint at 54.480469pt,
+        // including the 98% and 80% sheets. The logical origin therefore has
+        // to compensate for the transform around the nominal 54pt margin.
+        for scale in [1.0, 0.98, 0.80] {
+            let logical = excel_web_sheet_left(54.0, scale);
+            let printed = 54.0 + scale * (logical - 54.0);
+            assert!((printed - 54.480469).abs() < 0.000_001);
+        }
+    }
+
+    #[test]
+    fn excel_web_reserves_the_fractional_bottom_print_boundary() {
+        // In the 80% inventory truth, CR-1417C crosses the printable bottom by
+        // the same 0.480469pt device-space offset used by the painted origin,
+        // so it starts page 2 instead of being squeezed onto page 1.
+        let logical = excel_web_content_height(468.0, 0.80);
+        assert!((logical - 584.39941375).abs() < 1e-9);
+        assert!((logical * 0.80 - 467.519531).abs() < 1e-9);
+    }
+
+    #[test]
+    fn excel_web_cell_padding_distinguishes_text_start_and_baseline_insets() {
+        // Excel-web starts horizontal text 2pt inside the logical cell, while
+        // its baseline is inset by 2 CSS px = 1.5pt at 96 DPI.
+        assert!((EXCEL_WEB_HORIZONTAL_CELL_PADDING_PT - 2.0).abs() < f64::EPSILON);
+        assert!((EXCEL_WEB_VERTICAL_CELL_PADDING_PT - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn excel_web_baselines_use_a_device_space_nudge() {
+        // After the row tops are quantized, the scaled truth text matrices pin
+        // the baseline nudge to 0.54pt; the unscaled path is one 0.12pt print
+        // quantum smaller.
+        assert!((excel_web_baseline_offset(1.0) - 0.42).abs() < 1e-9);
+        for scale in [0.98, 0.80] {
+            assert!((excel_web_baseline_offset(scale) * scale - 0.54).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn excel_web_fills_and_right_alignment_bleed_one_print_quantum() {
+        for scale in [1.0, 0.98, 0.80] {
+            assert!((excel_web_fill_bleed(scale) * scale - 0.12).abs() < 1e-9);
+            assert!((excel_web_right_padding_extra(scale) * scale - 0.12).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn excel_web_printed_font_sizes_quantize_to_point_twelve_points() {
+        // PDF text operators in the authoritative exports use 11.04pt at
+        // 100%, 10.80pt at 98%, and 8.76pt at 80% for the same 11pt cells.
+        assert!((excel_web_printed_font_size(11.0, 1.0) - 11.04).abs() < 1e-9);
+        assert!((excel_web_printed_font_size(11.0, 0.98) - 10.80).abs() < 1e-9);
+        assert!((excel_web_printed_font_size(11.0, 0.80) - 8.76).abs() < 1e-9);
+        assert!((excel_web_printed_font_size(13.0, 1.0) - 12.96).abs() < 1e-9);
+    }
+
+    #[test]
+    fn excel_web_row_leading_scales_with_font_size() {
+        assert!((excel_web_row_leading(11.0) - 1.125).abs() < 1e-9);
+        assert!((excel_web_row_leading(13.0) - 1.3295454545).abs() < 1e-9);
+    }
+
+    #[test]
+    fn excel_web_printed_row_heights_quantize_to_point_twelve_points() {
+        // The same 14.5527pt logical line box prints at the measured 14.52pt,
+        // 14.28pt, and 11.64pt body pitches at 100%, 98%, and 80%.
+        let height = 14.552734375;
+        assert!((excel_web_logical_row_height(height, 1.0) - 14.52).abs() < 1e-9);
+        assert!((excel_web_logical_row_height(height, 0.98) - 14.5714285714).abs() < 1e-9);
+        assert!((excel_web_logical_row_height(height, 0.80) - 14.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn excel_web_continuation_page_offset_is_device_space_constant() {
+        for scale in [0.98, 0.80] {
+            let logical = excel_web_continuation_offset(scale);
+            assert!((logical * scale - EXCEL_WEB_PRINT_ORIGIN_OFFSET_PT).abs() < 1e-9);
+        }
+    }
+
+    fn automatic_row_height_fixture(custom_height: bool) -> Vec<u8> {
+        let content_types = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+        let root_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+        let workbook = br#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let workbook_rels = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let sheet: &[u8] = if custom_height {
+            br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr defaultRowHeight="30" customHeight="1"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>normal one</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>normal two</t></is></c></row><row r="3"><c r="A3" s="1" t="inlineStr"><is><t>title</t></is></c></row><row r="4" ht="22"><c r="A4" t="inlineStr"><is><t>explicit</t></is></c></row></sheetData></worksheet>"#
+        } else {
+            br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr defaultRowHeight="30"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>normal one</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>normal two</t></is></c></row><row r="3"><c r="A3" s="1" t="inlineStr"><is><t>title</t></is></c></row><row r="4" ht="22"><c r="A4" t="inlineStr"><is><t>explicit</t></is></c></row></sheetData></worksheet>"#
+        };
+        let styles = br#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><name val="Calibri"/><sz val="11"/></font><font><name val="Calibri"/><sz val="13"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf fontId="0"/><xf fontId="1"/></cellXfs></styleSheet>"#;
+        zip_package(&[
+            ("[Content_Types].xml", content_types),
+            ("_rels/.rels", root_rels),
+            ("xl/workbook.xml", workbook),
+            ("xl/_rels/workbook.xml.rels", workbook_rels),
+            ("xl/worksheets/sheet1.xml", sheet),
+            ("xl/styles.xml", styles),
+        ])
+    }
+
+    fn automatic_row_heights_from_fixture(custom_height: bool) -> Vec<f64> {
+        let bytes = automatic_row_height_fixture(custom_height);
+        let doc = XlsxDoc::open(&bytes, &ConvertOptions::default()).unwrap();
+        let ws = &doc.sheets[0].sheet;
+        let cells: HashMap<(u32, u32), &Cell> = ws
+            .cells
+            .iter()
+            .map(|cell| ((cell.row, cell.col), cell))
+            .collect();
+        let widths = column_widths(ws, ws.dim.1).unwrap();
+        effective_row_heights(&doc, ws, &cells, &widths, ws.dim.0).unwrap()
+    }
+
+    #[test]
+    fn automatic_rows_use_font_line_box_not_declared_sheet_default() {
+        // All three Excel-web truths reduce to a 14.55pt logical pitch for
+        // Calibri 11 after undoing their 100%, 98%, and 80% print scales.
+        let heights = automatic_row_heights_from_fixture(false);
+        assert!((heights[0] - 14.553).abs() < 0.02, "heights={heights:?}");
+        assert!((heights[1] - 14.553).abs() < 0.02, "heights={heights:?}");
+    }
+
+    #[test]
+    fn automatic_rows_follow_largest_font_but_explicit_height_wins() {
+        let heights = automatic_row_heights_from_fixture(false);
+        assert!(heights[2] > heights[1] + 2.0, "heights={heights:?}");
+        assert!((heights[3] - 22.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn custom_sheet_default_height_wins_for_non_explicit_rows() {
+        let heights = automatic_row_heights_from_fixture(true);
+        assert_eq!(&heights[..3], &[30.0, 30.0, 30.0]);
+        assert!((heights[3] - 22.0).abs() < f64::EPSILON);
+    }
 
     fn three_page_fixture() -> Vec<u8> {
         let content_types = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;

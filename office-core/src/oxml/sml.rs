@@ -10,6 +10,11 @@ use std::collections::HashMap;
 pub const MAX_XLSX_COLUMNS: u32 = 16_384;
 /// Excel's fixed worksheet envelope (rows are one-based in authored XML).
 pub const MAX_XLSX_ROWS: u32 = 1_048_576;
+const MAX_XLSX_COLUMN_WIDTH_CHARS: f64 = 255.0;
+const MAX_XLSX_ROW_HEIGHT_PT: f64 = 409.5;
+const MAX_XLSX_PAGE_MARGIN_IN: f64 = 100.0;
+const MIN_XLSX_PRINT_SCALE_PERCENT: f64 = 10.0;
+const MAX_XLSX_PRINT_SCALE_PERCENT: f64 = 400.0;
 
 fn reference_resource_limit(detail: impl Into<String>) -> OfficeError {
     OfficeError::unsupported(UnsupportedCode::ResourceLimit, detail)
@@ -577,6 +582,8 @@ pub struct ColInfo {
 pub struct Worksheet {
     /// Default row height (points).
     pub default_row_height: f64,
+    /// Whether `sheetFormatPr@customHeight` makes the sheet default authoritative.
+    pub default_row_height_custom: bool,
     /// Column spans.
     pub cols: Vec<ColInfo>,
     /// Per-row explicit heights (0-based row → points).
@@ -640,6 +647,10 @@ pub struct CellRange {
 /// Spreadsheet page setup; paper IDs follow ECMA-376/Excel values.
 #[derive(Debug, Clone, Copy)]
 pub struct PageSetup {
+    /// Whether the worksheet authored a `pageSetup` element.
+    pub present: bool,
+    /// Whether `sheetPr/pageSetUpPr@fitToPage` selects fit-to-page over scale mode.
+    pub fit_to_page: bool,
     /// ECMA-376 paper-size identifier.
     pub paper_size: u32,
     /// Whether width and height are swapped for landscape output.
@@ -655,6 +666,8 @@ pub struct PageSetup {
 impl Default for PageSetup {
     fn default() -> Self {
         Self {
+            present: false,
+            fit_to_page: false,
             // ECMA-376 18.3.1.63: paperSize defaults to 1 (US Letter).
             paper_size: 1,
             landscape: false,
@@ -823,10 +836,25 @@ impl Worksheet {
             ..Default::default()
         };
 
-        if let Some(fmt) = child(root, S, "sheetFormatPr")
-            && let Some(h) = parse_f64(attr(fmt, S, "defaultRowHeight"))
+        if let Some(sheet_pr) = child(root, S, "sheetPr")
+            && let Some(page_setup_pr) = child(sheet_pr, S, "pageSetUpPr")
         {
-            ws.default_row_height = h;
+            ws.page_setup.fit_to_page = matches!(
+                attr(page_setup_pr, S, "fitToPage"),
+                Some("1") | Some("true")
+            );
+        }
+        if let Some(fmt) = child(root, S, "sheetFormatPr") {
+            if let Some(h) = parse_geometry_attr(
+                attr(fmt, S, "defaultRowHeight"),
+                "worksheet default row height",
+                f64::MIN_POSITIVE,
+                MAX_XLSX_ROW_HEIGHT_PT,
+            )? {
+                ws.default_row_height = h;
+            }
+            ws.default_row_height_custom =
+                matches!(attr(fmt, S, "customHeight"), Some("1") | Some("true"));
         }
         if let Some(cols) = child(root, S, "cols") {
             for c in children(cols) {
@@ -850,8 +878,15 @@ impl Worksheet {
                         max + 1
                     )));
                 }
-                let width_chars = parse_f64(attr(c, S, "width")).unwrap_or(8.43);
-                let hidden = matches!(attr(c, S, "hidden"), Some("1") | Some("true"));
+                let width_chars = parse_geometry_attr(
+                    attr(c, S, "width"),
+                    "worksheet column width",
+                    0.0,
+                    MAX_XLSX_COLUMN_WIDTH_CHARS,
+                )?
+                .unwrap_or(8.43);
+                let hidden =
+                    width_chars == 0.0 || matches!(attr(c, S, "hidden"), Some("1") | Some("true"));
                 ws.cols.push(ColInfo {
                     min,
                     max,
@@ -867,21 +902,34 @@ impl Worksheet {
             matches!(attr(options, S, "gridLines"), Some("1") | Some("true"))
         });
         if let Some(margins) = child(root, S, "pageMargins") {
-            let inch = |name| parse_f64(attr(margins, S, name)).map(|value| value * 72.0);
-            ws.page_margins.left = inch("left").unwrap_or(ws.page_margins.left);
-            ws.page_margins.right = inch("right").unwrap_or(ws.page_margins.right);
-            ws.page_margins.top = inch("top").unwrap_or(ws.page_margins.top);
-            ws.page_margins.bottom = inch("bottom").unwrap_or(ws.page_margins.bottom);
-            ws.page_margins.header = inch("header").unwrap_or(ws.page_margins.header);
-            ws.page_margins.footer = inch("footer").unwrap_or(ws.page_margins.footer);
+            let inch = |name| {
+                parse_geometry_attr(
+                    attr(margins, S, name),
+                    "worksheet page margin",
+                    0.0,
+                    MAX_XLSX_PAGE_MARGIN_IN,
+                )
+                .map(|value| value.map(|value| value * 72.0))
+            };
+            ws.page_margins.left = inch("left")?.unwrap_or(ws.page_margins.left);
+            ws.page_margins.right = inch("right")?.unwrap_or(ws.page_margins.right);
+            ws.page_margins.top = inch("top")?.unwrap_or(ws.page_margins.top);
+            ws.page_margins.bottom = inch("bottom")?.unwrap_or(ws.page_margins.bottom);
+            ws.page_margins.header = inch("header")?.unwrap_or(ws.page_margins.header);
+            ws.page_margins.footer = inch("footer")?.unwrap_or(ws.page_margins.footer);
         }
         if let Some(setup) = child(root, S, "pageSetup") {
+            ws.page_setup.present = true;
             ws.page_setup.paper_size =
                 parse_i64(attr(setup, S, "paperSize")).unwrap_or(1).max(0) as u32;
             ws.page_setup.landscape = attr(setup, S, "orientation") == Some("landscape");
-            ws.page_setup.scale = parse_f64(attr(setup, S, "scale"))
-                .filter(|scale| *scale > 0.0)
-                .map(|scale| scale / 100.0);
+            ws.page_setup.scale = parse_geometry_attr(
+                attr(setup, S, "scale"),
+                "worksheet print scale",
+                MIN_XLSX_PRINT_SCALE_PERCENT,
+                MAX_XLSX_PRINT_SCALE_PERCENT,
+            )?
+            .map(|scale| scale / 100.0);
             ws.page_setup.fit_to_width =
                 parse_i64(attr(setup, S, "fitToWidth")).and_then(|value| u32::try_from(value).ok());
             ws.page_setup.fit_to_height = parse_i64(attr(setup, S, "fitToHeight"))
@@ -960,7 +1008,12 @@ impl Worksheet {
                     }
                     None => 0,
                 };
-                if let Some(h) = parse_f64(attr(row, S, "ht")) {
+                if let Some(h) = parse_geometry_attr(
+                    attr(row, S, "ht"),
+                    "worksheet row height",
+                    f64::MIN_POSITIVE,
+                    MAX_XLSX_ROW_HEIGHT_PT,
+                )? {
                     ws.row_heights.insert(r_idx, h);
                 }
                 if matches!(attr(row, S, "hidden"), Some("1") | Some("true")) {
@@ -1340,6 +1393,26 @@ fn parse_decimal_u32(value: &str, label: &str) -> Result<u32> {
     Ok(parsed)
 }
 
+fn parse_geometry_attr(
+    value: Option<&str>,
+    label: &str,
+    minimum: f64,
+    maximum: f64,
+) -> Result<Option<f64>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let parsed = raw.trim().parse::<f64>().map_err(|_| {
+        OfficeError::Invalid(format!("{label} is not a finite numeric value: {raw}"))
+    })?;
+    if !parsed.is_finite() || parsed < minimum || parsed > maximum {
+        return Err(OfficeError::Invalid(format!(
+            "{label} is outside the supported finite range {minimum}..={maximum}: {raw}"
+        )));
+    }
+    Ok(Some(parsed))
+}
+
 fn parse_required_one_based_index(value: Option<&str>, limit: u32, label: &str) -> Result<u32> {
     let raw = value.ok_or_else(|| OfficeError::Invalid(format!("{label} is missing")))?;
     let parsed = parse_decimal_u32(raw, label)?;
@@ -1419,6 +1492,53 @@ mod tests {
             Worksheet::parse(xml, &shared).expect_err("malformed merge reference"),
             OfficeError::Invalid(_)
         ));
+    }
+
+    #[test]
+    fn worksheet_rejects_non_finite_or_invalid_geometry() {
+        let shared = SharedStrings::default();
+        for body in [
+            r#"<sheetFormatPr defaultRowHeight="NaN"/><sheetData/>"#,
+            r#"<cols><col min="1" max="1" width="inf"/></cols><sheetData/>"#,
+            r#"<sheetData><row r="1" ht="0"/></sheetData>"#,
+            r#"<sheetData/><pageMargins left="-1"/>"#,
+            r#"<sheetData/><pageSetup scale="inf"/>"#,
+            r#"<cols><col min="1" max="1" width="1e308"/></cols><sheetData/>"#,
+            r#"<sheetData><row r="1" ht="1e308"/></sheetData>"#,
+            r#"<sheetData/><pageMargins left="1e308"/>"#,
+            r#"<sheetData/><pageSetup scale="401"/>"#,
+        ] {
+            let xml = format!(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{body}</worksheet>"#
+            );
+            assert!(
+                matches!(
+                    Worksheet::parse(&xml, &shared).expect_err(body),
+                    OfficeError::Invalid(_)
+                ),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn worksheet_retains_custom_default_height_and_fit_mode() {
+        let shared = SharedStrings::default();
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><sheetFormatPr defaultRowHeight="30" customHeight="1"/><sheetData/><pageSetup scale="75" fitToWidth="1"/></worksheet>"#;
+        let worksheet = Worksheet::parse(xml, &shared).unwrap();
+        assert!(worksheet.default_row_height_custom);
+        assert!((worksheet.default_row_height - 30.0).abs() < f64::EPSILON);
+        assert!(worksheet.page_setup.fit_to_page);
+        assert_eq!(worksheet.page_setup.scale, Some(0.75));
+        assert_eq!(worksheet.page_setup.fit_to_width, Some(1));
+    }
+
+    #[test]
+    fn zero_width_column_is_treated_as_hidden() {
+        let shared = SharedStrings::default();
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="0"/></cols><sheetData/></worksheet>"#;
+        let worksheet = Worksheet::parse(xml, &shared).unwrap();
+        assert!(worksheet.cols[0].hidden);
     }
 
     #[test]
