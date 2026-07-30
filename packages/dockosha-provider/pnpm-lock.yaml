@@ -1,0 +1,64 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@samarthmn/doc-yantra':
+        specifier: 0.0.17
+        version: 0.0.17
+      '@samarthmn/doc-yantra-office':
+        specifier: 0.0.17
+        version: 0.0.17
+      zod:
+        specifier: ^4.1.1
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^20
+        version: 20.19.43
+      typescript:
+        specifier: ^5
+        version: 5.9.3
+
+packages:
+
+  '@samarthmn/doc-yantra-office@0.0.17':
+    resolution: {integrity: sha512-BcR7eEOpE+T2ocYOfJeoN2eylxcjlJ080W4uzWE+VcmQjsujBN3qjkL9lGvePjeaIA0KjkxSgqzLPlL75qy+SA==, tarball: https://npm.pkg.github.com/download/@samarthmn/doc-yantra-office/0.0.17/9164c8c2b467843f20ab800d4c74d6984a10cbb1}
+
+  '@samarthmn/doc-yantra@0.0.17':
+    resolution: {integrity: sha512-rveQYAjyGOhVbSmqma1w2bzMNgARWCI4lST6BXcH7wBHoSF5eNfoN3oS06XAOin0YmLBuMum4F/4QTe9XU+/tw==, tarball: https://npm.pkg.github.com/download/@samarthmn/doc-yantra/0.0.17/17e1f64cf7f4a23eaf86508aa4b77471d2b6113b}
+
+  '@types/node@20.19.43':
+    resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  undici-types@6.21.0:
+    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
+snapshots:
+
+  '@samarthmn/doc-yantra-office@0.0.17': {}
+
+  '@samarthmn/doc-yantra@0.0.17': {}
+
+  '@types/node@20.19.43':
+    dependencies:
+      undici-types: 6.21.0
+
+  typescript@5.9.3: {}
+
+  undici-types@6.21.0: {}
+
+  zod@4.4.3: {}

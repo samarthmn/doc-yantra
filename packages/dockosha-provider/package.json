@@ -1,0 +1,39 @@
+{
+  "name": "@samarthmn/dockosha-provider-docyantra",
+  "version": "0.0.1",
+  "description": "Private DocYantra document-processing provider for DocKosha",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@samarthmn/doc-yantra": "0.0.17",
+    "@samarthmn/doc-yantra-office": "0.0.17",
+    "zod": "^4.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "https://npm.pkg.github.com"
+  }
+}
