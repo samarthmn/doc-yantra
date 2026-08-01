@@ -9,7 +9,8 @@ This repo is DocKosha's **proprietary PDF engine** and its distributable
 | `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS), `./web` (browser ESM); both expose Zone 1, including fail-closed redaction. Office→PDF is provided by the separate Office package below. |
 | `office-core/` | The pure-Rust **Office → PDF** engine: DOCX/PPTX/XLSX layout + PDF emission, fail-closed envelope, DocProfile router contract. No LibreOffice/Chromium/pdfium in the conversion path. See [`office-core/README.md`](office-core/README.md). |
 | `office-core/wasm/` | The **`@samarthmn/doc-yantra-office`** npm package (Node CJS + browser ESM). `office_profile()` / `office_to_pdf()` / `register_font()`. DocKosha routes all office conversions here; envelope misses fail closed (no LibreOffice anywhere). |
-| `.github/workflows/publish-wasm.yml` | Validates a `0.0.*` tag against `main` and both committed package versions, then publishes **both** packages to **GitHub Packages** without rebuilding or retesting them. |
+| `packages/dockosha-provider/` | The **`@samarthmn/dockosha-provider-docyantra`** TypeScript adapter. Its committed `dist/` and exact engine pins release in lockstep with both wasm engines. |
+| `.github/workflows/publish-wasm.yml` | Validates a `0.0.*` tag against `main` and all three committed package versions, then publishes both engines followed by the adapter to **GitHub Packages** without rebuilding or retesting them. |
 
 > **History note:** the DocYantra HTTP service (NestJS + Gotenberg) has been
 > retired and deleted from the DocKosha app repo. These packages are the only
@@ -122,11 +123,12 @@ and commit the resulting `fonts.lock` change together with that upgrade.
 ## Releasing
 
 Releases stay on the **0.0.x** line — only the patch increments. From a clean
-`main`, one script picks the next `x`, bumps all four engine/wasm manifests,
-rebuilds and tests both packages, runs the blocking DOCX fidelity corpus, then
-commits, tags, and atomically pushes `main` + `0.0.x`. The tag workflow verifies
-that the tagged commit is on `main` and both committed package versions match
-the tag, then publishes those artifacts without rebuilding or retesting them:
+`main`, one script picks the next `x`, bumps all four engine/wasm manifests plus
+the adapter manifest and engine pins, rebuilds and tests all three packages,
+runs the blocking DOCX fidelity corpus, then commits, tags, and atomically
+pushes `main` + `0.0.x`. The tag workflow verifies that the tagged commit is on
+`main` and all three committed package versions match the tag, then publishes
+both engines followed by the adapter without rebuilding or retesting them:
 
 ```bash
 scripts/release.sh            # auto: next patch, commit, tag, push

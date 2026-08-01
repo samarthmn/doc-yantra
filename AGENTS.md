@@ -62,10 +62,12 @@ The Office package never embeds a font payload. Hosts use
 and conversion; native default builds alone retain `bundled-fonts` for hermetic
 tests and fidelity scoring.
 
-**Versioning now spans four Cargo.tomls** kept in lockstep by
-`scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
-`office-core/Cargo.toml`, `office-core/wasm/Cargo.toml`. One `0.0.*` tag publishes
-both npm packages via `publish-wasm.yml`.
+**Versioning spans four Cargo.tomls plus the adapter manifest/lockfile**, kept
+in lockstep by `scripts/release.sh`: `pdf-core/Cargo.toml`,
+`pdf-core/wasm/Cargo.toml`, `office-core/Cargo.toml`,
+`office-core/wasm/Cargo.toml`, and `packages/dockosha-provider/package.json` /
+`pnpm-lock.yaml`. One `0.0.*` tag publishes all three npm packages via
+`publish-wasm.yml`.
 
 ## Build / test / run commands
 
@@ -98,9 +100,10 @@ font files and embedded SFNT programs.
 ## Releasing (0.0.x line)
 
 Releases stay on `0.0.x` — **only the patch increments**. Use the script; it
-derives the next `x` from the highest `0.0.*` git tag, writes both
-Cargo.tomls, rebuilds `pkg/`, commits, tags, and pushes (the `publish-wasm.yml`
-Action then publishes to GitHub Packages on the tag):
+derives the next `x` from the highest `0.0.*` git tag, writes the engine Cargo
+manifests plus the adapter version/pins, rebuilds `pkg/` and the adapter
+`dist/`, commits, tags, and pushes (the `publish-wasm.yml` Action then publishes
+all three packages to GitHub Packages on the tag):
 ```bash
 scripts/release.sh          # auto: next patch after the highest tag
 scripts/release.sh 7        # explicit: release 0.0.7
@@ -121,10 +124,15 @@ bump plus the regenerated `pkg/` together.
   `pkg/package.json`; keep all of them on the same `0.0.x`. The package's
   `version()` returns the wasm crate's. `scripts/release.sh` bumps them
   for you (via the Cargo.tomls + `build.sh`). Published versions are **immutable**.
+- **The DocKosha adapter joins that same release.** `release.sh` bumps
+  `packages/dockosha-provider/package.json`, both exact engine pins, and its
+  committed `pnpm-lock.yaml`; its gate installs the locally built engine pkgs,
+  rebuilds committed `dist/`, and runs the adapter tests before tagging.
 - **Releasing** is tag-driven and stays on the `0.0.x` line — just run
   `scripts/release.sh` (see the Releasing section above). It picks the
-  next patch, rebuilds/commits `pkg/`, tags `0.0.x`, and pushes; the
-  `publish-wasm.yml` Action publishes to GitHub Packages on `0.0.*` tags.
+  next patch, rebuilds/commits all three package artifacts, tags `0.0.x`, and
+  pushes; the `publish-wasm.yml` Action publishes to GitHub Packages on
+  `0.0.*` tags.
 - **GitHub Packages requires the npm scope to equal the repo owner.** If the owner
   isn't `samarthmn`, change `OWNER`/`SCOPE`/`PKG_NAME` in `build.sh`, the `scope:`
   in `publish-wasm.yml`, and the consumer's `.npmrc`. See `CONSUMING.md`.

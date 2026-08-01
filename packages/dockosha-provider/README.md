@@ -7,9 +7,10 @@ normalization, Office font provisioning, and the browser wasm-asset sync hook.
 
 ## Build and test
 
-The engine packages are pinned to the private `0.0.17` releases that produced
-DocKosha's frozen byte goldens. No adapter publication is needed for local
-verification:
+The checked-in manifest uses exact private engine pins. The release script
+aligns the adapter and both engines on one `0.0.x` version when it cuts a
+lockstep release. For ordinary local verification against the currently pinned
+engines:
 
 ```bash
 cd packages/dockosha-provider
@@ -24,22 +25,24 @@ From DocKosha, install it transiently without changing tracked manifests:
 npm install --no-save /absolute/path/to/doc-yantra/packages/dockosha-provider
 ```
 
-## Publishing is a maintainer gate
+## Publishing in lockstep
 
-This package is deliberately marked `"private": true`; no automated workflow
-publishes it. A maintainer who decides to release it must:
+The adapter releases with both engines on the same `0.0.x` version, release
+commit, and tag. From a clean `main`, maintainers run the repository release
+script; it bumps the adapter version, both engine dependency pins, and the
+committed lockfile at release time:
 
-1. Replace `src/provider-interface.ts` with a dependency on the published
-   `@dockosha/provider-interface` package and verify the contracts match.
-2. Choose and commit an immutable version, and review the exact private engine
-   dependency pins against DocKosha's byte-parity fixtures.
-3. Run `pnpm test` and `npm pack --dry-run`, then review the tarball contents.
-4. Remove the `"private": true` guard only in that reviewed release change,
-   authenticate to the private GitHub Packages registry, and manually run the
-   publish command.
+```bash
+scripts/release.sh
+DRY_RUN=1 scripts/release.sh
+```
 
-Publishing, tagging, pushing, and registry authentication are intentionally
-outside this extraction task.
+The local release gate installs the freshly built engine packages by path with
+`npm install --no-save`, then rebuilds `dist/` and runs the adapter tests without
+requiring the not-yet-published engine version from the registry. The tag
+workflow validates all three versions and publishes both engines before this
+adapter, using the built-in `GITHUB_TOKEN`; CI publishes the committed `dist/`
+without rebuilding it.
 
 ## DocKosha configuration
 

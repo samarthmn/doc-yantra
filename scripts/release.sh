@@ -2,7 +2,7 @@
 #
 # Cut a new patch release on the fixed 0.0.x line for every published package.
 #
-# The engines release in lockstep: one version, one commit, one 0.0.x tag; the
+# The packages release in lockstep: one version, one commit, one 0.0.x tag; the
 # publish-wasm.yml Action publishes the committed packages to GitHub Packages
 # when the tag lands. GitHub never rebuilds or retests them, so this script is
 # the supported local build-and-gate path (R2-Y1).
@@ -17,13 +17,15 @@
 #     <pkg>/Cargo.toml        engine crate manifest (version bumped in lockstep)
 #     <pkg>/wasm/Cargo.toml   wasm crate manifest   (version bumped in lockstep)
 #     <pkg>/wasm/build.sh     rebuilds the committed <pkg>/wasm/pkg/ artifact
-#   To add one: append its directory to PACKAGES, and register any
-#   package-specific test gates in run_gates.
+#   To add an engine: append its directory to PACKAGES, and register any
+#   package-specific test gates in run_gates. Non-engine packages need their
+#   own bump/build conventions and must also be staged in ship.
 #
 set -euo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 PACKAGES=(pdf-core office-core)
+DOCKOSHA_ADAPTER="packages/dockosha-provider"
 WASM_PACK_VERSION="0.15.0"
 CARGO_LOCKS=(
   pdf-core/Cargo.lock
@@ -112,12 +114,17 @@ dry_run_report() {
   for package in "${PACKAGES[@]}"; do
     echo "          $(manifests_for "$package")"
   done
+  echo "[dry-run] would set version and both engine dependency pins to ${version} in:"
+  echo "          ${DOCKOSHA_ADAPTER}/package.json"
+  echo "[dry-run] would update the adapter engine entries in:"
+  echo "          ${DOCKOSHA_ADAPTER}/pnpm-lock.yaml"
   echo "[dry-run] would run wasm/build.sh for: ${PACKAGES[*]}"
-  echo "[dry-run] would run every test gate, commit ${PACKAGES[*]},"
+  echo "[dry-run] would rebuild and test ${DOCKOSHA_ADAPTER} against the local engine pkgs"
+  echo "[dry-run] would run every test gate, commit ${PACKAGES[*]} ${DOCKOSHA_ADAPTER},"
   echo "          tag ${tag}, push origin main ${tag}"
 }
 
-# ─── Bump: write the new version into every lockstep Cargo.toml ──────────────
+# ─── Bump: update every lockstep engine and adapter manifest ─────────────────
 # Only the first `version =` line of each manifest (the [package] version).
 # Cargo.locks follow during the builds; each pkg/package.json follows via its
 # package's build.sh.
@@ -129,6 +136,79 @@ set_version() {
   ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
 }
 
+set_dockosha_adapter_version() {
+  node - "${DOCKOSHA_ADAPTER}/package.json" \
+    "${DOCKOSHA_ADAPTER}/pnpm-lock.yaml" "${version}" <<'NODE'
+const fs = require("node:fs");
+
+const [manifestPath, lockfilePath, version] = process.argv.slice(2);
+const enginePackages = [
+  "@samarthmn/doc-yantra",
+  "@samarthmn/doc-yantra-office",
+];
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const oldVersions = new Map();
+
+for (const packageName of enginePackages) {
+  const oldVersion = manifest.dependencies?.[packageName];
+  if (typeof oldVersion !== "string" || !/^0\.0\.\d+$/.test(oldVersion)) {
+    throw new Error(`adapter dependency ${packageName} must have an exact 0.0.x pin`);
+  }
+  oldVersions.set(packageName, oldVersion);
+  manifest.dependencies[packageName] = version;
+}
+if (new Set(oldVersions.values()).size !== 1) {
+  throw new Error("adapter engine dependency pins must already match");
+}
+manifest.version = version;
+fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+let activeImporter = null;
+const lockUpdates = new Map(enginePackages.map((packageName) => [packageName, 0]));
+const replaceEngineVersion = (line, packageName) => {
+  const oldVersion = oldVersions.get(packageName);
+  const occurrences = line.split(oldVersion).length - 1;
+  lockUpdates.set(packageName, lockUpdates.get(packageName) + occurrences);
+  return line.replaceAll(oldVersion, version);
+};
+const lockfile = fs
+  .readFileSync(lockfilePath, "utf8")
+  .split("\n")
+  .map((line) => {
+    const importer = line.match(
+      /^\s+'(@samarthmn\/doc-yantra(?:-office)?)':\s*$/,
+    );
+    if (importer) {
+      activeImporter = importer[1];
+      return line;
+    }
+    if (activeImporter && /^\s+(specifier|version):/.test(line)) {
+      const updated = replaceEngineVersion(line, activeImporter);
+      if (/^\s+version:/.test(line)) activeImporter = null;
+      return updated;
+    }
+    for (const packageName of enginePackages) {
+      if (
+        line.includes(`${packageName}@`) ||
+        line.includes(`/download/${packageName}/`)
+      ) {
+        return replaceEngineVersion(line, packageName);
+      }
+    }
+    return line;
+  })
+  .join("\n");
+for (const packageName of enginePackages) {
+  if (lockUpdates.get(packageName) !== 5) {
+    throw new Error(
+      `expected 5 ${packageName} lock entries; updated ${lockUpdates.get(packageName)}`,
+    );
+  }
+}
+fs.writeFileSync(lockfilePath, lockfile);
+NODE
+}
+
 bump_versions() {
   local package manifest
   for package in "${PACKAGES[@]}"; do
@@ -136,7 +216,9 @@ bump_versions() {
       set_version "$manifest"
     done
   done
+  set_dockosha_adapter_version
   echo "  set version = \"${version}\" in the lockstep Cargo.tomls"
+  echo "  set adapter version and engine dependency pins = \"${version}\""
 }
 
 # ─── Build: regenerate every committed wasm package ──────────────────────────
@@ -195,17 +277,43 @@ gate_package_suite() {
   REQUIRE_PDFJS_PAINT=1 node --test tests/office-cjk.test.mjs tests/office-cjk-pdfjs-paint.test.mjs
 }
 
+gate_dockosha_adapter() {
+  echo "  installing locally built engines for the DocKosha adapter gate ..."
+  mkdir -p tmp
+  local node_modules_backup
+  node_modules_backup="$(mktemp -d "${PWD}/tmp/dockosha-adapter-node-modules.XXXXXX")"
+  (
+    cd "${DOCKOSHA_ADAPTER}"
+    cleanup_adapter_modules() {
+      rm -rf -- node_modules
+      if [[ -e "${node_modules_backup}/node_modules" || -L "${node_modules_backup}/node_modules" ]]; then
+        mv "${node_modules_backup}/node_modules" node_modules
+      fi
+      rmdir "${node_modules_backup}"
+    }
+    trap cleanup_adapter_modules EXIT
+    if [[ -e node_modules || -L node_modules ]]; then
+      mv node_modules "${node_modules_backup}/node_modules"
+    fi
+    npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund \
+      ../../pdf-core/wasm/pkg ../../office-core/wasm/pkg
+    npm run build
+    node --test test/*.test.mjs
+  )
+}
+
 run_gates() {
   gate_security
   gate_pdf_core
   gate_office_core
   gate_package_suite
+  gate_dockosha_adapter
   # New packages: add a gate_<package> above and call it here.
 }
 
 # ─── Ship: one commit and one tag cover every package ────────────────────────
 ship() {
-  git add "${PACKAGES[@]}"
+  git add "${PACKAGES[@]}" "${DOCKOSHA_ADAPTER}"
   git commit -m "wasm: v${version}"
   git tag "$tag"
   git push --atomic origin main "$tag"

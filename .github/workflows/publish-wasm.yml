@@ -1,6 +1,6 @@
 name: Publish wasm packages
 
-# Publishes both committed npm packages to GitHub Packages when the local
+# Publishes all three committed npm packages to GitHub Packages when the local
 # release script pushes a version tag, e.g. 0.0.8.
 on:
   push:
@@ -46,12 +46,27 @@ jobs:
           }
           PDF_VERSION="$(node -p "require('./pdf-core/wasm/pkg/package.json').version")"
           OFFICE_VERSION="$(node -p "require('./office-core/wasm/pkg/package.json').version")"
+          ADAPTER_VERSION="$(node -p "require('./packages/dockosha-provider/package.json').version")"
+          ADAPTER_PDF_PIN="$(node -p "require('./packages/dockosha-provider/package.json').dependencies['@samarthmn/doc-yantra']")"
+          ADAPTER_OFFICE_PIN="$(node -p "require('./packages/dockosha-provider/package.json').dependencies['@samarthmn/doc-yantra-office']")"
           test "${TAG_VERSION}" = "${PDF_VERSION}" || {
             echo "Tag ${TAG_VERSION} does not match PDF package ${PDF_VERSION}." >&2
             exit 1
           }
           test "${TAG_VERSION}" = "${OFFICE_VERSION}" || {
             echo "Tag ${TAG_VERSION} does not match Office package ${OFFICE_VERSION}." >&2
+            exit 1
+          }
+          test "${TAG_VERSION}" = "${ADAPTER_VERSION}" || {
+            echo "Tag ${TAG_VERSION} does not match DocKosha adapter ${ADAPTER_VERSION}." >&2
+            exit 1
+          }
+          test "${TAG_VERSION}" = "${ADAPTER_PDF_PIN}" || {
+            echo "Tag ${TAG_VERSION} does not match adapter PDF pin ${ADAPTER_PDF_PIN}." >&2
+            exit 1
+          }
+          test "${TAG_VERSION}" = "${ADAPTER_OFFICE_PIN}" || {
+            echo "Tag ${TAG_VERSION} does not match adapter Office pin ${ADAPTER_OFFICE_PIN}." >&2
             exit 1
           }
           node scripts/source-fingerprint.mjs pdf --verify pdf-core/wasm/pkg/build-fingerprint.json
@@ -79,6 +94,20 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           if npm view "@samarthmn/doc-yantra-office@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
             echo "@samarthmn/doc-yantra-office@${VERSION} already published — skipping."
+          else
+            npm publish --ignore-scripts
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish the adapter only after both of its exact-pinned engine
+      # dependencies exist. Retries keep the same immutable-version guard.
+      - name: Publish DocKosha adapter to GitHub Packages
+        working-directory: packages/dockosha-provider
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@samarthmn/dockosha-provider-docyantra@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "@samarthmn/dockosha-provider-docyantra@${VERSION} already published — skipping."
           else
             npm publish --ignore-scripts
           fi

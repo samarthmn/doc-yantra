@@ -16,13 +16,14 @@ PDF **in-process** — no network hop, no Rust toolchain on the consumer side.
 
 ## 1. Publish a version (maintainers)
 
-The built packages live under each engine's `wasm/pkg` directory and are
-**committed** so consumers and CI never need Rust. Releases stay on the
-**0.0.x** line (only the patch increments). From a clean local `main` branch,
-one script picks the next `x`, bumps all four Cargo manifests in sync, rebuilds
-both packages, runs the Rust/package/fidelity gates, commits, tags `0.0.x`, and
-pushes (requires Rust; the build scripts pin wasm-pack 0.15.0 and use pnpm or
-npx when it is not installed globally):
+The engine packages' `wasm/pkg` directories and the DocKosha adapter's `dist/`
+are **committed** so consumers and CI never need Rust or TypeScript. Releases
+stay on the **0.0.x** line (only the patch increments). From a clean local
+`main` branch, one script picks the next `x`, bumps all four Cargo manifests
+plus the adapter version and engine pins, rebuilds all three packages, runs the
+Rust/package/fidelity/adapter gates, commits, tags `0.0.x`, and pushes (requires
+Rust; the build scripts pin wasm-pack 0.15.0 and use pnpm or npx when it is not
+installed globally):
 
 ```bash
 scripts/release.sh            # auto: next patch, commit, tag, push
@@ -34,10 +35,11 @@ Published versions are immutable — the script refuses to reuse or go below an
 existing tag; always bump.
 
 The [`publish-wasm`](.github/workflows/publish-wasm.yml) GitHub Action requires
-the tagged commit to be on `main`, requires the tag to match both committed
-package versions, then publishes those packages using the repo's built-in
-`GITHUB_TOKEN` (needs `packages: write`, already set). It does not rebuild or
-retest the packages; `release.sh` is the supported local build and test gate.
+the tagged commit to be on `main`, requires the tag to match all three committed
+package versions, then publishes both engines followed by the adapter using the
+repo's built-in `GITHUB_TOKEN` (needs `packages: write`, already set). It does
+not rebuild or retest the packages; `release.sh` is the supported local build
+and test gate.
 
 ## 2. Create an install token
 
@@ -68,7 +70,8 @@ guard) and the install would 401.
   // Use the latest published patch — find it with:
   //   git tag --list '0.0.*' | sort -V | tail -1
   "@samarthmn/doc-yantra": "0.0.7",
-  "@samarthmn/doc-yantra-office": "0.0.7"
+  "@samarthmn/doc-yantra-office": "0.0.7",
+  "@samarthmn/dockosha-provider-docyantra": "0.0.7"
 }
 ```
 
