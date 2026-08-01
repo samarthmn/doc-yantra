@@ -1129,7 +1129,7 @@ fn draw_glyphs_impl(
         )));
     };
     let idx = face_order.iter().position(|f| *f == run.face).unwrap_or(0);
-    let baseline = word_pdf_text_y(page_h - pos.y_pt);
+    let baseline = word_pdf_text_y(page_h, pos.y_pt);
     let semantic = semantic_clusters(&run.glyphs);
     if !semantic.is_empty() {
         draw_semantic_text(content, pos, baseline, run, idx, font, &semantic)?;
@@ -1480,7 +1480,7 @@ fn draw_semantic_run(
     draw_semantic_layer(
         content,
         pos.x_pt,
-        word_pdf_text_y(page_h - pos.y_pt),
+        word_pdf_text_y(page_h, pos.y_pt),
         run.size_pt,
         Some(run.base_direction),
         font_index,
@@ -1573,11 +1573,18 @@ fn draw_semantic_layer(
     Ok(())
 }
 
-/// Word's Office-to-PDF path writes text origins on a quarter-point vertical
-/// grid. Keep layout and pagination continuous; quantize only the emitted text
-/// matrix so glyph raster phase matches the authoring application.
-fn word_pdf_text_y(value: f64) -> f64 {
-    (value * 4.0).round() / 4.0
+/// Word's Office-to-PDF path snaps text origins on a quarter-point vertical
+/// grid when both page origins share that grid. Keep layout and pagination
+/// continuous, and preserve the laid-out baseline on fractional-phase page
+/// heights rather than shifting it onto an arbitrary top- or bottom-edge grid.
+fn word_pdf_text_y(page_h: f64, layout_y: f64) -> f64 {
+    let pdf_y = page_h - layout_y;
+    let page_grid_y = page_h * 4.0;
+    if (page_grid_y - page_grid_y.round()).abs() <= 1e-6 {
+        (pdf_y * 4.0).round() / 4.0
+    } else {
+        pdf_y
+    }
 }
 
 fn visual_semantic_tokens(
@@ -2474,7 +2481,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_text_baseline_is_emitted_on_words_quarter_point_grid() {
+    fn visible_text_baseline_is_not_snapped_on_an_off_grid_page_height() {
         use crate::layout::{GlyphRun, PlacedGlyph};
 
         let face = FaceId(0);
@@ -2491,7 +2498,9 @@ mod tests {
         let embedded = EmbeddedFont::new(subset, &pairs, &visible).expect("embedded font state");
         let page = Page {
             width_pt: 100.0,
-            height_pt: 100.0,
+            // A non-quarter-point page height distinguishes snapping the
+            // top-down layout baseline from snapping the transformed PDF y.
+            height_pt: 100.1,
             items: vec![Positioned {
                 x_pt: 10.0,
                 y_pt: 3.348_388_671_875,
@@ -2516,11 +2525,13 @@ mod tests {
             .expect("render visible-text page");
         let stream = String::from_utf8(bytes).expect("ASCII content stream");
 
-        // Word desktop's Times 11, Arial 10.5, and Calibri 11/26 PDF text
-        // matrices all place baselines on 0.25pt increments.
+        // The top and bottom page origins have different quarter-point phases
+        // when the page height is 100.1pt. Preserve the laid-out baseline
+        // (100.1 - 3.348388671875 = 96.75161pt) instead of choosing either
+        // origin's incompatible snap grid.
         assert!(
-            stream.contains("1 0 0 1 10 96.75 Tm"),
-            "visible text baseline must be on Word's quarter-point grid: {stream}"
+            stream.contains("1 0 0 1 10 96.75161 Tm"),
+            "an off-grid page height must preserve the laid-out baseline: {stream}"
         );
     }
 
