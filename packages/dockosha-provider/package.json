@@ -2,7 +2,10 @@
   "name": "@samarthmn/dockosha-provider-docyantra",
   "version": "0.0.1",
   "description": "Private DocYantra document-processing provider for DocKosha",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samarthmn/doc-yantra.git"
+  },
   "license": "UNLICENSED",
   "type": "commonjs",
   "main": "./dist/index.js",
