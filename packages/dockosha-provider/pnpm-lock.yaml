@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@samarthmn/doc-yantra':
-        specifier: 0.0.18
-        version: 0.0.18
+        specifier: 0.0.19
+        version: 0.0.19
       '@samarthmn/doc-yantra-office':
-        specifier: 0.0.18
-        version: 0.0.18
+        specifier: 0.0.19
+        version: 0.0.19
       zod:
         specifier: ^4.1.1
         version: 4.4.3
@@ -27,11 +27,11 @@ importers:
 
 packages:
 
-  '@samarthmn/doc-yantra-office@0.0.18':
-    resolution: {integrity: sha512-BcR7eEOpE+T2ocYOfJeoN2eylxcjlJ080W4uzWE+VcmQjsujBN3qjkL9lGvePjeaIA0KjkxSgqzLPlL75qy+SA==, tarball: https://npm.pkg.github.com/download/@samarthmn/doc-yantra-office/0.0.18/9164c8c2b467843f20ab800d4c74d6984a10cbb1}
+  '@samarthmn/doc-yantra-office@0.0.19':
+    resolution: {integrity: sha512-BcR7eEOpE+T2ocYOfJeoN2eylxcjlJ080W4uzWE+VcmQjsujBN3qjkL9lGvePjeaIA0KjkxSgqzLPlL75qy+SA==, tarball: https://npm.pkg.github.com/download/@samarthmn/doc-yantra-office/0.0.19/9164c8c2b467843f20ab800d4c74d6984a10cbb1}
 
-  '@samarthmn/doc-yantra@0.0.18':
-    resolution: {integrity: sha512-rveQYAjyGOhVbSmqma1w2bzMNgARWCI4lST6BXcH7wBHoSF5eNfoN3oS06XAOin0YmLBuMum4F/4QTe9XU+/tw==, tarball: https://npm.pkg.github.com/download/@samarthmn/doc-yantra/0.0.18/17e1f64cf7f4a23eaf86508aa4b77471d2b6113b}
+  '@samarthmn/doc-yantra@0.0.19':
+    resolution: {integrity: sha512-rveQYAjyGOhVbSmqma1w2bzMNgARWCI4lST6BXcH7wBHoSF5eNfoN3oS06XAOin0YmLBuMum4F/4QTe9XU+/tw==, tarball: https://npm.pkg.github.com/download/@samarthmn/doc-yantra/0.0.19/17e1f64cf7f4a23eaf86508aa4b77471d2b6113b}
 
   '@types/node@20.19.43':
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
@@ -49,9 +49,9 @@ packages:
 
 snapshots:
 
-  '@samarthmn/doc-yantra-office@0.0.18': {}
+  '@samarthmn/doc-yantra-office@0.0.19': {}
 
-  '@samarthmn/doc-yantra@0.0.18': {}
+  '@samarthmn/doc-yantra@0.0.19': {}
 
   '@types/node@20.19.43':
     dependencies:
