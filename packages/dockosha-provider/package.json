@@ -1,6 +1,6 @@
 {
   "name": "@samarthmn/dockosha-provider-docyantra",
-  "version": "0.0.19",
+  "version": "0.0.20",
   "description": "Private DocYantra document-processing provider for DocKosha",
   "repository": {
     "type": "git",
@@ -27,8 +27,8 @@
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@samarthmn/doc-yantra": "0.0.19",
-    "@samarthmn/doc-yantra-office": "0.0.19",
+    "@samarthmn/doc-yantra": "0.0.20",
+    "@samarthmn/doc-yantra-office": "0.0.20",
     "zod": "^4.1.1"
   },
   "devDependencies": {
