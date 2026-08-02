@@ -30,11 +30,19 @@ const PKG = join(ROOT, "pdf-core", "wasm", "pkg");
 const PACKAGED_FONTS = [
   "LiberationSans-Regular.ttf",
   "LiberationSans-Bold.ttf",
+  "LiberationSans-Italic.ttf",
+  "LiberationSans-BoldItalic.ttf",
   "LiberationMono-Regular.ttf",
   "NotoSansCJKsc-Regular.otf",
   "NotoSansCJKtc-Regular.otf",
   "NotoSansCJKjp-Regular.otf",
   "NotoSansCJKkr-Regular.otf",
+  // Serif pan-CJK siblings: Word's Song/Ming/Mincho/Batang lineages are
+  // serif; the office provider substitutes these faces for them.
+  "NotoSerifCJKsc-Regular.otf",
+  "NotoSerifCJKtc-Regular.otf",
+  "NotoSerifCJKjp-Regular.otf",
+  "NotoSerifCJKkr-Regular.otf",
   "NotoSansArabic-Variable.ttf",
   "NotoSansDevanagari-Variable.ttf",
   "NotoSansThai-Variable.ttf",

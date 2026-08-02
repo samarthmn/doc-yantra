@@ -391,6 +391,11 @@ struct RunStyle {
     #[cfg(feature = "fidelity-diagnostics")]
     family_name: String,
     direct_size_smaller_than_paragraph: bool,
+    /// The source asked for bold (w:b) — kept so per-glyph coverage
+    /// fallbacks can re-evaluate synthetic bolding for their own face.
+    requested_bold: bool,
+    /// Requested bold on a face without a bold style (weight < 600).
+    synthetic_bold: bool,
     size_pt: f64,
     color: Rgba,
     background: Option<Rgba>,
@@ -777,12 +782,33 @@ fn layout_paragraph_with_wrap_context(
     // on the paragraph's style itself outranks the list level (chinese
     // claims ground truth), while one merely inherited through basedOn
     // (e.g. ListParagraph's 720) must not shadow the numbering definition.
-    let own_style_indent = para
+    //
+    // That style-over-level rank holds only while the style's own numbering
+    // is in effect. A direct `w:numPr` that references a DIFFERENT list than
+    // the style's promotes the referenced level's indent above the style's
+    // own `w:ind` — the style indent belonged to the list it bound (korean
+    // ground truth: AppBody-Description binds the [000x] label list with
+    // ind 357/357, and its multi-level list paragraphs override with
+    // numId 5, whose level indents 1260/1800/2520 Word honors).
+    let own_style = para
         .props
         .style_id
         .as_deref()
-        .and_then(|id| doc.styles.get(id))
-        .map(|style| &style.ppr.indent);
+        .and_then(|id| doc.styles.get(id));
+    let direct_numbering_overrides_style_list = para
+        .props
+        .numbering
+        .filter(|reference| reference.num_id != 0)
+        .is_some_and(|reference| {
+            own_style
+                .map(|style| style.ppr.numbering)
+                .is_none_or(|style_num| {
+                    style_num.is_none_or(|style_num| style_num.num_id != reference.num_id)
+                })
+        });
+    let own_style_indent = own_style
+        .map(|style| &style.ppr.indent)
+        .filter(|_| !direct_numbering_overrides_style_list);
     let label_left = label.as_ref().and_then(|l| l.left_pt);
     let label_hanging = label.as_ref().and_then(|l| l.hanging_pt);
     let direct_indent = &para.props.indent;
@@ -1690,7 +1716,100 @@ fn flatten(
     flatten_inlines(
         doc, warnings, para, &para.runs, &context, field_ctx, &mut atoms,
     )?;
+    apply_east_asian_auto_space(doc, para, &mut atoms);
     Ok(atoms)
+}
+
+/// Word's automatic inter-script spacing (`w:autoSpaceDE`/`w:autoSpaceDN`,
+/// both ON by default): an eighth of an em between adjacent East Asian
+/// letters and Latin letters (DE) or digits (DN) that have no authored space
+/// between them. The gap rides on the left glyph's advance, sized by the East
+/// Asian side's font size. If the pair splits across a line break the
+/// line-final advance is invisible; the sub-point measurement residue this
+/// leaves in justification is far below reading-zoom visibility.
+fn apply_east_asian_auto_space(doc: &WordDoc, para: &Paragraph, atoms: &mut [Atom]) {
+    let eff = doc.styles.para_props(&para.props);
+    let de = eff.auto_space_de.unwrap_or(true);
+    let dn = eff.auto_space_dn.unwrap_or(true);
+    if !de && !dn {
+        return;
+    }
+    const AUTO_SPACE_EM: f64 = 0.125;
+
+    let mut previous: Option<usize> = None;
+    for index in 0..atoms.len() {
+        match &atoms[index] {
+            Atom::Glyph { .. } => {}
+            // Bookmarks are geometry-transparent; anything else (tabs,
+            // breaks, images, composites) separates the pair.
+            Atom::Bookmark(_) => continue,
+            _ => {
+                previous = None;
+                continue;
+            }
+        }
+        if let Some(left_index) = previous {
+            let (Atom::Glyph {
+                ch: left_ch,
+                is_space: left_space,
+                style: left_style,
+                ..
+            }, Atom::Glyph {
+                ch: right_ch,
+                is_space: right_space,
+                style: right_style,
+                ..
+            }) = (&atoms[left_index], &atoms[index])
+            else {
+                unreachable!("previous/current indices always name glyph atoms")
+            };
+            let gap = if *left_space || *right_space {
+                None
+            } else if east_asian_letter(*left_ch) && qualifies_latin_side(*right_ch, de, dn) {
+                Some(AUTO_SPACE_EM * left_style.size_pt)
+            } else if east_asian_letter(*right_ch) && qualifies_latin_side(*left_ch, de, dn) {
+                Some(AUTO_SPACE_EM * right_style.size_pt)
+            } else {
+                None
+            };
+            if let Some(gap) = gap
+                && let Atom::Glyph { advance_pt, .. } = &mut atoms[left_index]
+            {
+                *advance_pt += gap;
+            }
+        }
+        previous = Some(index);
+    }
+}
+
+/// The Latin side of an auto-space pair: letters under `autoSpaceDE`, ASCII
+/// digits under `autoSpaceDN`.
+fn qualifies_latin_side(ch: char, de: bool, dn: bool) -> bool {
+    if dn && ch.is_ascii_digit() {
+        return true;
+    }
+    de && (ch.is_ascii_alphabetic()
+        || (matches!(ch, '\u{00C0}'..='\u{024F}') && ch.is_alphabetic()))
+}
+
+/// East Asian letters for automatic inter-script spacing: Han, Kana,
+/// Bopomofo, and Hangul letter blocks. CJK punctuation, fullwidth forms, and
+/// symbols are deliberately excluded — Word does not auto-space punctuation.
+fn east_asian_letter(ch: char) -> bool {
+    matches!(u32::from(ch),
+        0x1100..=0x11FF          // Hangul Jamo
+        | 0x3041..=0x30FF        // Hiragana and Katakana
+        | 0x3105..=0x312F        // Bopomofo
+        | 0x31A0..=0x31BF        // Bopomofo Extended
+        | 0x31F0..=0x31FF        // Katakana Phonetic Extensions
+        | 0x3400..=0x4DBF        // CJK Extension A
+        | 0x4E00..=0x9FFF        // CJK Unified Ideographs
+        | 0xA960..=0xA97F        // Hangul Jamo Extended-A
+        | 0xAC00..=0xD7AF        // Hangul Syllables
+        | 0xD7B0..=0xD7FF        // Hangul Jamo Extended-B
+        | 0xF900..=0xFAFF        // CJK Compatibility Ideographs
+        | 0x20000..=0x3134F      // CJK Extensions B through G
+    )
 }
 
 /// Measures the paragraph with the same resolved run properties and shaper as
@@ -1928,6 +2047,7 @@ fn flatten_run(
         _ => (base_size, 0.0),
     };
     let (u_pos, u_thick) = metrics.underline_pt(size);
+    let requested_bold = eff.bold == Some(true);
     let style = Rc::new(RunStyle {
         face,
         #[cfg(feature = "fidelity-diagnostics")]
@@ -1936,6 +2056,8 @@ fn flatten_run(
             .props
             .size_pt
             .is_some_and(|direct| direct + 0.01 < paragraph_size),
+        requested_bold,
+        synthetic_bold: requested_bold && font_face.weight < 600,
         size_pt: size,
         color: resolve_color(&eff),
         background: eff.highlight.or(eff.shading).map(Rgba::opaque),
@@ -2689,6 +2811,9 @@ fn fallback_style(fonts: &FontDb, face: FaceId, base: &RunStyle) -> Rc<RunStyle>
             .map(|font| font.family_name.clone())
             .unwrap_or_else(|| base.family_name.clone()),
         direct_size_smaller_than_paragraph: base.direct_size_smaller_than_paragraph,
+        requested_bold: base.requested_bold,
+        synthetic_bold: base.requested_bold
+            && fonts.face(face).is_some_and(|font| font.weight < 600),
         size_pt: base.size_pt,
         color: base.color,
         background: base.background,
@@ -3758,6 +3883,7 @@ fn build_run(style: &RunStyle, glyphs: Vec<PlacedGlyph>, rtl: bool) -> GlyphRun 
         face: style.face,
         size_pt: style.size_pt,
         color: style.color,
+        synthetic_bold: style.synthetic_bold,
         base_direction: Some(if rtl {
             text_core::Direction::Rtl
         } else {

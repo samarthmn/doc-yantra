@@ -47,7 +47,12 @@ const merged = pdf.merge_pdfs(
 
 The watermark payload keeps the exact shape of the retired DocYantra
 service's `/docyantra/pdf/merge` endpoint, so consumers migrated without
-reshaping data.
+reshaping data. One deliberate refinement: when a grid payload omits
+`xSpacingPt`/`ySpacingPt`, the default spacing now scales with each page's
+box relative to US-Letter (Letter output is byte-identical to the historical
+fixed 320pt lattice; slide-sized and other non-Letter pages get the same
+visual stamp density instead of one sparse row). Explicit spacing values are
+honored exactly as before.
 
 ## Developing the engine
 

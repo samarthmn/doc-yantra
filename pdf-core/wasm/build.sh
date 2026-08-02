@@ -81,6 +81,8 @@ mkdir -p pkg/fonts
 cp \
   ../../office-core/fonts/liberation/LiberationSans-Regular.ttf \
   ../../office-core/fonts/liberation/LiberationSans-Bold.ttf \
+  ../../office-core/fonts/liberation/LiberationSans-Italic.ttf \
+  ../../office-core/fonts/liberation/LiberationSans-BoldItalic.ttf \
   ../../office-core/fonts/liberation/LiberationMono-Regular.ttf \
   pkg/fonts/
 cp fonts/* pkg/fonts/

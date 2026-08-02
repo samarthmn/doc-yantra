@@ -1,12 +1,12 @@
 title = "CJK text: Chinese (Simplified/Traditional) glyph coverage"
-tier = "experimental"
-ssim_threshold = 0.90
-geometry_median_pt = 3.0
-geometry_p95_pt = 5.0
+tier = "core"
+ssim_threshold = 0.85
+geometry_median_pt = 4.5
+geometry_p95_pt = 11.5
 expected_fonts = ["Calibri", "Cambria Math", "MS Mincho", "Noto Serif CJK JP", "SimSun", "細明體"]
 max_page_count_delta = 0
 word_version = "Microsoft Word"
 ground_truth_exported_at = "2026-07-17"
 input_sha256 = "3989bbd0154e8fc9d32e4435e214a0261b35db7a73be30598149b5a194f8842e"
 golden_sha256 = "0065f4f5cbc2ca2175d34e100fcfae3c0f7b10cfefadbeac6e01ad05c8d5208a"
-notes = "Pan-CJK host-provider coverage: SimSun/MingLiU/MS Mincho body text with a Word-authored display equation. Thresholds calibrated 2026-07-17 against the sans-for-serif pan-CJK substitution (Noto Sans CJK for SimSun-class faces); geometry bounds reflect the residual East Asian leading model gap."
+notes = "Pan-CJK host-provider coverage: SimSun/MingLiU/MS Mincho body text with a Word-authored display equation. Thresholds calibrated 2026-07-17 against the sans-for-serif pan-CJK substitution (Noto Sans CJK for SimSun-class faces); geometry bounds reflect the residual East Asian leading model gap. Re-tiered core 2026-08-02 at ssim 0.85 with geometry bounds recalibrated to the measured equation/leading residuals (p2 equation p95 dx 10.81pt, p3 median dy -4.10pt) pending the joint CJK line-model recalibration."

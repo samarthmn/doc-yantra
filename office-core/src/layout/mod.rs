@@ -221,6 +221,11 @@ pub struct GlyphRun {
     pub size_pt: f64,
     /// Fill color.
     pub color: Rgba,
+    /// True when the source requested bold but the resolved face has no bold
+    /// style (weight < 600) — the emitter then strokes the fill outline the
+    /// way GDI/pdfium embolden regular-only faces (classic CJK families ship
+    /// a single Regular weight; Word still renders their bold runs bold).
+    pub synthetic_bold: bool,
     /// Explicit paragraph base direction. `None` uses Unicode first-strong
     /// detection; Office bidi containers set this to RTL.
     pub base_direction: Option<text_core::Direction>,

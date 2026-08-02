@@ -930,6 +930,7 @@ fn push_header_footer_run(
             face,
             size_pt: 9.0,
             color: Rgba::opaque(Rgb::new(0, 0, 0)),
+            synthetic_bold: false,
             base_direction: None,
             glyphs,
             underline: None,
@@ -1621,6 +1622,10 @@ fn render_cell_text(
                     run_face.expect("cell text run has a face"),
                     size,
                     text_color,
+                    style.bold
+                        && run_face
+                            .and_then(|face| doc.fonts.face(face))
+                            .is_some_and(|font| font.weight < 600),
                     std::mem::take(&mut run_glyphs),
                 );
                 run_start = cursor;
@@ -1634,7 +1639,15 @@ fn render_cell_text(
         }
         if let Some(face) = run_face {
             push_cell_text_run(
-                page, run_start, baseline, face, size, text_color, run_glyphs,
+                page,
+                run_start,
+                baseline,
+                face,
+                size,
+                text_color,
+                style.bold
+                    && doc.fonts.face(face).is_some_and(|font| font.weight < 600),
+                run_glyphs,
             );
         }
     }
@@ -1677,6 +1690,7 @@ fn push_cell_text_run(
     face: FaceId,
     size_pt: f64,
     color: Rgba,
+    synthetic_bold: bool,
     glyphs: Vec<crate::layout::PlacedGlyph>,
 ) {
     page.items.push(Positioned {
@@ -1686,6 +1700,7 @@ fn push_cell_text_run(
             face,
             size_pt,
             color,
+            synthetic_bold,
             base_direction: None,
             glyphs,
             underline: None,

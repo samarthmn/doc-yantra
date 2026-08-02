@@ -93,19 +93,38 @@ fn format_for(extension: &str) -> Option<OfficeFormat> {
     OfficeFormat::from_extension(&extension.to_ascii_lowercase())
 }
 
+/// Resolves the caller's extension, giving the legacy OLE2 binary Office
+/// extensions their documented typed `legacy_format` envelope (DocKosha parses
+/// the `unsupported:` prefix to record the fallback reason) instead of the
+/// generic invalid-extension error reserved for genuinely unknown inputs.
+fn resolve_format(extension: &str) -> Result<OfficeFormat, JsError> {
+    if let Some(format) = format_for(extension) {
+        return Ok(format);
+    }
+    let lower = extension.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "doc" | "dot" | "ppt" | "pot" | "pps" | "xls" | "xlt"
+    ) {
+        return Err(office_err(&OfficeError::unsupported(
+            UnsupportedCode::LegacyFormat,
+            format!("legacy binary Office format .{lower}; convert to OOXML (.docx/.pptx/.xlsx)"),
+        )));
+    }
+    Err(envelope(
+        "invalid_input",
+        &format!("invalid: unsupported extension {extension}"),
+        None,
+    ))
+}
+
 /// The DocProfile JSON for a document. Never throws for well-formed calls;
 /// container-level failures serialize via `DocProfile::from_error`. Oversized
 /// input returns the `input_too_large` profile. The generated JS package
 /// performs this check before copying the input into wasm memory.
 #[wasm_bindgen]
 pub fn office_profile(bytes: &[u8], extension: &str) -> Result<String, JsError> {
-    let Some(format) = format_for(extension) else {
-        return Err(envelope(
-            "invalid_input",
-            &format!("invalid: unsupported extension {extension}"),
-            None,
-        ));
-    };
+    let format = resolve_format(extension)?;
     if bytes.len() > MAX_INPUT_BYTES {
         let e = OfficeError::unsupported(
             UnsupportedCode::InputTooLarge,
@@ -124,13 +143,7 @@ pub fn office_profile(bytes: &[u8], extension: &str) -> Result<String, JsError> 
 /// document-embedded faces are omitted.
 #[wasm_bindgen]
 pub fn office_font_requests(bytes: &[u8], extension: &str) -> Result<String, JsError> {
-    let Some(format) = format_for(extension) else {
-        return Err(envelope(
-            "invalid_input",
-            &format!("invalid: unsupported extension {extension}"),
-            None,
-        ));
-    };
+    let format = resolve_format(extension)?;
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(envelope(
             "resource_limit",
@@ -151,13 +164,7 @@ pub fn office_font_requests(bytes: &[u8], extension: &str) -> Result<String, JsE
 /// `"invalid: …"` / `"internal: …"` otherwise. Same 50 MiB pre-copy guard.
 #[wasm_bindgen]
 pub fn office_to_pdf(bytes: &[u8], extension: &str) -> Result<Vec<u8>, JsError> {
-    let Some(format) = format_for(extension) else {
-        return Err(envelope(
-            "invalid_input",
-            &format!("invalid: unsupported extension {extension}"),
-            None,
-        ));
-    };
+    let format = resolve_format(extension)?;
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(envelope(
             "resource_limit",
@@ -187,13 +194,7 @@ pub fn office_profile_with_options(
     extension: &str,
     options_json: &str,
 ) -> Result<String, JsError> {
-    let Some(format) = format_for(extension) else {
-        return Err(envelope(
-            "invalid_input",
-            &format!("invalid: unsupported extension {extension}"),
-            None,
-        ));
-    };
+    let format = resolve_format(extension)?;
     if bytes.len() > MAX_INPUT_BYTES {
         let error = OfficeError::unsupported(
             UnsupportedCode::InputTooLarge,
@@ -217,13 +218,7 @@ pub fn office_to_pdf_with_options(
     extension: &str,
     options_json: &str,
 ) -> Result<Vec<u8>, JsError> {
-    let Some(format) = format_for(extension) else {
-        return Err(envelope(
-            "invalid_input",
-            &format!("invalid: unsupported extension {extension}"),
-            None,
-        ));
-    };
+    let format = resolve_format(extension)?;
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(envelope(
             "resource_limit",

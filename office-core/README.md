@@ -65,7 +65,10 @@ Other representative envelope misses include:
 - charts, SmartArt, OLE, WordArt, equations
 - PPTX non-rectangular preset geometry and custom geometry
 - complex-script (Arabic/Indic/Thai) and RTL; CJK without a covering font
-  (hosts may register the pan-CJK Noto Sans CJK faces — see CONSUMING.md)
+  (hosts register the pan-CJK Noto Sans/Serif CJK faces — serif lineages such
+  as SimSun/MingLiU/Mincho/Batang substitute the Serif sibling, bold CJK runs
+  render with synthetic stroke emboldening, and `w:autoSpaceDE`/`DN` East
+  Asian auto-spacing is applied — see CONSUMING.md)
 - image crops and unsupported image containers (GIF/EMF/WMF/TIFF)
 - xlsx: uncached formulas, sheet drawings/charts, conditional formatting
 - packages past the decompression budgets (entry count, 64 MiB per part,

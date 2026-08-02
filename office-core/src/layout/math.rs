@@ -416,6 +416,7 @@ fn text_box(doc: &WordDoc, text: &str, size: f64, upright: bool) -> Result<Equat
                 face: glyph_face,
                 size_pt: size,
                 color: Rgba::opaque(Rgb::new(0, 0, 0)),
+                synthetic_bold: false,
                 base_direction: None,
                 glyphs,
                 underline: None,

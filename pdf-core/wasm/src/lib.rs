@@ -282,8 +282,10 @@ fn spec_from_payload(
         } else {
             0.0
         },
-        x_spacing_pt: payload.x_spacing_pt.unwrap_or(320.0),
-        y_spacing_pt: payload.y_spacing_pt.unwrap_or(320.0),
+        // Absent spacing = auto (page-proportional Letter-calibrated grid);
+        // explicit payload values keep the historical fixed lattice.
+        x_spacing_pt: payload.x_spacing_pt.unwrap_or(f64::NAN),
+        y_spacing_pt: payload.y_spacing_pt.unwrap_or(f64::NAN),
         offset_x_pt: payload.offset_x_pt.unwrap_or(0.0),
         offset_y_pt: payload.offset_y_pt.unwrap_or(0.0),
         lines: effective_lines,

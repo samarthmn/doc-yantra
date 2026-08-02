@@ -204,6 +204,12 @@ pub struct ParaProps {
     pub shading: Option<Rgb>,
     /// Suppress spacing between same-style paragraphs.
     pub contextual_spacing: bool,
+    /// Automatic spacing between East Asian and Latin text (`w:autoSpaceDE`).
+    /// Word's default is ON when the element is absent.
+    pub auto_space_de: Option<bool>,
+    /// Automatic spacing between East Asian text and digits (`w:autoSpaceDN`).
+    /// Word's default is ON when the element is absent.
+    pub auto_space_dn: Option<bool>,
     /// Outline level 0–8 (Heading 1 = 0); drives PDF bookmarks.
     pub outline_lvl: Option<u8>,
     /// Floating paragraph frame (`w:framePr`) in the supported common subset.
@@ -864,6 +870,8 @@ impl ParaProps {
                 self.tabs.clone()
             },
             numbering: self.numbering.or(base.numbering),
+            auto_space_de: self.auto_space_de.or(base.auto_space_de),
+            auto_space_dn: self.auto_space_dn.or(base.auto_space_dn),
             keep_next: self.keep_next || base.keep_next,
             keep_lines: self.keep_lines || base.keep_lines,
             page_break_before: self.page_break_before || base.page_break_before,
@@ -3339,14 +3347,14 @@ pub(crate) fn parse_para_props_checked(ppr: Node, tab_limit: usize) -> Result<Pa
             }
             "framePr" => props.frame = Some(parse_frame_props(c)),
             "rPr" => props.mark_rpr = Some(parse_run_props(c)),
+            "autoSpaceDE" => props.auto_space_de = Some(toggle_child(c)),
+            "autoSpaceDN" => props.auto_space_dn = Some(toggle_child(c)),
             "suppressLineNumbers"
             | "suppressAutoHyphens"
             | "kinsoku"
             | "wordWrap"
             | "overflowPunct"
             | "topLinePunct"
-            | "autoSpaceDE"
-            | "autoSpaceDN"
             | "adjustRightInd"
             | "snapToGrid"
             | "mirrorIndents"

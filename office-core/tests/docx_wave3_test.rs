@@ -464,6 +464,9 @@ fn visible_wml_properties_never_disappear_through_property_catch_alls() {
         );
     };
 
+    // autoSpaceDE/autoSpaceDN left this refusal list when East Asian
+    // automatic spacing was implemented (both toggles are honored, Word
+    // default ON) — see cjk_autospace_bold_test.rs.
     for property in [
         "suppressLineNumbers",
         "suppressAutoHyphens",
@@ -471,8 +474,6 @@ fn visible_wml_properties_never_disappear_through_property_catch_alls() {
         "wordWrap",
         "overflowPunct",
         "topLinePunct",
-        "autoSpaceDE",
-        "autoSpaceDN",
         "adjustRightInd",
         "snapToGrid",
         "mirrorIndents",

@@ -61,16 +61,22 @@ const isOfficePackageModule = (value: unknown): value is OfficePackageModule =>
   typeof value.FontsourceProvider === "function" &&
   typeof value.MemoryFontCache === "function";
 
+// Every metric-compatible family is version-pinned: "latest" let Fontsource
+// ship an Arimo whose Windows metrics no longer matched Arial (2136/797 vs
+// 1854/434, measured 2026-08-02), silently inflating line boxes. The pins
+// are the fidelity-harness fonts.lock versions whose metrics are verified.
+// (Arial-class requests are additionally served by packaged Liberation Sans —
+// see office-font-provider.ts — so Arimo remains only for literal requests.)
 const FONTSOURCE_PACKAGE_VERSION_PINS = {
-  arimo: "latest",
+  arimo: "5.2.8",
   caladea: "5.2.8",
   carlito: "5.2.8",
-  cousine: "latest",
+  cousine: "5.2.7",
   gelasio: "5.2.8",
   "noto-sans-math": "5.2.9",
   "noto-sans-symbols": "5.2.11",
   "noto-sans-symbols-2": "5.2.8",
-  tinos: "latest",
+  tinos: "5.2.7",
   ubuntu: "5.2.8",
   "ubuntu-mono": "5.2.8",
 } as const;

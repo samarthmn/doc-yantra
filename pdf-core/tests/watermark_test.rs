@@ -3,7 +3,7 @@
 
 #![cfg(feature = "pdfium")]
 
-use lopdf::{Document, Object};
+use lopdf::{Document, Object, Stream, dictionary};
 use pdf_core::PdfCoreError;
 use pdf_core::testkit::sample_pdf;
 use pdf_core::watermark::{
@@ -162,6 +162,111 @@ fn default_watermark_stamps_every_page_and_still_loads() {
         .load_pdf_from_byte_slice(&out, None)
         .expect("pdfium load");
     assert_eq!(pdoc.pages().len(), 3);
+}
+
+/// Builds a single-page PDF with an arbitrary MediaBox (pt).
+fn custom_size_pdf(width: f64, height: f64) -> Vec<u8> {
+    let mut doc = Document::with_version("1.7");
+    let pages_id = doc.new_object_id();
+    let content_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), width.into(), height.into()],
+        "Contents" => content_id,
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).expect("save custom pdf");
+    out
+}
+
+/// Distinct on-page anchor columns/rows from the emitted glyph `Tm` x/y
+/// coordinates, clustered to the nearest 10pt so per-glyph advances collapse
+/// into their anchor.
+fn visible_stamp_clusters(bytes: &[u8], width: f64, height: f64) -> (usize, usize) {
+    let content = page_contents(bytes).remove(0);
+    let mut xs: Vec<i64> = Vec::new();
+    let mut ys: Vec<i64> = Vec::new();
+    for line in content.lines() {
+        let Some(rest) = line.strip_suffix(" Tm") else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() != 6 {
+            continue;
+        }
+        let (Ok(x), Ok(y)) = (parts[4].parse::<f64>(), parts[5].parse::<f64>()) else {
+            continue;
+        };
+        if x < 0.0 || x > width || y < 0.0 || y > height {
+            continue;
+        }
+        xs.push((x / 60.0).round() as i64);
+        ys.push((y / 60.0).round() as i64);
+    }
+    xs.sort_unstable();
+    xs.dedup();
+    ys.sort_unstable();
+    ys.dedup();
+    (xs.len(), ys.len())
+}
+
+#[test]
+fn default_grid_spacing_covers_slide_sized_pages() {
+    // 720x405pt (16:9 slide export). The Letter-calibrated fixed 320pt default
+    // left exactly one visible row of stamps here; the page-proportional
+    // default must yield a real grid (>=2 distinct columns AND rows).
+    let input = custom_size_pdf(720.0, 405.0);
+    let spec = WatermarkSpec {
+        pattern: Pattern::Grid,
+        rotation_deg: 0.0,
+        lines: vec!["DRAFT".to_string(), "DO NOT COPY".to_string()],
+        ..WatermarkSpec::default()
+    };
+    let out = apply_watermark(&input, &spec).expect("watermark slide page");
+    let (cols, rows) = visible_stamp_clusters(&out, 720.0, 405.0);
+    assert!(
+        cols >= 2 && rows >= 2,
+        "expected >=2x2 visible stamp grid on a 720x405 page, got {cols}x{rows}"
+    );
+}
+
+#[test]
+fn default_grid_spacing_is_letter_invariant() {
+    // On US-Letter pages the adaptive default must reproduce the historical
+    // 320pt lattice byte-for-byte (spacing scale factor is exactly 1).
+    let input = sample_pdf(&["letter"]);
+    let auto_spec = WatermarkSpec {
+        pattern: Pattern::Grid,
+        rotation_deg: 0.0,
+        lines: vec!["DRAFT".to_string()],
+        ..WatermarkSpec::default()
+    };
+    let explicit_spec = WatermarkSpec {
+        x_spacing_pt: 320.0,
+        y_spacing_pt: 320.0,
+        ..auto_spec.clone()
+    };
+    let auto_out = apply_watermark(&input, &auto_spec).expect("auto");
+    let explicit_out = apply_watermark(&input, &explicit_spec).expect("explicit");
+    assert_eq!(
+        page_contents(&auto_out),
+        page_contents(&explicit_out),
+        "default spacing on Letter must equal the historical explicit 320pt lattice"
+    );
 }
 
 #[test]

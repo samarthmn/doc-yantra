@@ -84,6 +84,28 @@ test("office-core wasm package", async (t) => {
     assert.equal(out.subarray(0, 5).toString(), "%PDF-");
   });
 
+  await t.test("legacy binary extensions throw the typed legacy_format envelope", () => {
+    const bytes = readFileSync(join(MOCK, "doc/file1.doc"));
+    for (const extension of ["doc", "ppt", "xls"]) {
+      assert.throws(
+        () => engine.office_to_pdf(bytes, extension),
+        (error) => {
+          const envelope = JSON.parse(error.message);
+          assert.equal(envelope.code, "unsupported_format");
+          assert.match(envelope.message, /^unsupported:legacy_format: /);
+          assert.equal(envelope.detail.reason, "legacy_format");
+          return true;
+        },
+        `.${extension} must fail with the documented legacy_format code`,
+      );
+    }
+    // A genuinely unknown extension keeps the invalid-extension error.
+    assert.throws(
+      () => engine.office_to_pdf(bytes, "zip"),
+      /invalid: unsupported extension zip/,
+    );
+  });
+
   await t.test("oversized input → input_too_large profile without throwing", () => {
     const big = new Uint8Array(51 * 1024 * 1024);
     const p = JSON.parse(engine.office_profile(big, "docx"));

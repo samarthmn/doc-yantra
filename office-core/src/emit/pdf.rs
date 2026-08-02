@@ -980,6 +980,28 @@ fn draw_item(
     Ok(())
 }
 
+/// Stroke width (em fraction) used to embolden a regular-only face when the
+/// source asked for bold: matches the pdfium/mupdf synthetic-bold convention
+/// (size/30), which tracks GDI's double-strike weight gain closely enough
+/// that Word-rendered bold CJK and our stroked regular read as the same
+/// weight class at reading zoom.
+const SYNTHETIC_BOLD_STROKE_EM: f64 = 1.0 / 30.0;
+
+/// Fill-only for regular runs; fill+stroke in the run color for synthetic
+/// bold (the emitted stroke width thickens each stem by half the width per
+/// side, emulating the missing bold face).
+fn apply_text_paint(content: &mut Content, run: &crate::layout::GlyphRun) {
+    if run.synthetic_bold {
+        content.set_text_rendering_mode(TextRenderingMode::FillStroke);
+        set_fill(content, run.color);
+        set_stroke(content, run.color);
+        content.set_line_width((run.size_pt * SYNTHETIC_BOLD_STROKE_EM) as f32);
+    } else {
+        content.set_text_rendering_mode(TextRenderingMode::Fill);
+        set_fill(content, run.color);
+    }
+}
+
 fn set_fill(content: &mut Content, c: Rgba) {
     content.set_fill_rgb(c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0);
 }
@@ -1174,8 +1196,7 @@ fn draw_glyphs_impl(
         for glyph in &run.glyphs {
             let cid = painted_cid(font, glyph);
             content.begin_text();
-            content.set_text_rendering_mode(TextRenderingMode::Fill);
-            set_fill(content, run.color);
+            apply_text_paint(content, run);
             content.set_font(Name(font_res_name(idx).as_bytes()), run.size_pt as f32);
             content.set_text_matrix([
                 1.0,
@@ -1193,8 +1214,7 @@ fn draw_glyphs_impl(
     }
 
     content.begin_text();
-    content.set_text_rendering_mode(TextRenderingMode::Fill);
-    set_fill(content, run.color);
+    apply_text_paint(content, run);
     content.set_font(Name(font_res_name(idx).as_bytes()), run.size_pt as f32);
     content.set_text_matrix([1.0, 0.0, 0.0, 1.0, pos.x_pt as f32, baseline as f32]);
 
@@ -1302,6 +1322,10 @@ fn draw_glyph_outlines(
     let scale = run.size_pt as f32 / f32::from(face.units_per_em().max(1));
     let mut cursor = pos.x_pt;
     set_fill(content, run.color);
+    if run.synthetic_bold {
+        set_stroke(content, run.color);
+        content.set_line_width((run.size_pt * SYNTHETIC_BOLD_STROKE_EM) as f32);
+    }
     for glyph in &run.glyphs {
         let subset_gid = font.subset.remap.get(&glyph.gid).copied().ok_or_else(|| {
             OfficeError::Font(format!(
@@ -1322,7 +1346,11 @@ fn draw_glyph_outlines(
                 .outline_glyph(GlyphId(subset_gid), &mut outline)
                 .is_some();
             if outlined {
-                outline.content.fill_nonzero();
+                if run.synthetic_bold {
+                    outline.content.fill_nonzero_and_stroke();
+                } else {
+                    outline.content.fill_nonzero();
+                }
             }
             outlined
         };
@@ -1359,10 +1387,14 @@ fn draw_cff_mixed_run(
     let scale = run.size_pt as f32 / f32::from(face.units_per_em().max(1));
     let mut cursor = pos.x_pt;
     set_fill(content, run.color);
+    if run.synthetic_bold {
+        set_stroke(content, run.color);
+        content.set_line_width((run.size_pt * SYNTHETIC_BOLD_STROKE_EM) as f32);
+    }
     for glyph in &run.glyphs {
         if let Some(code) = painted_code(font, glyph) {
             content.begin_text();
-            content.set_text_rendering_mode(TextRenderingMode::Fill);
+            apply_text_paint(content, run);
             content.set_font(
                 Name(font_res_name(font_index).as_bytes()),
                 run.size_pt as f32,
@@ -1397,7 +1429,11 @@ fn draw_cff_mixed_run(
                     .outline_glyph(GlyphId(subset_gid), &mut outline)
                     .is_some();
                 if outlined {
-                    outline.content.fill_nonzero();
+                    if run.synthetic_bold {
+                        outline.content.fill_nonzero_and_stroke();
+                    } else {
+                        outline.content.fill_nonzero();
+                    }
                 }
                 outlined
             };
@@ -2276,6 +2312,7 @@ mod tests {
                 x_pt: 10.0,
                 y_pt: 20.0,
                 item: Item::Glyphs(GlyphRun {
+                    synthetic_bold: false,
                     face,
                     size_pt: 10.0,
                     color: Rgba {
@@ -2508,6 +2545,7 @@ mod tests {
                     face,
                     size_pt: 11.0,
                     color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+                    synthetic_bold: false,
                     base_direction: None,
                     glyphs: vec![PlacedGlyph {
                         gid: 5,
@@ -2544,6 +2582,7 @@ mod tests {
             face,
             size_pt: 12.0,
             color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+            synthetic_bold: false,
             base_direction: None,
             glyphs: vec![
                 PlacedGlyph {
@@ -2619,6 +2658,7 @@ mod tests {
                     face,
                     size_pt: 12.0,
                     color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+                    synthetic_bold: false,
                     base_direction: Some(text_core::Direction::Rtl),
                     glyphs,
                     underline: None,
@@ -2753,6 +2793,7 @@ mod tests {
                     face,
                     size_pt: 12.0,
                     color: Rgba::opaque(crate::oxml::Rgb::new(0, 0, 0)),
+                    synthetic_bold: false,
                     base_direction: None,
                     glyphs: vec![PlacedGlyph {
                         gid: 5,

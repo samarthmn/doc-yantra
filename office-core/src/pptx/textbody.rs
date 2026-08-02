@@ -221,6 +221,8 @@ struct Atom {
     size_pt: f64,
     color: Rgba,
     underline: bool,
+    /// Requested-bold run on a face with no bold style (weight < 600).
+    synthetic_bold: bool,
     ascent_pt: f64,
     line_height_pt: f64,
     link: Option<LinkTarget>,
@@ -392,6 +394,8 @@ fn shape_run(
                 size_pt: size,
                 color,
                 underline: run.underline,
+                synthetic_bold: run.bold == Some(true)
+                    && fonts.face(face).is_some_and(|font| font.weight < 600),
                 ascent_pt: metrics
                     .as_ref()
                     .map(|metrics| metrics.ascent_pt(size))
@@ -416,6 +420,7 @@ fn shape_run(
                 size_pt: size,
                 color,
                 underline: false,
+                synthetic_bold: false,
                 ascent_pt: fonts
                     .face(face)
                     .and_then(|font| font.parsed())
@@ -544,18 +549,18 @@ fn place(
     let mut text_items: Vec<(usize, u8, LineItem)> = Vec::new();
     let mut x = 0.0;
     let mut pending: Vec<PlacedGlyph> = Vec::new();
-    let mut pstyle: Option<(FaceId, f64, Rgba, bool, Option<LinkTarget>)> = None;
+    let mut pstyle: Option<(FaceId, f64, Rgba, bool, bool, Option<LinkTarget>)> = None;
     let mut pending_order: Option<usize> = None;
     let mut px = x;
     let mut line_semantics: BTreeMap<usize, Vec<(f64, AtomSemanticCluster)>> = BTreeMap::new();
 
     let flush = |pending: &mut Vec<PlacedGlyph>,
-                 pstyle: &mut Option<(FaceId, f64, Rgba, bool, Option<LinkTarget>)>,
+                 pstyle: &mut Option<(FaceId, f64, Rgba, bool, bool, Option<LinkTarget>)>,
                  pending_order: &mut Option<usize>,
                  px: f64,
                  items: &mut Vec<LineItem>,
                  text_items: &mut Vec<(usize, u8, LineItem)>| {
-        if let Some((face, size, color, ul, link)) = pstyle.take()
+        if let Some((face, size, color, ul, synthetic_bold, link)) = pstyle.take()
             && !pending.is_empty()
         {
             let underline = ul.then(|| Decor {
@@ -573,6 +578,7 @@ fn place(
                         face,
                         size_pt: size,
                         color,
+                        synthetic_bold,
                         base_direction: Some(if rtl {
                             text_core::Direction::Rtl
                         } else {
@@ -602,13 +608,14 @@ fn place(
         x = segment_x + align_offset;
         for &k in indices {
             let a = &atoms[k];
-            let key = (a.face, a.size_pt, a.color, a.underline, a.link.clone());
+            let key = (a.face, a.size_pt, a.color, a.underline, a.synthetic_bold, a.link.clone());
             let same_style = pstyle.as_ref().is_some_and(|style| {
                 style.0 == key.0
                     && style.1 == key.1
                     && style.2 == key.2
                     && style.3 == key.3
-                    && same_link(style.4.as_ref(), key.4.as_ref())
+                    && style.4 == key.4
+                    && same_link(style.5.as_ref(), key.5.as_ref())
             });
             if !same_style {
                 flush(

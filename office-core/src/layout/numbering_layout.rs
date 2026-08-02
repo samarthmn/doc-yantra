@@ -242,6 +242,7 @@ pub fn build_label(
                 face: glyph_face,
                 size_pt: size,
                 color,
+                synthetic_bold: false,
                 base_direction: None,
                 glyphs: Vec::new(),
                 underline: None,

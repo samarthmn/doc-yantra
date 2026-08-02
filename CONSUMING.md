@@ -160,6 +160,16 @@ the accepted `latest` version policy; resolved hashes and name-table versions
 remain visible in font telemetry. A trusted `fallbackSource` callback may point
 at a commit-pinned Google Fonts mirror.
 
+**Arial metrics caveat.** Fontsource's Arimo artifacts (including the current
+5.2.8 line) carry usWinAscent/Descent 2136/797 instead of Arial's 1854/434,
+which inflates every Arial line box ~26% versus Word (measured 2026-08-02).
+The DocKosha provider therefore serves Arial-class requests from the packaged
+Liberation Sans faces (`@samarthmn/doc-yantra/fonts`, true Arial Windows
+metrics, all four styles) instead of fetched Arimo; a literal `Arimo` request
+still gets Arimo. Hosts wiring `FontsourceProvider` directly inherit the
+inflated Arimo metrics — mirror the replacement if Word-parity line flow
+matters.
+
 Because Google-style `latin`/`latin-ext` subset artifacts strip mathematical
 operators (U+2200–22FF) and most symbol blocks, any request whose `scripts`
 include `symbols` or `math` also fetches pinned supplements — Noto Sans Math
@@ -174,19 +184,27 @@ without falling back to a Latin text face.
 (`no font for CJK` / `missing_glyph`) unless a registered face covers the
 document's CJK code points; nothing CJK is bundled or fetched by default. Since
 0.0.12 the registration caps (engine and host, 24 MiB) admit the pan-CJK
-`Noto Sans CJK {SC,TC,JP,KR}` regional OTFs (~16.5 MiB each) that
-`@samarthmn/doc-yantra` already ships under `fonts/` for pdf-core. A host
-provider can therefore supply them for requests whose `scripts` include
-`"cjk"`, choosing the regional variant from the requested family (DocKosha maps
-common faces — SimSun/YaHei → SC, MingLiU/JhengHei → TC, Mincho/Gothic/Meiryo →
-JP, Malgun/Batang → KR — and defaults to SC; the engine's compatible-mode
-substitution ladder applies the same mapping). Every regional OTF covers the
-full pan-CJK repertoire, so the variant only selects Han-unified glyph styling.
-Emitted PDFs stay small because CFF faces embed as used-glyph `CIDFontType0`
-subsets. Known limits: only the Regular weight ships (bold CJK renders
-regular), vertical text (`w:textDirection`) stays outside the envelope, and
-regional styling for Han-unified text follows the declared family, not
-document language tags.
+regional OTFs that `@samarthmn/doc-yantra` ships under `fonts/` for pdf-core —
+`Noto Sans CJK {SC,TC,JP,KR}` (~16.5 MiB each) and, since 0.0.19, their
+`Noto Serif CJK` siblings (~24 MiB each, Serif2.003, hash-pinned). A host
+provider supplies them for requests whose `scripts` include `"cjk"`. The
+DocKosha provider picks the regional variant from the requested family or the
+request's Windows charset (0x81 Hangul → KR, 0x80 Shift-JIS → JP, 0x86 GB →
+SC, 0x88 Big5 → TC; default SC), and the style class from the requested
+lineage: Song/Ming/Mincho/Batang serif lineages (SimSun, MingLiU, MS Mincho,
+Batang, KaiTi, …) get the Serif face — matching how Word renders them — while
+Hei/Gothic/Malgun/YaHei sans lineages keep the Sans face; the engine's
+compatible-mode substitution ladder prefers the same faces. Every regional OTF
+covers the full pan-CJK repertoire, so the variant only selects Han-unified
+glyph styling. Emitted PDFs stay small because CFF faces embed as used-glyph
+`CIDFontType0` subsets. Bold CJK runs render with synthetic emboldening (the
+emitter fills and strokes the Regular outlines at the pdfium/mupdf `size/30`
+convention) because the classic East Asian families ship no bold face — the
+same compromise GDI makes. Word's automatic East Asian spacing
+(`w:autoSpaceDE`/`DN`, default on) is applied: an eighth-em between East Asian
+letters and adjacent Latin letters or digits. Known limits: vertical text
+(`w:textDirection`) stays outside the envelope, and regional styling for
+Han-unified text follows the declared family, not document language tags.
 
 **Stable API surface DocKosha depends on:**
 

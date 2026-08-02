@@ -54,7 +54,11 @@ pub struct WatermarkImage {
 pub struct WatermarkSpec {
     pub pattern: Pattern,
     pub rotation_deg: f64,
+    /// Grid column spacing in points, clamped to [72, 1440]. Non-finite
+    /// (the default) means auto: 320pt scaled by page-width / US-Letter-width
+    /// per page, keeping stamp density page-size-independent.
     pub x_spacing_pt: f64,
+    /// Grid row spacing; same contract as `x_spacing_pt` (Letter height 792).
     pub y_spacing_pt: f64,
     pub offset_x_pt: f64,
     pub offset_y_pt: f64,
@@ -73,8 +77,10 @@ impl Default for WatermarkSpec {
         WatermarkSpec {
             pattern: Pattern::Single,
             rotation_deg: 0.0,
-            x_spacing_pt: 320.0,
-            y_spacing_pt: 320.0,
+            // Non-finite = auto: per-page Letter-relative scaling of the
+            // legacy 320pt grid default (see `grid_spacing`).
+            x_spacing_pt: f64::NAN,
+            y_spacing_pt: f64::NAN,
             offset_x_pt: 0.0,
             offset_y_pt: 0.0,
             lines: vec!["CONFIDENTIAL".to_string()],
@@ -128,9 +134,11 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
         )));
     }
 
-    // Clamps mirror DocYantra's parseWatermark defaults/limits.
-    let x_spacing = clamp_or(spec.x_spacing_pt, 72.0, 1440.0, 320.0);
-    let y_spacing = clamp_or(spec.y_spacing_pt, 72.0, 1440.0, 320.0);
+    // Clamps mirror DocYantra's parseWatermark defaults/limits. Non-finite
+    // spacing means "auto": resolved per page below, because pages in one
+    // document can have different boxes.
+    let explicit_x_spacing = spec.x_spacing_pt;
+    let explicit_y_spacing = spec.y_spacing_pt;
     let primary_size = clamp_or(spec.font_size_pt, 8.0, 64.0, 14.0);
     let opacity = clamp_or(spec.opacity, 0.05, 1.0, 0.65);
     let rotation_deg = if spec.rotation_deg.is_finite() {
@@ -280,6 +288,13 @@ pub fn apply_watermark(pdf: &[u8], spec: &WatermarkSpec) -> Result<Vec<u8>> {
     let expected_pages = page_ids.len();
     for page_id in page_ids {
         let (bx, by, w, h) = page_box(&doc, page_id)?;
+
+        // The legacy 320pt grid default was calibrated for US-Letter pages;
+        // "auto" scales that density to this page's box (Letter output is
+        // bit-identical: the scale factor there is exactly 1). Explicit
+        // spacing keeps the historical global clamp.
+        let x_spacing = grid_spacing(explicit_x_spacing, w, 612.0);
+        let y_spacing = grid_spacing(explicit_y_spacing, h, 792.0);
 
         // Collision-free resource names for THIS page: re-watermarking must
         // never rebind an earlier pass's /DKwmGS (etc.) to a new object, or
@@ -544,6 +559,18 @@ pub fn stamp_page_numbers(
 // ---------------------------------------------------------------------------
 
 /// TS-style clamp: non-finite input yields `fallback`, else clamps to range.
+/// Resolves one grid-spacing axis for a page. Finite spacing is the caller's
+/// explicit choice (historical [72, 1440]pt clamp). Non-finite means "auto":
+/// the legacy Letter-calibrated 320pt default scaled by this page's extent
+/// relative to US-Letter, so stamp density is page-size-independent.
+fn grid_spacing(explicit: f64, page_extent_pt: f64, letter_extent_pt: f64) -> f64 {
+    if explicit.is_finite() {
+        return clamp_or(explicit, 72.0, 1440.0, 320.0);
+    }
+    let scaled = 320.0 * page_extent_pt / letter_extent_pt;
+    clamp_or(scaled, 72.0, 1440.0, 320.0)
+}
+
 fn clamp_or(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
     if !value.is_finite() {
         return fallback;

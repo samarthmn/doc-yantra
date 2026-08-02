@@ -1380,6 +1380,7 @@ fn push_text(
                 face,
                 size_pt: size,
                 color: Rgba::opaque(Rgb::new(30, 30, 30)),
+                synthetic_bold: false,
                 base_direction: None,
                 glyphs,
                 underline: None,

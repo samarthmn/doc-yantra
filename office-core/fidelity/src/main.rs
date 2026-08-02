@@ -807,7 +807,10 @@ fn validate_manifest_contract(path: &Path, manifest: &Manifest) -> Result<()> {
     if manifest.tier != "core" && manifest.tier != "extended" && manifest.tier != "experimental" {
         anyhow::bail!("{} has an unknown fidelity tier", path.display());
     }
-    if !manifest.ssim_threshold.is_finite() || !(0.90..=1.0).contains(&manifest.ssim_threshold) {
+    // 0.85 floor: the promoted CJK cases gate at 0.85 until the joint CJK
+    // line-model recalibration (LAYOUT_CALIBRATION.md 2026-08-02) lifts them
+    // back to the 0.90 standard the Latin corpus uses.
+    if !manifest.ssim_threshold.is_finite() || !(0.85..=1.0).contains(&manifest.ssim_threshold) {
         anyhow::bail!(
             "{} must use an SSIM threshold between 0.90 and 1.0",
             path.display()

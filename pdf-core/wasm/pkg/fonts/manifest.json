@@ -17,6 +17,22 @@
       "coverageClass": "latin-greek-cyrillic"
     },
     {
+      "file": "LiberationSans-Italic.ttf",
+      "family": "Liberation Sans",
+      "version": "2.1",
+      "sha256": "e5bae5c4cde31f22142753855f4f8fb86da6ff39955ed3c0a11248b0d16948b0",
+      "license": "LICENSE-liberation.txt",
+      "coverageClass": "latin-greek-cyrillic"
+    },
+    {
+      "file": "LiberationSans-BoldItalic.ttf",
+      "family": "Liberation Sans",
+      "version": "2.1",
+      "sha256": "698da70fc191cc5f33ad4d6d3fe830fe4624b898ea2e3169955928b7c491f1ee",
+      "license": "LICENSE-liberation.txt",
+      "coverageClass": "latin-greek-cyrillic"
+    },
+    {
       "file": "LiberationMono-Regular.ttf",
       "family": "Liberation Mono",
       "version": "2.1",
@@ -53,6 +69,38 @@
       "family": "Noto Sans CJK KR",
       "version": "2.004",
       "sha256": "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-kr"
+    },
+    {
+      "file": "NotoSerifCJKsc-Regular.otf",
+      "family": "Noto Serif CJK SC",
+      "version": "2.003",
+      "sha256": "2a2eae2628df83556c54018c41e20fa532c1b862c5256ae8b3f23feb918d12ca",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-sc"
+    },
+    {
+      "file": "NotoSerifCJKtc-Regular.otf",
+      "family": "Noto Serif CJK TC",
+      "version": "2.003",
+      "sha256": "234301038e76e7c35c43113785024700c4e4fe7bdce1d1fbbc42fca7e6683798",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-tc"
+    },
+    {
+      "file": "NotoSerifCJKjp-Regular.otf",
+      "family": "Noto Serif CJK JP",
+      "version": "2.003",
+      "sha256": "d9854c7a8ef170b5a7932558856fd64eb8de0b007cd823fed6f9f514ad2803d3",
+      "license": "LICENSE-noto-cjk.txt",
+      "coverageClass": "cjk-jp"
+    },
+    {
+      "file": "NotoSerifCJKkr-Regular.otf",
+      "family": "Noto Serif CJK KR",
+      "version": "2.003",
+      "sha256": "77b4b741f864d27f15e90f275b17106dde90b2ad28f82bab72dc95805db5fb42",
       "license": "LICENSE-noto-cjk.txt",
       "coverageClass": "cjk-kr"
     },
