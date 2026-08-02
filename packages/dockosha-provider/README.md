@@ -5,6 +5,13 @@ DocKosha's public `DocumentProcessingProvider` contract and the two proprietary
 DocYantra WebAssembly engine packages. It owns the worker clients, typed failure
 normalization, Office font provisioning, and the browser wasm-asset sync hook.
 
+Office conversions use one isolated Office worker per document. Runtime font
+registration inside `office-core` is cumulative and bounded; reusing a worker
+across unrelated documents can otherwise exhaust that registry after loading
+several large regional CJK faces and silently select an earlier coverage
+fallback. The verified parent-side font cache remains shared, so subsequent
+workers re-register cached bytes without repeating successful font downloads.
+
 ## Build and test
 
 The checked-in manifest uses exact private engine pins. The release script

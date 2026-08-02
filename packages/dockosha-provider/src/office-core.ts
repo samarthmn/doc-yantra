@@ -97,12 +97,10 @@ const pinFontsourceCatalog = (
 };
 
 const requireCjs = createRequire(__filename);
-let worker: OfficeWorkerClient | null = null;
 let createWorker: ((defaultTimeoutMs?: number) => OfficeWorkerClient) | null =
   null;
 let startupFailure: ProviderFailure | null = null;
 let hasReportedVersion = false;
-let testIdleClose: ReturnType<typeof setTimeout> | null = null;
 
 const unknownDetail = (error: unknown): string | undefined =>
   error instanceof Error
@@ -144,19 +142,6 @@ try {
   });
 }
 
-const scheduleTestIdleClose = (): void => {
-  if (process.env.NODE_TEST_CONTEXT === undefined || !worker) return;
-  if (testIdleClose) clearTimeout(testIdleClose);
-  testIdleClose = setTimeout(() => {
-    const current = worker;
-    worker = null;
-    hasReportedVersion = false;
-    testIdleClose = null;
-    void current?.close();
-  }, 100);
-  testIdleClose.unref();
-};
-
 const contextualFailure = (
   failure: ProviderFailure,
   format?: string,
@@ -177,11 +162,6 @@ const getWorker = (
   format: string | undefined,
   defaultTimeoutMs?: number,
 ): WorkerResult => {
-  if (testIdleClose) {
-    clearTimeout(testIdleClose);
-    testIdleClose = null;
-  }
-  if (worker) return { ok: true, client: worker };
   if (!createWorker) {
     return toFailureResult(
       contextualFailure(
@@ -198,8 +178,10 @@ const getWorker = (
   }
 
   try {
-    worker = createWorker(defaultTimeoutMs);
-    return { ok: true, client: worker };
+    // Runtime font registration is cumulative and deliberately bounded inside
+    // office-core. Isolate that registry per document while retaining the
+    // parent-side verified font cache shared by createWorker.
+    return { ok: true, client: createWorker(defaultTimeoutMs) };
   } catch (error) {
     return toFailureResult(
       createEngineFailure({
@@ -216,17 +198,13 @@ const getWorker = (
 const recordLoadedVersion = async (
   client: OfficeWorkerClient,
 ): Promise<void> => {
-  if (hasReportedVersion) {
-    scheduleTestIdleClose();
-    return;
-  }
+  if (hasReportedVersion) return;
   const version = z
     .string()
     .min(1)
     .parse(await client.engineVersion());
   hasReportedVersion = true;
   console.info(`[office-core-wasm] worker loaded (version ${version})`);
-  scheduleTestIdleClose();
 };
 
 const normalizeFailure = (
@@ -234,7 +212,6 @@ const normalizeFailure = (
   format: string | undefined,
   fallbackMessage: string,
 ): ProviderFailure & { ok: false } => {
-  scheduleTestIdleClose();
   return toFailureResult(
     normalizeEngineError(error, {
       operation: "office_conversion",
@@ -347,5 +324,10 @@ export const officeToPdf = async (
       format,
       "The Office engine failed to convert this document.",
     );
+  } finally {
+    // Await termination before the scheduler may reuse this operation slot.
+    // Closing an already-settled worker is best-effort and must not replace a
+    // valid conversion result with cleanup prose.
+    await clientResult.client.close().catch(() => undefined);
   }
 };

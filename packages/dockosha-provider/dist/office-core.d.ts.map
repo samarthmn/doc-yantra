@@ -1,1 +1,1 @@
-{"version":3,"file":"office-core.d.ts","sourceRoot":"","sources":["../src/office-core.ts"],"names":[],"mappings":"AAmBA,OAAO,KAAK,EACV,eAAe,EACf,cAAc,EAEf,MAAM,yBAAyB,CAAC;AAqQjC,eAAO,MAAM,WAAW,GACtB,OAAO,cAAc,EACrB,WAAW,MAAM,EACjB,YAAW,MAAuC,KACjD,OAAO,CAAC,eAAe,CA8DzB,CAAC"}
+{"version":3,"file":"office-core.d.ts","sourceRoot":"","sources":["../src/office-core.ts"],"names":[],"mappings":"AAmBA,OAAO,KAAK,EACV,eAAe,EACf,cAAc,EAEf,MAAM,yBAAyB,CAAC;AA8OjC,eAAO,MAAM,WAAW,GACtB,OAAO,cAAc,EACrB,WAAW,MAAM,EACjB,YAAW,MAAuC,KACjD,OAAO,CAAC,eAAe,CAmEzB,CAAC"}

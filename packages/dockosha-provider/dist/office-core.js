@@ -43,11 +43,9 @@ const pinFontsourceCatalog = (catalog) => {
     return pinned;
 };
 const requireCjs = (0, node_module_1.createRequire)(__filename);
-let worker = null;
 let createWorker = null;
 let startupFailure = null;
 let hasReportedVersion = false;
-let testIdleClose = null;
 const unknownDetail = (error) => error instanceof Error
     ? error.message
     : typeof error === "string" && error.length > 0
@@ -81,20 +79,6 @@ catch (error) {
         detail: unknownDetail(error),
     });
 }
-const scheduleTestIdleClose = () => {
-    if (process.env.NODE_TEST_CONTEXT === undefined || !worker)
-        return;
-    if (testIdleClose)
-        clearTimeout(testIdleClose);
-    testIdleClose = setTimeout(() => {
-        const current = worker;
-        worker = null;
-        hasReportedVersion = false;
-        testIdleClose = null;
-        void current?.close();
-    }, 100);
-    testIdleClose.unref();
-};
 const contextualFailure = (failure, format) => (0, engine_errors_js_1.createEngineFailure)({
     code: failure.code,
     message: failure.message,
@@ -103,12 +87,6 @@ const contextualFailure = (failure, format) => (0, engine_errors_js_1.createEngi
     detail: failure.detail,
 });
 const getWorker = (format, defaultTimeoutMs) => {
-    if (testIdleClose) {
-        clearTimeout(testIdleClose);
-        testIdleClose = null;
-    }
-    if (worker)
-        return { ok: true, client: worker };
     if (!createWorker) {
         return (0, engine_errors_js_1.toFailureResult)(contextualFailure(startupFailure ??
             (0, engine_errors_js_1.createEngineFailure)({
@@ -119,8 +97,10 @@ const getWorker = (format, defaultTimeoutMs) => {
             }), format));
     }
     try {
-        worker = createWorker(defaultTimeoutMs);
-        return { ok: true, client: worker };
+        // Runtime font registration is cumulative and deliberately bounded inside
+        // office-core. Isolate that registry per document while retaining the
+        // parent-side verified font cache shared by createWorker.
+        return { ok: true, client: createWorker(defaultTimeoutMs) };
     }
     catch (error) {
         return (0, engine_errors_js_1.toFailureResult)((0, engine_errors_js_1.createEngineFailure)({
@@ -133,20 +113,16 @@ const getWorker = (format, defaultTimeoutMs) => {
     }
 };
 const recordLoadedVersion = async (client) => {
-    if (hasReportedVersion) {
-        scheduleTestIdleClose();
+    if (hasReportedVersion)
         return;
-    }
     const version = zod_1.z
         .string()
         .min(1)
         .parse(await client.engineVersion());
     hasReportedVersion = true;
     console.info(`[office-core-wasm] worker loaded (version ${version})`);
-    scheduleTestIdleClose();
 };
 const normalizeFailure = (error, format, fallbackMessage) => {
-    scheduleTestIdleClose();
     return (0, engine_errors_js_1.toFailureResult)((0, engine_errors_js_1.normalizeEngineError)(error, {
         operation: "office_conversion",
         format,
@@ -229,6 +205,12 @@ const officeToPdf = async (bytes, extension, timeoutMs = constants_js_1.DOCUMENT
     }
     catch (error) {
         return normalizeFailure(error, format, "The Office engine failed to convert this document.");
+    }
+    finally {
+        // Await termination before the scheduler may reuse this operation slot.
+        // Closing an already-settled worker is best-effort and must not replace a
+        // valid conversion result with cleanup prose.
+        await clientResult.client.close().catch(() => undefined);
     }
 };
 exports.officeToPdf = officeToPdf;
