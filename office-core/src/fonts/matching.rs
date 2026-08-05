@@ -494,7 +494,7 @@ fn substitution_targets(family: &str) -> &'static [&'static str] {
 
 /// The pan-CJK Noto face a family substitutes to, if any. These faces have
 /// no CDN catalog artifacts: hosts and the fidelity harness provision the
-/// repo-shipped OTFs (`pdf-core/wasm/fonts/NotoSansCJK*.otf`) instead, so
+/// repo-shipped OTFs (`packages/doc-yantra-fonts/fonts/NotoSansCJK*.otf`) instead, so
 /// providers need to recognize the mapping without duplicating the table.
 pub fn pan_cjk_substitution_target(family: &str) -> Option<&'static str> {
     const PAN_CJK: [&str; 10] = [
@@ -912,8 +912,11 @@ mod tests {
             false,
             false,
         );
-        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
-            .expect("register Liberation Sans");
+        db.register(
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf")
+                .to_vec(),
+        )
+        .expect("register Liberation Sans");
 
         let resolved = resolve(&db, "Arial", 400, false);
         let face = resolved.face.expect("Arial resolves");
@@ -947,8 +950,11 @@ mod tests {
             false,
             false,
         );
-        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
-            .expect("register unrelated sans fallback");
+        db.register(
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf")
+                .to_vec(),
+        )
+        .expect("register unrelated sans fallback");
         db.set_classing_hint(
             "Mystery Text",
             crate::fonts::FontClassing {
@@ -968,8 +974,11 @@ mod tests {
     #[test]
     fn coverage_fallbacks_keep_exact_family_siblings_ahead_of_other_families() {
         let mut db = FontDb::new();
-        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
-            .expect("register unrelated fallback");
+        db.register(
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf")
+                .to_vec(),
+        )
+        .expect("register unrelated fallback");
         db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())
             .expect("register primary subset face");
         db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())
@@ -982,8 +991,11 @@ mod tests {
     #[test]
     fn strict_coverage_keeps_only_exact_style_siblings() {
         let mut db = FontDb::new();
-        db.register(include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf").to_vec())
-            .expect("register unrelated fallback");
+        db.register(
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf")
+                .to_vec(),
+        )
+        .expect("register unrelated fallback");
         db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())
             .expect("register primary subset face");
         db.register(include_bytes!("../../fonts/carlito/Carlito-Regular.ttf").to_vec())

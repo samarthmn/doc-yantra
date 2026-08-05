@@ -13,16 +13,18 @@ const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const PKG = join(ROOT, "pdf-core", "wasm", "pkg");
+const FONT_PKG = join(ROOT, "packages", "doc-yantra-fonts");
 const SOURCE_STAGE = join(ROOT, "tmp", `worker-pdf-source-${process.pid}`);
 const direct = require(PKG);
+const offlineFonts = require(FONT_PKG);
 const { createPdfEngineWorker, EngineWorkerError } = require(join(PKG, "worker.js"));
 const { ENGINE_ERROR_CODES } = require(join(PKG, "worker-client.cjs"));
 
-const packagedFontOrder = JSON.parse(readFileSync(join(PKG, "fonts", "manifest.json"), "utf8"))
+const packagedFontOrder = JSON.parse(readFileSync(join(FONT_PKG, "fonts", "manifest.json"), "utf8"))
   .fonts
   .map((font) => font.file);
 for (const name of packagedFontOrder) {
-  direct.register_font(readFileSync(join(PKG, "fonts", name)));
+  direct.register_font(readFileSync(join(FONT_PKG, "fonts", name)));
 }
 
 function mock(kind, name = "file1." + kind) {
@@ -92,6 +94,8 @@ function sourceWorkerFactory() {
       [join(ROOT, "wasm-worker", "worker-entry.cjs"), "worker-entry.cjs"],
       [join(ROOT, "pdf-core", "wasm", "worker.js"), "worker.js"],
       [join(ROOT, "pdf-core", "wasm", "worker-ops.cjs"), "worker-ops.cjs"],
+      [join(ROOT, "pdf-core", "wasm", "font-provider.cjs"), "font-provider.cjs"],
+      [join(FONT_PKG, "fonts", "manifest.json"), "font-manifest.json"],
     ]) cpSync(source, join(SOURCE_STAGE, destination));
     const staged = require(join(SOURCE_STAGE, "worker.js"));
     Object.setPrototypeOf(staged.EngineWorkerError.prototype, EngineWorkerError.prototype);
@@ -112,6 +116,66 @@ async function withSourceWorker(run, options) {
 after(() => rmSync(SOURCE_STAGE, { force: true, recursive: true }));
 
 describe("PDF worker API", () => {
+  test("boots font-free operations without assets and loads only required Unicode faces", async () => {
+    const resolved = [];
+    const fontProvider = {
+      async resolve(file) {
+        resolved.push(file);
+        return { bytes: offlineFonts.readFont(file) };
+      },
+    };
+    await withSourceWorker(async (worker) => {
+      const pdf = mock("pdf", "file1.pdf");
+      assert.equal(await worker.pageCount({ pdf }), 1);
+      assert.equal(await worker.validatePdf({ pdf }), direct.validate_pdf(pdf));
+      await worker.mergePdfs({ pdfs: [pdf] });
+      await worker.textToPdf({ text: "ASCII needs no downloaded face" });
+      assert.deepEqual(resolved, []);
+
+      const text = "Καλημέρα العربية हिन्दी ไทย 中文 😀";
+      const unicodePdf = await worker.textToPdf({ text });
+      assert.deepEqual(unicodePdf, direct.text_to_pdf(text));
+      assert.deepEqual(resolved, [
+        "LiberationSans-Regular.ttf",
+        "LiberationSans-Bold.ttf",
+        "LiberationSans-Italic.ttf",
+        "LiberationSans-BoldItalic.ttf",
+        "LiberationMono-Regular.ttf",
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansArabic-Variable.ttf",
+        "NotoSansDevanagari-Variable.ttf",
+        "NotoSansThai-Variable.ttf",
+        "NotoEmoji-Variable.ttf",
+      ]);
+
+      await worker.textToPdf({ text });
+      assert.equal(resolved.length, 10, "warm operation must reuse parent-side font bytes");
+      await assert.rejects(worker.__testTrap(), (error) => assertWorkerError(error, "trap"));
+      assert.deepEqual(await worker.textToPdf({ text }), unicodePdf);
+      assert.equal(resolved.length, 10, "worker replacement must reuse parent-side font bytes");
+    }, { fontProvider });
+  });
+
+  test("font resolution obeys the operation deadline and aborts the provider", async () => {
+    let providerSignal;
+    const fontProvider = {
+      async resolve(file, signal) {
+        providerSignal = signal;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return { bytes: offlineFonts.readFont(file) };
+      },
+    };
+    await withSourceWorker(async (worker) => {
+      const started = performance.now();
+      await assert.rejects(
+        worker.textToPdf({ text: "Καλημέρα", timeoutMs: 30 }),
+        (error) => assertWorkerError(error, "deadline_exceeded"),
+      );
+      assert.ok(performance.now() - started < 150, "font provider ignored the operation deadline");
+      assert.equal(providerSignal?.aborted, true);
+    }, { fontProvider });
+  });
+
   test("worker outputs match direct synchronous operations", async () => {
     await withWorker(async (worker) => {
       const a = mock("pdf", "file1.pdf");

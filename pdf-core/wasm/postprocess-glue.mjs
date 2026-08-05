@@ -7,6 +7,8 @@ const MARKER = "DOC_YANTRA_FONT_PRECOPY_GUARD_V1";
 const GUARD_CALL = "guardRegisteredFontInput(bytes);";
 const PDF_MARKER = "DOC_YANTRA_PDF_PRECOPY_GUARD_V1";
 const PDF_GUARD_CALL = "guardRedactPdfInput(pdf, areas_json);";
+const WEB_WASM_URL = "new URL('pdf_core_wasm_bg.wasm', import.meta.url)";
+const ROOT_WASM_URL = "new URL('../pdf_core_wasm_bg.wasm', import.meta.url)";
 const INPUT_GUARDS = new Map([
   ["apply_watermark", "guardWatermarkInput(pdf, watermark_json, watermark_image);"],
   ["csv_to_pdf", "guardByteInput(csv, \"CSV\");"],
@@ -140,16 +142,20 @@ function assertPatched(source, label) {
 }
 
 export function transformPdfGlue(source, label = "pdf wasm glue") {
-  if (source.includes(`const ${MARKER} =`) || source.includes(`const ${PDF_MARKER} =`)) {
-    assertPatched(source, label);
-    return source;
+  const routedSource = source.replace(WEB_WASM_URL, ROOT_WASM_URL);
+  if (
+    routedSource.includes(`const ${MARKER} =`) ||
+    routedSource.includes(`const ${PDF_MARKER} =`)
+  ) {
+    assertPatched(routedSource, label);
+    return routedSource;
   }
 
-  const firstLineEnd = source.indexOf("\n");
+  const firstLineEnd = routedSource.indexOf("\n");
   if (firstLineEnd === -1) {
     throw new Error(`${label}: missing generated header`);
   }
-  let output = `${source.slice(0, firstLineEnd + 1)}${HELPERS}${source.slice(firstLineEnd + 1)}`;
+  let output = `${routedSource.slice(0, firstLineEnd + 1)}${HELPERS}${routedSource.slice(firstLineEnd + 1)}`;
 
   const signature = /^(?:export )?function register_font\(bytes\) \{$/gm;
   const matches = [...output.matchAll(signature)];

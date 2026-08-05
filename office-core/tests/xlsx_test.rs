@@ -11,7 +11,9 @@ fn opts() -> ConvertOptions {
 
 fn unicode_opts() -> ConvertOptions {
     ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     }
 }
@@ -1016,7 +1018,9 @@ fn xlsx_shaped_clusters_extract_complete_logical_source_once() {
     let styles = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><name val="Calibri"/></font><font><name val="Arial"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf fontId="0"/><xf fontId="1"/></cellXfs></styleSheet>"#;
     let bytes = minimal_xlsx(&sheet, Some(styles));
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let doc = XlsxDoc::open(&bytes, &options).unwrap();

@@ -2677,7 +2677,7 @@ mod tests {
             &bytes,
             OfficeFormat::Docx,
             &crate::ConvertOptions {
-                font_dirs: vec!["../pdf-core/wasm/pkg/fonts".into()],
+                font_dirs: vec!["../packages/doc-yantra-fonts/fonts".into()],
                 ..crate::ConvertOptions::default()
             },
         )

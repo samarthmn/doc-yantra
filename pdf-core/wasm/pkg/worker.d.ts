@@ -46,6 +46,18 @@ export interface PdfEngineWorkerOptions {
   maxOverlayCount?: number;
   maxPageCount?: number;
   maxRangeCount?: number;
+  /** Exact-font resolver. Omit to prefer the installed offline pack and then
+   * the immutable first-party CDN. Set false to keep Unicode generation
+   * strictly offline/fail-closed when no faces were registered directly. */
+  fontProvider?: { resolve(file: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array }> } | false;
+  fontMemoryCache?: import("./font-provider").FontCache;
+  fontPersistentCache?: import("./font-provider").FontCache;
+  offlineFontPackage?: import("./font-provider").OfflineFontPackage | false;
+  fontFetch?: typeof globalThis.fetch;
+  fontCdnBaseUrl?: string;
+  fontProviderTimeoutMs?: number;
+  fontMaxRedirects?: number;
+  fontTelemetry?: (event: import("./font-provider").FontTelemetryEvent) => void;
 }
 
 export interface TimedWorkerInput {

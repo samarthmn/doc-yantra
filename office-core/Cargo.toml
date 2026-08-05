@@ -17,7 +17,8 @@ required-features = ["cli"]
 [features]
 default = ["cli", "bundled-fonts"]
 cli = ["dep:clap"]
-# Embeds office-core/fonts/**.ttf for hermetic native tests/fidelity only.
+# Embeds native fixture fonts plus shared faces from packages/doc-yantra-fonts.
+# This remains for hermetic native tests/fidelity only.
 # Production wasm disables default features and receives fonts from the host.
 bundled-fonts = []
 # wasm32 builds: JS crypto for any randomness pulled in transitively.

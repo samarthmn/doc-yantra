@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const offlineFonts = require("../../doc-yantra-fonts");
 
 const { createPackagedOfficeFontProvider } = await import(
   "../dist/office-font-provider.js"
@@ -34,6 +38,16 @@ const resolveOne = async (provider, req) => {
   return result;
 };
 
+const exactProvider = (calls = []) => ({
+  async resolve(file) {
+    calls.push(file);
+    return { bytes: offlineFonts.readFont(file), source: "offline", durationMs: 0 };
+  },
+});
+
+const packagedProvider = (primary, calls) =>
+  createPackagedOfficeFontProvider(primary, { fontProvider: exactProvider(calls) });
+
 const winMetrics = (bytes) => {
   const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const numTables = buf.readUInt16BE(4);
@@ -53,7 +67,7 @@ const winMetrics = (bytes) => {
 };
 
 test("serif CJK lineages resolve to the packaged Noto Serif regional face", async () => {
-  const provider = createPackagedOfficeFontProvider(notFoundPrimary);
+  const provider = packagedProvider(notFoundPrimary);
   const cases = [
     [request({ family: "Batang", familyClass: "roman" }), "Noto Serif CJK KR"],
     [request({ family: "SimSun" }), "Noto Serif CJK SC"],
@@ -68,7 +82,7 @@ test("serif CJK lineages resolve to the packaged Noto Serif regional face", asyn
 });
 
 test("sans/gothic CJK lineages keep the Noto Sans regional face", async () => {
-  const provider = createPackagedOfficeFontProvider(notFoundPrimary);
+  const provider = packagedProvider(notFoundPrimary);
   const cases = [
     [request({ family: "Malgun Gothic" }), "Noto Sans CJK KR"],
     [request({ family: "Microsoft YaHei" }), "Noto Sans CJK SC"],
@@ -82,7 +96,7 @@ test("sans/gothic CJK lineages keep the Noto Sans regional face", async () => {
 });
 
 test("unknown CJK families pick the region from the Windows charset", async () => {
-  const provider = createPackagedOfficeFontProvider(notFoundPrimary);
+  const provider = packagedProvider(notFoundPrimary);
   const cases = [
     ["81", "Noto Sans CJK KR"],
     ["80", "Noto Sans CJK JP"],
@@ -125,7 +139,7 @@ test("Arial-class Arimo artifacts are replaced by Liberation Sans with Arial's W
         artifacts: [fakeArimo(req.weight)],
       })),
   };
-  const provider = createPackagedOfficeFontProvider(primary);
+  const provider = packagedProvider(primary);
 
   const regular = await resolveOne(
     provider,
@@ -156,4 +170,15 @@ test("Arial-class Arimo artifacts are replaced by Liberation Sans with Arial's W
     "Arimo",
     "a literal Arimo request keeps the author's chosen face",
   );
+});
+
+test("loads only requested packaged faces and reuses validated results", async () => {
+  const calls = [];
+  const provider = packagedProvider(notFoundPrimary, calls);
+  const batang = request({ family: "Batang", familyClass: "roman" });
+
+  await resolveOne(provider, batang);
+  await resolveOne(provider, batang);
+
+  assert.deepEqual(calls, ["NotoSerifCJKkr-Regular.otf"]);
 });

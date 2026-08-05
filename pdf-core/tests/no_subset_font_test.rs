@@ -13,7 +13,7 @@ const CYRILLIC: &str = "Конфиденциально";
 fn no_subsetting_license_retains_full_font_and_roundtrips_text() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../office-core/fonts/liberation/LiberationSans-Regular.ttf"
+        "/../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf"
     );
     let mut bytes = std::fs::read(path).expect("read Liberation Sans");
     let table_offset = {

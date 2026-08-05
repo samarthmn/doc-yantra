@@ -184,7 +184,9 @@ fn docx_header_table_cell_must_be_preserved() {
 #[test]
 fn docx_arabic_fallback_extracts_logical_source() {
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../../packages/doc-yantra-fonts/fonts",
+        )],
         ..ConvertOptions::default()
     };
     for (label, source, paragraph_properties) in [

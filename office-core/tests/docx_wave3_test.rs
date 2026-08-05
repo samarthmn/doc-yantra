@@ -2180,7 +2180,9 @@ fn fixture_omml_delimiters_preserve_complete_semantic_graphemes() {
     let body = r#"<w:p><m:oMath><m:d><m:dPr><m:begChr m:val="é"/><m:endChr m:val="⌚️"/></m:dPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d></m:oMath></w:p>"#;
     let bytes = minimal_docx(body);
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..ConvertOptions::default()
     };
     let prof = profile_with_options(&bytes, OfficeFormat::Docx, &options).unwrap();

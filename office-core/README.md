@@ -139,6 +139,9 @@ Normal corpus runs resolve the document's fonts automatically from the
 hash-pinned `fidelity/fonts.lock`, populating the ignored, content-addressed
 `fidelity/fonts-cache/` on the first run and reusing verified cached bytes
 thereafter. The cache needs network access only when a required entry is cold.
+Set `DOC_YANTRA_FIDELITY_FONT_CACHE` to an alternate cache directory when the
+default repository-local cache is unsuitable (for example, an isolated CI
+workspace under the repository's `tmp/` directory).
 Do not pass host font directories to `run`; repeatable `--font-dir <path>` is
 available only on `probe` for host-font diagnostics. Run
 `cargo run -p fidelity -- lock-fonts` only when deliberately refreshing the

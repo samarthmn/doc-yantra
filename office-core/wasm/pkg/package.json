@@ -61,7 +61,8 @@
       "require": "./noto-fallback.cjs",
       "default": "./noto-fallback.cjs"
     },
-    "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
+    "./office_core_wasm_bg.wasm": "./office_core_wasm_bg.wasm",
+    "./web/office_core_wasm_bg.wasm": "./office_core_wasm_bg.wasm",
     "./worker": {
       "types": "./worker.d.ts",
       "require": "./worker.js",

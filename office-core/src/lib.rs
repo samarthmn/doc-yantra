@@ -586,7 +586,7 @@ mod runtime_font_tests {
     fn public_runtime_font_registration_validates_bytes() {
         assert!(register_font(b"not a font").is_err());
         register_font(include_bytes!(
-            "../fonts/liberation/LiberationSans-Regular.ttf"
+            "../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf"
         ))
         .expect("register a valid runtime face");
     }

@@ -27,6 +27,7 @@ const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const PKG = join(ROOT, "pdf-core", "wasm", "pkg");
+const FONT_PKG = join(ROOT, "packages", "doc-yantra-fonts");
 const PACKAGED_FONTS = [
   "LiberationSans-Regular.ttf",
   "LiberationSans-Bold.ttf",
@@ -73,7 +74,7 @@ function differs(a, b) {
 function registerPackagedFonts() {
   if (packagedFontsRegistered) return;
   for (const name of PACKAGED_FONTS) {
-    main.register_font(readFileSync(join(PKG, "fonts", name)));
+    main.register_font(readFileSync(join(FONT_PKG, "fonts", name)));
   }
   packagedFontsRegistered = true;
 }
@@ -147,13 +148,13 @@ describe("engine metadata", () => {
 
 // --- embedded Unicode fonts -----------------------------------------------
 
-describe("embedded Unicode fonts", () => {
+describe("offline Unicode fonts", () => {
   test("font manifest resolves every font, checksum, and license", () => {
-    const manifest = JSON.parse(readFileSync(join(PKG, "fonts", "manifest.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(FONT_PKG, "fonts", "manifest.json"), "utf8"));
     assert.equal(manifest.fonts.length, PACKAGED_FONTS.length);
     for (const font of manifest.fonts) {
-      const fontPath = join(PKG, "fonts", font.file);
-      const licensePath = join(PKG, "fonts", font.license);
+      const fontPath = join(FONT_PKG, "fonts", font.file);
+      const licensePath = join(FONT_PKG, "fonts", font.license);
       assert.ok(existsSync(fontPath), `${font.file} must be packaged`);
       assert.ok(existsSync(licensePath), `${font.license} must be packaged`);
       assert.equal(
@@ -166,7 +167,8 @@ describe("embedded Unicode fonts", () => {
 
   test("register_font() accepts all packaged Liberation faces", () => {
     const manifest = JSON.parse(readFileSync(join(PKG, "package.json"), "utf8"));
-    assert.ok(manifest.files.includes("fonts"), "npm package includes runtime fonts");
+    assert.equal(manifest.files.includes("fonts"), false, "core package stays fontless");
+    assert.equal(manifest.peerDependenciesMeta["@samarthmn/doc-yantra-fonts"].optional, true);
     assert.doesNotThrow(registerPackagedFonts);
   });
 
@@ -292,9 +294,11 @@ describe("embedded Unicode fonts", () => {
       "export function validate_pdf(pdf) {",
       "    wasm.validate_pdf();",
       "}",
+      "module_or_path = new URL('pdf_core_wasm_bg.wasm', import.meta.url);",
       "",
     ].join("\n");
     const once = transformPdfGlue(generated, "fixture.js");
+    assert.match(once, /new URL\('\.\.\/pdf_core_wasm_bg\.wasm', import\.meta\.url\)/u);
     assert.equal(transformPdfGlue(generated, "fixture.js"), once);
     assert.equal(transformPdfGlue(once, "fixture.js"), once);
   });

@@ -74,23 +74,20 @@ node ./postprocess-glue.mjs \
   pkg/pdf_core_wasm.js \
   pkg/web/pdf_core_wasm.js
 
-# Runtime fonts stay outside the wasm binary. Consumers load these package
-# assets and register the faces they need during adapter initialization.
+# The node and browser builds contain the same engine bytes. Keep the root
+# binary as the one package copy and point the browser glue at it.
+if ! cmp -s pkg/pdf_core_wasm_bg.wasm pkg/web/pdf_core_wasm_bg.wasm; then
+  echo "error: node and browser PDF wasm binaries differ; refusing to discard one." >&2
+  exit 1
+fi
+rm -f pkg/web/pdf_core_wasm_bg.wasm
 rm -rf pkg/fonts
-mkdir -p pkg/fonts
-cp \
-  ../../office-core/fonts/liberation/LiberationSans-Regular.ttf \
-  ../../office-core/fonts/liberation/LiberationSans-Bold.ttf \
-  ../../office-core/fonts/liberation/LiberationSans-Italic.ttf \
-  ../../office-core/fonts/liberation/LiberationSans-BoldItalic.ttf \
-  ../../office-core/fonts/liberation/LiberationMono-Regular.ttf \
-  pkg/fonts/
-cp fonts/* pkg/fonts/
 
 # Server worker API. Runtime is single-source at repo root; only engine op
 # tables and public facades are package-specific.
 cp ../../wasm-worker/worker-client.cjs ../../wasm-worker/worker-entry.cjs pkg/
-cp worker.js worker.d.ts worker-ops.cjs pkg/
+cp worker.js worker.d.ts worker-ops.cjs font-provider.cjs font-provider.d.ts pkg/
+cp ../../packages/doc-yantra-fonts/fonts/manifest.json pkg/font-manifest.json
 
 # wasm-pack derives the name from the crate (@OWNER/pdf-core-wasm) and does not
 # emit repository / license / publishConfig / exports; set the final metadata.
@@ -102,7 +99,9 @@ node -e '
   j.repository = { type: "git", url: process.env.REPO_URL };
   j.license = "UNLICENSED";
   j.publishConfig = { registry: "https://npm.pkg.github.com" };
-  j.files = Array.from(new Set([...(j.files || []), "web", "fonts", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json"]));
+  j.files = Array.from(new Set([...(j.files || []), "web", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "font-provider.cjs", "font-provider.d.ts", "font-manifest.json", "build-fingerprint.json"]));
+  j.peerDependencies = { ...(j.peerDependencies || {}), "@samarthmn/doc-yantra-fonts": j.version };
+  j.peerDependenciesMeta = { ...(j.peerDependenciesMeta || {}), "@samarthmn/doc-yantra-fonts": { optional: true } };
   j.exports = {
     ".": {
       types: "./pdf_core_wasm.d.ts",
@@ -114,7 +113,10 @@ node -e '
       import: "./web/pdf_core_wasm.js",
       default: "./web/pdf_core_wasm.js",
     },
-    "./web/pdf_core_wasm_bg.wasm": "./web/pdf_core_wasm_bg.wasm",
+    "./pdf_core_wasm_bg.wasm": "./pdf_core_wasm_bg.wasm",
+    "./web/pdf_core_wasm_bg.wasm": "./pdf_core_wasm_bg.wasm",
+    "./font-provider": { types: "./font-provider.d.ts", require: "./font-provider.cjs", default: "./font-provider.cjs" },
+    "./font-manifest.json": "./font-manifest.json",
     "./worker": { types: "./worker.d.ts", require: "./worker.js", default: "./worker.js" },
     "./package.json": "./package.json",
   };
@@ -128,5 +130,5 @@ node ../../scripts/source-fingerprint.mjs pdf --out pkg/build-fingerprint.json
 node ../../scripts/wasm-version.mjs verify Cargo.toml pkg
 
 echo "Sizes:"
-ls -la pkg/pdf_core_wasm_bg.wasm pkg/web/pdf_core_wasm_bg.wasm | awk '{print $5, $9}'
+ls -la pkg/pdf_core_wasm_bg.wasm | awk '{print $5, $9}'
 echo "Done. Package ready at pdf-core/wasm/pkg (commit it)."

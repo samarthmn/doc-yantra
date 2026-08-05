@@ -22,9 +22,8 @@ Every module belongs to one zone, and the zone dictates where it can run:
 - **Zone 1 — pure Rust** (lopdf + pdf-writer): `assembly`, `watermark`, `meta`,
   `generate` (csv/md/text/image→PDF), `redact_pure`. Lock-free, parallel-safe,
   and the **only**
-  zone that compiles to wasm. This is what ships in the npm package. (Office →
-  PDF is NOT in this engine — it is served by the DocYantra LibreOffice HTTP
-  service.)
+  zone that compiles to wasm. This is what ships in the npm package. Office →
+  PDF is provided by the separate pure-Rust Office package.
 - **Zone 2 — Rust + pdfium** (bundled BSD dylib): `raster`, `extract`, legacy
   `redact`, `forms`. **Native-only** — needs the pdfium dynamic library, cannot run in
   wasm. Gated behind the `pdfium` cargo feature (`#[cfg(feature = "pdfium")]` in
@@ -54,13 +53,16 @@ its own **fail-closed envelope** (`convert()` returns `Unsupported{code}` off-
 envelope) and **DocProfile** router contract (`profile()` predicts the verdict
 without layout). It reuses none of pdf-core's code and does not modify it (the
 fidelity harness consumes pdf-core read-only for rasterization). It compiles to
-wasm (`--no-default-features --features wasm,bundled-fonts`) and ships as
+wasm (`--no-default-features --features wasm`) and ships as the fontless
 `@samarthmn/doc-yantra-office`. See `office-core/README.md`.
 
-**Versioning now spans four Cargo.tomls** kept in lockstep by
+**Versioning spans four Cargo.tomls plus the adapter and optional font pack**,
+kept in lockstep by
 `scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
-`office-core/Cargo.toml`, `office-core/wasm/Cargo.toml`. One `0.0.*` tag publishes
-both npm packages via `publish-wasm.yml`.
+`office-core/Cargo.toml`, `office-core/wasm/Cargo.toml`,
+`packages/dockosha-provider/package.json`, and
+`packages/doc-yantra-fonts/package.json`. One `0.0.*` tag publishes all four npm
+packages plus named consumer release assets via `publish-wasm.yml`.
 
 ## Build / test / run commands
 
@@ -83,15 +85,16 @@ node --test tests/                 # requires pkg/ built first (see below)
 
 Rebuild the wasm package after any Rust change (`cd pdf-core/wasm`):
 ```bash
-./build.sh                         # rebuilds all three targets into pkg/
+./build.sh                         # rebuilds Node + browser targets into pkg/
 ```
 
 ## Releasing (0.0.x line)
 
 Releases stay on `0.0.x` — **only the patch increments**. Use the script; it
-derives the next `x` from the highest `0.0.*` git tag, writes both
-Cargo.tomls, rebuilds `pkg/`, commits, tags, and pushes (the `publish-wasm.yml`
-Action then publishes to GitHub Packages on the tag):
+derives the next `x` from the highest `0.0.*` git tag, updates all lockstep
+versions, rebuilds and verifies the packages, commits, tags, and pushes. The
+tag Action publishes all four packages and creates the small consumer ZIP plus
+the separate offline font asset:
 ```bash
 scripts/release.sh          # auto: next patch after the highest tag
 scripts/release.sh 7        # explicit: release 0.0.7
@@ -114,8 +117,11 @@ bump plus the regenerated `pkg/` together.
   for you (via the Cargo.tomls + `build.sh`). Published versions are **immutable**.
 - **Releasing** is tag-driven and stays on the `0.0.x` line — just run
   `scripts/release.sh` (see the Releasing section above). It picks the
-  next patch, rebuilds/commits `pkg/`, tags `0.0.x`, and pushes; the
+  next patch, rebuilds/commits every package, tags `0.0.x`, and pushes; the
   `publish-wasm.yml` Action publishes to GitHub Packages on `0.0.*` tags.
+- **Distribution fonts have one owner.** `packages/doc-yantra-fonts/` contains
+  the canonical 17 binaries, hashes, and licences. Core npm packages contain
+  only manifest/provider metadata and exactly one WASM binary each.
 - **GitHub Packages requires the npm scope to equal the repo owner.** If the owner
   isn't `samarthmn`, change `OWNER`/`SCOPE`/`PKG_NAME` in `build.sh`, the `scope:`
   in `publish-wasm.yml`, and the consumer's `.npmrc`. See `CONSUMING.md`.

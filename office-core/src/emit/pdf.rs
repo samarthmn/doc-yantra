@@ -2213,7 +2213,7 @@ mod tests {
         use crate::fonts::metrics::FaceMetrics;
         let bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../pdf-core/wasm/pkg/fonts/NotoSansCJKjp-Regular.otf"
+            "/../packages/doc-yantra-fonts/fonts/NotoSansCJKjp-Regular.otf"
         ))
         .expect("repo-committed Noto Sans CJK JP OTF");
         let mut db = FontDb::with_bundled();

@@ -65,9 +65,10 @@ tests and fidelity scoring.
 **Versioning spans four Cargo.tomls plus the adapter manifest/lockfile**, kept
 in lockstep by `scripts/release.sh`: `pdf-core/Cargo.toml`,
 `pdf-core/wasm/Cargo.toml`, `office-core/Cargo.toml`,
-`office-core/wasm/Cargo.toml`, and `packages/dockosha-provider/package.json` /
-`pnpm-lock.yaml`. One `0.0.*` tag publishes all three npm packages via
-`publish-wasm.yml`.
+`office-core/wasm/Cargo.toml`, `packages/dockosha-provider/package.json` /
+`pnpm-lock.yaml`, and `packages/doc-yantra-fonts/package.json`. The optional
+font package owns the single canonical distribution-font copy. One `0.0.*` tag
+publishes all four npm packages via `publish-wasm.yml`.
 
 ## Build / test / run commands
 
@@ -90,7 +91,7 @@ node --test tests/                 # requires pkg/ built first (see below)
 
 Rebuild the wasm package after any Rust change (`cd pdf-core/wasm`):
 ```bash
-./build.sh                         # rebuilds all three targets into pkg/
+./build.sh                         # rebuilds Node + browser targets into pkg/
 ```
 
 Rebuild the Office wasm package after any `office-core` or Office host-glue
@@ -101,9 +102,9 @@ font files and embedded SFNT programs.
 
 Releases stay on `0.0.x` — **only the patch increments**. Use the script; it
 derives the next `x` from the highest `0.0.*` git tag, writes the engine Cargo
-manifests plus the adapter version/pins, rebuilds `pkg/` and the adapter
-`dist/`, commits, tags, and pushes (the `publish-wasm.yml` Action then publishes
-all three packages to GitHub Packages on the tag):
+manifests plus the adapter/font versions and pins, rebuilds `pkg/` and the
+adapter `dist/`, commits, tags, and pushes (the `publish-wasm.yml` Action then
+publishes all four packages and named consumer assets on the tag):
 ```bash
 scripts/release.sh          # auto: next patch after the highest tag
 scripts/release.sh 7        # explicit: release 0.0.7
@@ -128,9 +129,12 @@ bump plus the regenerated `pkg/` together.
   `packages/dockosha-provider/package.json`, both exact engine pins, and its
   committed `pnpm-lock.yaml`; its gate installs the locally built engine pkgs,
   rebuilds committed `dist/`, and runs the adapter tests before tagging.
+- **Distribution fonts have one owner.** `packages/doc-yantra-fonts/` contains
+  the canonical hashes, binaries, and licences. Core packages contain only the
+  small manifest/provider metadata and must never grow a `fonts/` directory.
 - **Releasing** is tag-driven and stays on the `0.0.x` line — just run
   `scripts/release.sh` (see the Releasing section above). It picks the
-  next patch, rebuilds/commits all three package artifacts, tags `0.0.x`, and
+  next patch, rebuilds/commits all four package artifacts, tags `0.0.x`, and
   pushes; the `publish-wasm.yml` Action publishes to GitHub Packages on
   `0.0.*` tags.
 - **GitHub Packages requires the npm scope to equal the repo owner.** If the owner

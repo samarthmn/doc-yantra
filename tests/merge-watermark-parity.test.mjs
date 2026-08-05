@@ -11,6 +11,7 @@ import zlib from "node:zlib";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const PKG = join(ROOT, "pdf-core", "wasm", "pkg");
+const FONT_PKG = join(ROOT, "packages", "doc-yantra-fonts", "fonts");
 const main = createRequire(import.meta.url)(PKG);
 let fontsRegistered = false;
 
@@ -22,8 +23,8 @@ function valid(pdf) {
 }
 function registerFonts() {
   if (fontsRegistered) return;
-  for (const { file } of JSON.parse(readFileSync(join(PKG, "fonts", "manifest.json"))).fonts) {
-    main.register_font(readFileSync(join(PKG, "fonts", file)));
+  for (const { file } of JSON.parse(readFileSync(join(FONT_PKG, "manifest.json"))).fonts) {
+    main.register_font(readFileSync(join(FONT_PKG, file)));
   }
   fontsRegistered = true;
 }

@@ -941,7 +941,9 @@ fn calibri_arabic_uses_registered_cluster_fallback() {
         r#"<w:p><w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr><w:t>مرحبا بالعالم</w:t></w:r></w:p>"#,
     );
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..ConvertOptions::default()
     };
     let result = convert(&bytes, OfficeFormat::Docx, &options);
@@ -951,7 +953,9 @@ fn calibri_arabic_uses_registered_cluster_fallback() {
 #[test]
 fn latin_family_falls_back_for_packaged_unicode_scripts() {
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..ConvertOptions::default()
     };
     for source in [
@@ -975,7 +979,9 @@ fn docx_shaped_clusters_extract_complete_logical_source_once() {
         r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>{source}</w:t></w:r></w:p>"#
     ));
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let doc = WordDoc::open(&bytes, &options).unwrap();
@@ -994,7 +1000,9 @@ fn docx_complex_run_before_direct_run_keeps_source_order() {
         r#"<w:p><w:r><w:t>é</w:t></w:r><w:r><w:t xml:space="preserve"> Latin</w:t></w:r></w:p>"#,
     );
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let doc = WordDoc::open(&bytes, &options).unwrap();
@@ -1262,7 +1270,7 @@ fn scripted_glyph_position_uses_the_face_os2_y_offset() {
             .2
     };
 
-    let bytes = include_bytes!("../fonts/liberation/LiberationSans-Regular.ttf");
+    let bytes = include_bytes!("../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf");
     let face = ttf_parser::Face::parse(bytes, 0).expect("Liberation Sans face");
     let units_per_em = f64::from(face.units_per_em());
     let base_size = 40.0;
@@ -2846,7 +2854,9 @@ fn mid_section_header_content_is_profiled() {
         ("word/header2.xml", hdr2.as_bytes()),
     ]);
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..ConvertOptions::default()
     };
     let prof = profile_with_options(&bytes, OfficeFormat::Docx, &options).expect("profile");
@@ -2883,7 +2893,9 @@ fn uncached_field_uses_field_unsupported_code() {
 fn docx_cjk_text_embeds_cff_faces_as_cid_font_type0() {
     let bytes = minimal_docx("<w:p><w:r><w:t>你好世界 CJK regression</w:t></w:r></w:p>");
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let prof = profile_with_options(&bytes, OfficeFormat::Docx, &options).unwrap();

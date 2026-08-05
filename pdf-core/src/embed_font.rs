@@ -1015,10 +1015,13 @@ mod tests {
     #[test]
     fn mixed_text_can_use_multiple_registered_faces() {
         register_font(include_bytes!(
-            "../wasm/pkg/fonts/LiberationSans-Regular.ttf"
+            "../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf"
         ))
         .unwrap();
-        register_font(include_bytes!("../wasm/pkg/fonts/NotoEmoji-Variable.ttf")).unwrap();
+        register_font(include_bytes!(
+            "../../packages/doc-yantra-fonts/fonts/NotoEmoji-Variable.ttf"
+        ))
+        .unwrap();
 
         let mut session = FontSession::new().unwrap();
         let FontChoice::Embedded(choice) = session.resolve("Words \u{1F44D}").unwrap() else {

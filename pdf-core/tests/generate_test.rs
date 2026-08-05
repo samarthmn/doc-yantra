@@ -1033,8 +1033,10 @@ fn task_list_markers_use_rectangles_at_bullet_indent() {
 
 #[test]
 fn markdown_footnote_definitions_render_backreference_arrow() {
-    register_font(include_bytes!("../wasm/pkg/fonts/NotoEmoji-Variable.ttf"))
-        .expect("register font covering backreference arrow");
+    register_font(include_bytes!(
+        "../../packages/doc-yantra-fonts/fonts/NotoEmoji-Variable.ttf"
+    ))
+    .expect("register font covering backreference arrow");
     let bytes = markdown_to_pdf(
         "Reference[^note].\n\n[^note]: Definition text.",
         &DocOptions::default(),

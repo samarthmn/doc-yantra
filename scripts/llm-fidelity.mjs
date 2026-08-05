@@ -73,7 +73,7 @@ function loadEngine() {
       }
     }
   }
-  const cjk = join(ROOT, "pdf-core/wasm/pkg/fonts");
+  const cjk = join(ROOT, "packages/doc-yantra-fonts/fonts");
   for (const file of [
     "NotoSansCJKsc-Regular.otf",
     "NotoSansCJKtc-Regular.otf",

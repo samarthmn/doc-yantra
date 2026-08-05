@@ -1,6 +1,7 @@
 'use strict';
 
 function createOperations(engine) {
+  const registeredFonts = new Set();
   return {
     mergePdfs: ({ pdfs, watermarkJson, watermarkImage }) =>
       engine.merge_pdfs(pdfs, watermarkJson, watermarkImage),
@@ -13,6 +14,12 @@ function createOperations(engine) {
     redactPdfWithReport: ({ pdf, areasJson }) => engine.redact_pdf_with_report(pdf, areasJson),
     pageCount: ({ pdf }) => engine.page_count(pdf),
     validatePdf: ({ pdf }) => engine.validate_pdf(pdf),
+    registerFont: ({ bytes, key }) => {
+      if (registeredFonts.has(key)) return null;
+      engine.register_font(bytes);
+      registeredFonts.add(key);
+      return null;
+    },
   };
 }
 

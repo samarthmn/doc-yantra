@@ -4,6 +4,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const MARKER = "DOC_YANTRA_OFFICE_PRECOPY_GUARD_V1";
+const WEB_WASM_URL = "new URL('office_core_wasm_bg.wasm', import.meta.url)";
+const ROOT_WASM_URL = "new URL('../office_core_wasm_bg.wasm', import.meta.url)";
 const HELPERS = `
 const ${MARKER} = 50 * 1024 * 1024;
 // Matches the engine's validated-registration cap (24 MiB) so hosts can
@@ -106,14 +108,15 @@ function assertPatched(source, label) {
 }
 
 export function transformOfficeGlue(source, label = "office wasm glue") {
-  if (source.includes(`const ${MARKER} =`)) {
-    assertPatched(source, label);
-    return source;
+  const routedSource = source.replace(WEB_WASM_URL, ROOT_WASM_URL);
+  if (routedSource.includes(`const ${MARKER} =`)) {
+    assertPatched(routedSource, label);
+    return routedSource;
   }
 
-  const firstLineEnd = source.indexOf("\n");
+  const firstLineEnd = routedSource.indexOf("\n");
   if (firstLineEnd === -1) throw new Error(`${label}: missing generated header`);
-  let output = `${source.slice(0, firstLineEnd + 1)}${HELPERS}${source.slice(firstLineEnd + 1)}`;
+  let output = `${routedSource.slice(0, firstLineEnd + 1)}${HELPERS}${routedSource.slice(firstLineEnd + 1)}`;
 
   for (const [name, inserted] of [
     [

@@ -1,4 +1,4 @@
-# Consuming `@samarthmn/doc-yantra`
+# Consuming the DocYantra WebAssembly packages
 
 The WebAssembly build of the pdf-core engine is published as a **private npm
 package on GitHub Packages** and consumed by the DocKosha Next.js app (and any
@@ -16,11 +16,12 @@ PDF **in-process** — no network hop, no Rust toolchain on the consumer side.
 
 ## 1. Publish a version (maintainers)
 
-The engine packages' `wasm/pkg` directories and the DocKosha adapter's `dist/`
+The engine packages' `wasm/pkg` directories, canonical font package, and the
+DocKosha adapter's `dist/`
 are **committed** so consumers and CI never need Rust or TypeScript. Releases
 stay on the **0.0.x** line (only the patch increments). From a clean local
 `main` branch, one script picks the next `x`, bumps all four Cargo manifests
-plus the adapter version and engine pins, rebuilds all three packages, runs the
+plus the adapter/font versions and engine pins, rebuilds all four packages, runs the
 Rust/package/fidelity/adapter gates, commits, tags `0.0.x`, and pushes (requires
 Rust; the build scripts pin wasm-pack 0.15.0 and use pnpm or npx when it is not
 installed globally):
@@ -35,8 +36,8 @@ Published versions are immutable — the script refuses to reuse or go below an
 existing tag; always bump.
 
 The [`publish-wasm`](.github/workflows/publish-wasm.yml) GitHub Action requires
-the tagged commit to be on `main`, requires the tag to match all three committed
-package versions, then publishes both engines followed by the adapter using the
+the tagged commit to be on `main`, requires the tag to match all four committed
+package versions, then publishes the font pack, both engines, and the adapter using the
 repo's built-in `GITHUB_TOKEN` (needs `packages: write`, already set). It does
 not rebuild or retest the packages; `release.sh` is the supported local build
 and test gate.
@@ -69,11 +70,21 @@ guard) and the install would 401.
   // resolves only that exact version) and bump it when a new patch ships.
   // Use the latest published patch — find it with:
   //   git tag --list '0.0.*' | sort -V | tail -1
-  "@samarthmn/doc-yantra": "0.0.7",
-  "@samarthmn/doc-yantra-office": "0.0.7",
-  "@samarthmn/dockosha-provider-docyantra": "0.0.7"
+  "@samarthmn/doc-yantra": "0.0.21", // example: use the latest published tag
+  "@samarthmn/doc-yantra-office": "0.0.21",
+  "@samarthmn/dockosha-provider-docyantra": "0.0.21"
 }
 ```
+
+For a fully offline deployment, add the optional peer at the same exact patch:
+
+```jsonc
+"@samarthmn/doc-yantra-fonts": "0.0.21"
+```
+
+Without that package, required Unicode fonts are fetched on demand from the
+hash-pinned first-party asset host. npm does not auto-install this optional
+peer, so the default installation remains small.
 
 **Local install** — put the token in your **user-level** `~/.npmrc` (which pnpm
 trusts), then install:
@@ -107,7 +118,7 @@ The package has two entry points:
 | Import | Runtime | Contents |
 | --- | --- | --- |
 | `@samarthmn/doc-yantra` | Node (CJS) | watermark, merge, csv/md/text → PDF, redaction, validate (~2.8MB) |
-| `@samarthmn/doc-yantra/web` | Browser (ESM) | Zone 1 for client-side previews; call `await mod.default(wasmUrl)` first and serve `web/pdf_core_wasm_bg.wasm` yourself |
+| `@samarthmn/doc-yantra/web` | Browser (ESM) | Zone 1 for client-side previews; call `await mod.default(wasmUrl)` first and serve the package-root `pdf_core_wasm_bg.wasm` |
 | `@samarthmn/doc-yantra-office` | Node (CJS) | **Office → PDF**: staged sync exports plus provider-backed `convertOnDemand()` |
 | `@samarthmn/doc-yantra-office/web` | Browser (ESM) | same staged/on-demand API plus `IndexedDbFontCache` |
 
@@ -164,7 +175,7 @@ at a commit-pinned Google Fonts mirror.
 5.2.8 line) carry usWinAscent/Descent 2136/797 instead of Arial's 1854/434,
 which inflates every Arial line box ~26% versus Word (measured 2026-08-02).
 The DocKosha provider therefore serves Arial-class requests from the packaged
-Liberation Sans faces (`@samarthmn/doc-yantra/fonts`, true Arial Windows
+Liberation Sans faces (`@samarthmn/doc-yantra-fonts`, true Arial Windows
 metrics, all four styles) instead of fetched Arimo; a literal `Arimo` request
 still gets Arimo. Hosts wiring `FontsourceProvider` directly inherit the
 inflated Arimo metrics — mirror the replacement if Word-parity line flow
@@ -182,9 +193,11 @@ without falling back to a Latin text face.
 
 **CJK (Chinese/Japanese/Korean) in Office documents.** The engine fails closed
 (`no font for CJK` / `missing_glyph`) unless a registered face covers the
-document's CJK code points; nothing CJK is bundled or fetched by default. Since
-0.0.12 the registration caps (engine and host, 24 MiB) admit the pan-CJK
-regional OTFs that `@samarthmn/doc-yantra` ships under `fonts/` for pdf-core —
+document's CJK code points; nothing CJK is bundled in either core package. The
+DocKosha adapter resolves only the selected regional/style face from the
+optional offline package or immutable first-party asset host. The registration
+caps (engine and host, 24 MiB) admit the pan-CJK regional OTFs owned by
+`@samarthmn/doc-yantra-fonts` —
 `Noto Sans CJK {SC,TC,JP,KR}` (~16.5 MiB each) and, since 0.0.19, their
 `Noto Serif CJK` siblings (~24 MiB each, Serif2.003, hash-pinned). A host
 provider supplies them for requests whose `scripts` include `"cjk"`. The
@@ -269,6 +282,40 @@ pdf.redact_pdf(
 ); // → Uint8Array; unsupported cases throw with an "unsupported:" prefix
 ```
 
+### Exact fonts on demand
+
+The synchronous WASM exports and `register_font()` remain unchanged. The PDF
+worker adds optional provider/cache configuration and never downloads fonts for
+page counting, validation, redaction, or a fontless merge. ASCII generation
+continues to use the PDF standard faces; only Unicode text-bearing operations
+resolve exact fonts.
+
+```js
+const { createPdfEngineWorker } = require("@samarthmn/doc-yantra/worker");
+const { NodeFontCache } = require("@samarthmn/doc-yantra/font-provider");
+
+const cache = new NodeFontCache("/absolute/app-cache/doc-yantra-fonts");
+const worker = createPdfEngineWorker({
+  fontPersistentCache: cache,
+  fontTelemetry(event) {
+    // event.source: memory | persistent | offline | cdn
+    console.info(event.type, event.file, event.source, event.bytes, event.durationMs);
+  },
+});
+```
+
+Resolution order is memory → persistent cache → installed
+`@samarthmn/doc-yantra-fonts` → HTTPS. Remote URLs are content-addressed as
+`https://public.dockosha.com/doc-yantra-fonts/sha256/<sha256>/<filename>`.
+Size, MIME type, redirects, SHA-256, OpenType identity/version, face index, and
+licence metadata are checked before registration. Missing, corrupt, oversized,
+timed-out, or unavailable assets fail closed.
+
+Migration: filesystem access under `@samarthmn/doc-yantra/fonts` is removed.
+Offline consumers should install `@samarthmn/doc-yantra-fonts` and use its
+`readFont(file)` / `resolveFont(file)` exports, or rely on the worker's automatic
+local-first resolution.
+
 In DocKosha this is wrapped by `src/server/pdfCoreWasm.ts`, which keeps wasm
 errors recoverable and treats every failure as terminal for that operation —
 there is no HTTP fallback for any operation. Text outside the registered font
@@ -291,6 +338,14 @@ repo (set `GITHUB_TOKEN` and rewrite the URL in the install step):
 `#path:` support varies by pnpm version — verify with yours, or use a dedicated
 root-level package repo if the subdirectory form gives trouble. The GitHub
 Packages route above is the supported, recommended path.
+
+## Downloadable release assets
+
+For manual downloads, use `doc-yantra-wasm-core-<version>.zip` from the GitHub
+Release. It contains three installable core npm tarballs, checksums, and a short
+install guide. Download `doc-yantra-fonts-offline-<version>.tgz` separately only
+for offline font coverage. GitHub's automatic “Source code” ZIP/tarball contains
+the full development repository and is not an application distribution.
 
 ## Local development
 

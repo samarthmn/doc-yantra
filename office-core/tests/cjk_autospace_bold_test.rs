@@ -10,7 +10,7 @@ fn register_cjk() {
     ONCE.call_once(|| {
         let noto = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../pdf-core/wasm/pkg/fonts/NotoSansCJKjp-Regular.otf",
+            "/../packages/doc-yantra-fonts/fonts/NotoSansCJKjp-Regular.otf",
         ))
         .expect("read packaged pan-CJK face");
         office_core::register_font(&noto).expect("register CJK face");
@@ -52,9 +52,7 @@ fn auto_space_inserts_an_eighth_em_between_han_and_digit() {
 #[test]
 fn auto_space_leaves_authored_spaces_alone() {
     register_cjk();
-    let spaced = minimal_docx(
-        r#"<w:p><w:r><w:t xml:space="preserve">表 1</w:t></w:r></w:p>"#,
-    );
+    let spaced = minimal_docx(r#"<w:p><w:r><w:t xml:space="preserve">表 1</w:t></w:r></w:p>"#);
     let spaced_disabled = minimal_docx(
         r#"<w:p><w:pPr><w:autoSpaceDN w:val="0"/></w:pPr><w:r><w:t xml:space="preserve">表 1</w:t></w:r></w:p>"#,
     );
@@ -78,9 +76,7 @@ fn inflated_streams(pdf: &[u8]) -> String {
         let Some(end) = find(pdf, data_start, b"endstream") else {
             break;
         };
-        if let Ok(inflated) =
-            miniz_oxide::inflate::decompress_to_vec_zlib(&pdf[data_start..end])
-        {
+        if let Ok(inflated) = miniz_oxide::inflate::decompress_to_vec_zlib(&pdf[data_start..end]) {
             out.push_str(&String::from_utf8_lossy(&inflated));
         }
         cursor = end + 9;
@@ -99,8 +95,8 @@ fn find(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 fn bold_cjk_on_a_regular_only_face_strokes_the_fill() {
     register_cjk();
     let bold = minimal_docx(r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>表</w:t></w:r></w:p>"#);
-    let output = convert(&bold, OfficeFormat::Docx, &ConvertOptions::default())
-        .expect("convert bold CJK");
+    let output =
+        convert(&bold, OfficeFormat::Docx, &ConvertOptions::default()).expect("convert bold CJK");
     let content = inflated_streams(&output.pdf);
     assert!(
         content.contains("2 Tr"),

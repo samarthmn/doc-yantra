@@ -73,7 +73,7 @@ test("office-core wasm package", async (t) => {
     const webRoot = join(here, "../office-core/wasm/pkg/web");
     const web = await import(pathToFileURL(join(webRoot, "web-index.js")));
     await web.default({
-      module_or_path: readFileSync(join(webRoot, "office_core_wasm_bg.wasm")),
+      module_or_path: readFileSync(join(PKG, "office_core_wasm_bg.wasm")),
     });
     const input = readFileSync(join(MOCK, "xlsm/file1.xlsm"));
     assert.equal(typeof web.IndexedDbFontCache, "function");
@@ -163,9 +163,11 @@ test("office-core wasm package", async (t) => {
       "    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);",
       "}",
       "function version() { return '0.0.0'; }",
+      "module_or_path = new URL('office_core_wasm_bg.wasm', import.meta.url);",
       "",
     ].join("\n");
     const once = transformOfficeGlue(generated, "fixture.js");
+    assert.match(once, /new URL\('\.\.\/office_core_wasm_bg\.wasm', import\.meta\.url\)/u);
     assert.equal(transformOfficeGlue(generated, "fixture.js"), once);
     assert.equal(transformOfficeGlue(once, "fixture.js"), once);
   });

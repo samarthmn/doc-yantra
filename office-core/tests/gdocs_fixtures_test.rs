@@ -136,7 +136,7 @@ fn japanese_inline_image_transition_matches_word_logical_object_box() {
     options.font_bytes.push(
         std::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../pdf-core/wasm/pkg/fonts/NotoSansCJKjp-Regular.otf"),
+                .join("../packages/doc-yantra-fonts/fonts/NotoSansCJKjp-Regular.otf"),
         )
         .expect("read committed Japanese fallback face"),
     );

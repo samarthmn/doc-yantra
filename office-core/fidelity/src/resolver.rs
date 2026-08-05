@@ -391,6 +391,9 @@ pub(crate) fn lock_path() -> std::path::PathBuf {
 }
 
 pub(crate) fn cache_dir() -> std::path::PathBuf {
+    if let Some(directory) = std::env::var_os("DOC_YANTRA_FIDELITY_FONT_CACHE") {
+        return std::path::PathBuf::from(directory);
+    }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts-cache")
 }
 
@@ -739,7 +742,7 @@ fn fetch_pinned_serif_face(fetcher: &HttpFetcher, file: &str, pinned: &str) -> R
 }
 
 fn pan_cjk_dir() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-core/wasm/fonts")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/doc-yantra-fonts/fonts")
 }
 
 /// The pan-CJK target for a request, honoring font-table alternates.

@@ -7,12 +7,14 @@
     "pdf_core_wasm.js",
     "pdf_core_wasm.d.ts",
     "web",
-    "fonts",
     "worker.js",
     "worker.d.ts",
     "worker-client.cjs",
     "worker-entry.cjs",
     "worker-ops.cjs",
+    "font-provider.cjs",
+    "font-provider.d.ts",
+    "font-manifest.json",
     "build-fingerprint.json"
   ],
   "main": "pdf_core_wasm.js",
@@ -25,6 +27,14 @@
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
   },
+  "peerDependencies": {
+    "@samarthmn/doc-yantra-fonts": "0.0.20"
+  },
+  "peerDependenciesMeta": {
+    "@samarthmn/doc-yantra-fonts": {
+      "optional": true
+    }
+  },
   "exports": {
     ".": {
       "types": "./pdf_core_wasm.d.ts",
@@ -36,7 +46,14 @@
       "import": "./web/pdf_core_wasm.js",
       "default": "./web/pdf_core_wasm.js"
     },
-    "./web/pdf_core_wasm_bg.wasm": "./web/pdf_core_wasm_bg.wasm",
+    "./pdf_core_wasm_bg.wasm": "./pdf_core_wasm_bg.wasm",
+    "./web/pdf_core_wasm_bg.wasm": "./pdf_core_wasm_bg.wasm",
+    "./font-provider": {
+      "types": "./font-provider.d.ts",
+      "require": "./font-provider.cjs",
+      "default": "./font-provider.cjs"
+    },
+    "./font-manifest.json": "./font-manifest.json",
     "./worker": {
       "types": "./worker.d.ts",
       "require": "./worker.js",

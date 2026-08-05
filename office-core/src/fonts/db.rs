@@ -439,7 +439,10 @@ mod tests {
 
     #[test]
     fn explicit_font_directory_remains_authorized_when_system_scan_is_disabled() {
-        let db = FontDb::with_sources(&[PathBuf::from("../pdf-core/wasm/pkg/fonts")], false);
+        let db = FontDb::with_sources(
+            &[PathBuf::from("../packages/doc-yantra-fonts/fonts")],
+            false,
+        );
         assert!(
             db.faces().iter().any(|face| {
                 face.parsed()

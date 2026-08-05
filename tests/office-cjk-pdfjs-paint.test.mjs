@@ -32,7 +32,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const PKG = join(here, "../office-core/wasm/pkg");
 const MOCK = join(here, "../mock-files/cjk-docx");
 const LATIN_FONTS = join(here, "../office-core/fonts");
-const CJK_FONTS = join(here, "../pdf-core/wasm/pkg/fonts");
+const CJK_FONTS = join(here, "../packages/doc-yantra-fonts/fonts");
 
 // The DocKosha consumer target. Keep in lockstep with tests/package.json.
 const REQUIRED_PDFJS_VERSION = "3.11.174";

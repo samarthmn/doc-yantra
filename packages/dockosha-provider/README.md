@@ -14,8 +14,9 @@ workers re-register cached bytes without repeating successful font downloads.
 
 ## Build and test
 
-The checked-in manifest uses exact private engine pins. The release script
-aligns the adapter and both engines on one `0.0.x` version when it cuts a
+The checked-in manifest uses exact private engine pins and an optional exact
+font-pack peer. The release script aligns the adapter, both engines, and font
+package on one `0.0.x` version when it cuts a
 lockstep release. For ordinary local verification against the currently pinned
 engines:
 
@@ -34,7 +35,8 @@ npm install --no-save /absolute/path/to/doc-yantra/packages/dockosha-provider
 
 ## Publishing in lockstep
 
-The adapter releases with both engines on the same `0.0.x` version, release
+The adapter releases with both engines and the optional font pack on the same
+`0.0.x` version, release
 commit, and tag. From a clean `main`, maintainers run the repository release
 script; it bumps the adapter version, both engine dependency pins, and the
 committed lockfile at release time:
@@ -47,9 +49,19 @@ DRY_RUN=1 scripts/release.sh
 The local release gate installs the freshly built engine packages by path with
 `npm install --no-save`, then rebuilds `dist/` and runs the adapter tests without
 requiring the not-yet-published engine version from the registry. The tag
-workflow validates all three versions and publishes both engines before this
-adapter, using the built-in `GITHUB_TOKEN`; CI publishes the committed `dist/`
-without rebuilding it.
+workflow validates all four versions, publishes the font pack and both engines
+before this adapter, and creates the named consumer release assets. CI publishes
+the committed `dist/` without rebuilding it.
+
+## Font delivery
+
+`createProvider()` remains argument-free. For Office requests, it keeps the
+existing CJK region and serif/sans rules but resolves only the selected exact
+font. Resolution is memory → persistent cache (when configured by the host) →
+installed `@samarthmn/doc-yantra-fonts` → immutable first-party HTTPS asset.
+Every artifact is checked against the bundled manifest before registration;
+failures remain fail-closed. Install the optional font peer at the same exact
+version for network-free conversion.
 
 ## DocKosha configuration
 
@@ -59,7 +71,8 @@ DocKosha reads two engine-related environment variables:
   adapter, normally `@samarthmn/dockosha-provider-docyantra`.
 - `DOCKOSHA_ENGINE_TRACE_PACKAGES` — comma-separated packages Next.js must
   externalize and trace. A registry install should list this adapter plus
-  `@samarthmn/doc-yantra` and `@samarthmn/doc-yantra-office`.
+  `@samarthmn/doc-yantra` and `@samarthmn/doc-yantra-office`. Add
+  `@samarthmn/doc-yantra-fonts` only when the optional offline pack is installed.
 
 If the provider variable is unset or its module cannot be resolved, DocKosha
 selects the community provider. The adapter also exports

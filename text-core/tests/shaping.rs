@@ -35,7 +35,7 @@ fn bidi_itemization_places_hebrew_run_rtl_in_mixed_line() {
             .any(|run| run.direction == Direction::Rtl && run.text.contains("שלום"))
     );
     let (bytes, index) = face(repo(
-        "office-core/fonts/liberation/LiberationSans-Regular.ttf",
+        "packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf",
     ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let shaped = shape_text("abc שלום 123", &faces).unwrap();
@@ -76,7 +76,7 @@ fn bidi_base_direction_uses_the_first_strong_paragraph_character() {
 #[test]
 fn coverage_reports_exact_uncovered_scalars_in_codepoint_order() {
     let (bytes, index) = face(repo(
-        "office-core/fonts/liberation/LiberationSans-Regular.ttf",
+        "packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf",
     ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let missing = preflight_coverage("Latin 中 🔒", &faces);
@@ -86,7 +86,7 @@ fn coverage_reports_exact_uncovered_scalars_in_codepoint_order() {
 #[test]
 fn fallback_never_switches_inside_combining_cluster() {
     let (bytes, index) = face(repo(
-        "office-core/fonts/liberation/LiberationSans-Regular.ttf",
+        "packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf",
     ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let shaped = shape_text("a\u{0301}b", &faces).unwrap();
@@ -98,7 +98,7 @@ fn fallback_never_switches_inside_combining_cluster() {
 #[test]
 fn pdf_defaults_keep_kerning_while_office_can_disable_it() {
     let (bytes, index) = face(repo(
-        "office-core/fonts/liberation/LiberationSans-Regular.ttf",
+        "packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf",
     ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let defaults: i32 = shape_text("AV", &faces)
@@ -124,7 +124,9 @@ fn pdf_defaults_keep_kerning_while_office_can_disable_it() {
 
 #[test]
 fn astral_lock_shapes_without_replacement_character() {
-    let (bytes, index) = face(repo("pdf-core/wasm/pkg/fonts/NotoEmoji-Variable.ttf"));
+    let (bytes, index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoEmoji-Variable.ttf",
+    ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let shaped = shape_text("🔒", &faces).unwrap();
     assert_eq!(shaped.len(), 1);
@@ -135,8 +137,12 @@ fn astral_lock_shapes_without_replacement_character() {
 
 #[test]
 fn intact_emoji_sequence_uses_later_covering_face_before_degrading() {
-    let (cjk_bytes, cjk_index) = face(repo("pdf-core/wasm/pkg/fonts/NotoSansCJKsc-Regular.otf"));
-    let (emoji_bytes, emoji_index) = face(repo("pdf-core/wasm/pkg/fonts/NotoEmoji-Variable.ttf"));
+    let (cjk_bytes, cjk_index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoSansCJKsc-Regular.otf",
+    ));
+    let (emoji_bytes, emoji_index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoEmoji-Variable.ttf",
+    ));
     let faces = [
         Face::new(&cjk_bytes, cjk_index).unwrap(),
         Face::new(&emoji_bytes, emoji_index).unwrap(),
@@ -157,7 +163,7 @@ fn intact_emoji_sequence_uses_later_covering_face_before_degrading() {
 #[test]
 fn emoji_fallback_drops_vs16_but_preserves_original_semantics() {
     let (bytes, index) = face(repo(
-        "office-core/fonts/liberation/LiberationSans-Regular.ttf",
+        "packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf",
     ));
     let faces = [Face::new(&bytes, index).unwrap()];
 
@@ -175,7 +181,9 @@ fn emoji_fallback_drops_vs16_but_preserves_original_semantics() {
 
 #[test]
 fn emoji_fallback_drops_skin_tone_but_preserves_original_semantics() {
-    let (bytes, index) = face(repo("pdf-core/wasm/pkg/fonts/NotoSansCJKsc-Regular.otf"));
+    let (bytes, index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoSansCJKsc-Regular.otf",
+    ));
     let faces = [Face::new(&bytes, index).unwrap()];
 
     let shaped = shape_text("☝🏽", &faces).unwrap();
@@ -192,7 +200,9 @@ fn emoji_fallback_drops_skin_tone_but_preserves_original_semantics() {
 
 #[test]
 fn emoji_fallback_splits_zwj_components_and_maps_original_once() {
-    let (bytes, index) = face(repo("pdf-core/wasm/pkg/fonts/NotoSansCJKsc-Regular.otf"));
+    let (bytes, index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoSansCJKsc-Regular.otf",
+    ));
     let faces = [Face::new(&bytes, index).unwrap()];
 
     let shaped = shape_text("☝‍☝", &faces).unwrap();
@@ -213,7 +223,9 @@ fn emoji_fallback_splits_zwj_components_and_maps_original_once() {
 
 #[test]
 fn absent_extended_pictograph_reports_real_codepoint() {
-    let (bytes, index) = face(repo("pdf-core/wasm/pkg/fonts/NotoEmoji-Variable.ttf"));
+    let (bytes, index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoEmoji-Variable.ttf",
+    ));
     let faces = [Face::new(&bytes, index).unwrap()];
 
     assert_eq!(
@@ -225,7 +237,7 @@ fn absent_extended_pictograph_reports_real_codepoint() {
 #[test]
 fn missing_coverage_is_typed() {
     let (bytes, index) = face(repo(
-        "office-core/fonts/liberation/LiberationSans-Regular.ttf",
+        "packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf",
     ));
     let faces = [Face::new(&bytes, index).unwrap()];
     assert_eq!(
@@ -236,7 +248,9 @@ fn missing_coverage_is_typed() {
 
 #[test]
 fn office_feature_profile_keeps_required_arabic_substitutions() {
-    let (bytes, index) = face(repo("pdf-core/wasm/pkg/fonts/NotoSansArabic-Variable.ttf"));
+    let (bytes, index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoSansArabic-Variable.ttf",
+    ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let text = "لا";
     let shaped = shape_text_with_features(
@@ -263,7 +277,7 @@ fn office_feature_profile_keeps_required_arabic_substitutions() {
 #[test]
 fn office_feature_profile_keeps_devanagari_conjunct_shaping() {
     let (bytes, index) = face(repo(
-        "pdf-core/wasm/pkg/fonts/NotoSansDevanagari-Variable.ttf",
+        "packages/doc-yantra-fonts/fonts/NotoSansDevanagari-Variable.ttf",
     ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let text = "क्ष";
@@ -278,7 +292,9 @@ fn office_feature_profile_keeps_devanagari_conjunct_shaping() {
 
 #[test]
 fn office_feature_profile_keeps_thai_mark_positioning() {
-    let (bytes, index) = face(repo("pdf-core/wasm/pkg/fonts/NotoSansThai-Variable.ttf"));
+    let (bytes, index) = face(repo(
+        "packages/doc-yantra-fonts/fonts/NotoSansThai-Variable.ttf",
+    ));
     let faces = [Face::new(&bytes, index).unwrap()];
     let shaped = shape_text_with_features(
         "กิ",

@@ -66,6 +66,14 @@ node ./postprocess-glue.mjs \
   pkg/office_core_wasm.js \
   pkg/web/office_core_wasm.js
 
+# The target-specific JavaScript differs, but both builds contain identical
+# engine bytes. Browser glue resolves the single root binary.
+if ! cmp -s pkg/office_core_wasm_bg.wasm pkg/web/office_core_wasm_bg.wasm; then
+  echo "error: node and browser Office wasm binaries differ; refusing to discard one." >&2
+  exit 1
+fi
+rm -f pkg/web/office_core_wasm_bg.wasm
+
 # Server worker API. Runtime is single-source at repo root; only engine op
 # tables and public facades are package-specific.
 cp ../../wasm-worker/worker-client.cjs ../../wasm-worker/worker-entry.cjs pkg/
@@ -102,7 +110,8 @@ node -e '
     "./web/fontsource-provider": { types: "./web/fontsource-provider.d.ts", import: "./web/fontsource-provider.js" },
     "./fontsource-provider": { types: "./fontsource-provider.d.ts", require: "./fontsource-provider.cjs", default: "./fontsource-provider.cjs" },
     "./noto-fallback": { types: "./noto-fallback.d.ts", require: "./noto-fallback.cjs", default: "./noto-fallback.cjs" },
-    "./web/office_core_wasm_bg.wasm": "./web/office_core_wasm_bg.wasm",
+    "./office_core_wasm_bg.wasm": "./office_core_wasm_bg.wasm",
+    "./web/office_core_wasm_bg.wasm": "./office_core_wasm_bg.wasm",
     "./worker": { types: "./worker.d.ts", require: "./worker.js", default: "./worker.js" },
     "./package.json": "./package.json",
   };
@@ -118,7 +127,7 @@ node ../../scripts/wasm-version.mjs verify Cargo.toml pkg
 WASM_BYTES=$(wc -c < pkg/office_core_wasm_bg.wasm)
 WASM_MB=$(( WASM_BYTES / 1024 / 1024 ))
 echo "Sizes:"
-ls -la pkg/office_core_wasm_bg.wasm pkg/web/office_core_wasm_bg.wasm | awk '{print $5, $9}'
+ls -la pkg/office_core_wasm_bg.wasm | awk '{print $5, $9}'
 if [ "${WASM_MB}" -ge "${MAX_WASM_MB}" ]; then
   echo "error: nodejs wasm is ${WASM_MB} MB, over the ${MAX_WASM_MB} MB budget." >&2
   echo "       investigate engine growth; font binaries are forbidden in this artifact." >&2

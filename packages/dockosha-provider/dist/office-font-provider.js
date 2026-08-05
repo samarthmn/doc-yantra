@@ -1,20 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createPackagedOfficeFontProvider = void 0;
-const node_crypto_1 = require("node:crypto");
-const node_fs_1 = require("node:fs");
-const node_module_1 = require("node:module");
-const node_path_1 = require("node:path");
-const zod_1 = require("zod");
-const requireCjs = (0, node_module_1.createRequire)(__filename);
-const fontManifestSchema = zod_1.z.object({
-    fonts: zod_1.z.array(zod_1.z.object({
-        file: zod_1.z.string().regex(/^[A-Za-z0-9._-]+$/),
-        family: zod_1.z.string().min(1),
-        version: zod_1.z.string().min(1),
-        sha256: zod_1.z.string().regex(/^[0-9a-f]{64}$/),
-    })),
-});
+const font_provider_1 = require("@samarthmn/doc-yantra/font-provider");
 const SUPPLEMENT_FONTS = {
     arabic: {
         file: "NotoSansArabic-Variable.ttf",
@@ -182,7 +169,7 @@ const CJK_VARIANT_ORDER = ["kr", "tc", "jp", "sc"];
 // Fontsource's Arimo releases stopped carrying Arial's Windows line metrics
 // (usWinAscent/Descent 1854/434 became 2136/797 — measured 2026-08-02), which
 // inflates every Arial line box ~26% versus Word. Liberation Sans carries the
-// true Arial metrics and already ships in @samarthmn/doc-yantra/fonts, so
+// true Arial metrics and ships in the optional exact-font pack, so
 // Arial-class requests are served by the packaged Liberation Sans faces
 // instead of the fetched Arimo artifacts.
 const ARIAL_METRIC_FACES = {
@@ -191,57 +178,48 @@ const ARIAL_METRIC_FACES = {
     italic: "LiberationSans-Italic.ttf",
     boldItalic: "LiberationSans-BoldItalic.ttf",
 };
-let packagedArtifacts = null;
-const cjkArtifacts = new Map();
-const arialMetricArtifacts = new Map();
-const sha256 = (bytes) => (0, node_crypto_1.createHash)("sha256").update(bytes).digest("hex");
-const fontsDirectory = () => (0, node_fs_1.realpathSync)((0, node_path_1.join)((0, node_path_1.dirname)(requireCjs.resolve("@samarthmn/doc-yantra/package.json")), "fonts"));
-const loadManifestArtifact = (file, identity) => {
-    const directory = fontsDirectory();
-    const manifestValue = JSON.parse((0, node_fs_1.readFileSync)((0, node_path_1.join)(directory, "manifest.json"), "utf8"));
-    const manifest = fontManifestSchema.parse(manifestValue);
-    const entry = manifest.fonts.find((candidate) => candidate.file === file);
-    if (!entry)
-        throw new Error(`DocYantra font manifest is missing ${file}`);
-    const bytes = new Uint8Array((0, node_fs_1.readFileSync)((0, node_path_1.join)(directory, entry.file)));
-    const actualHash = sha256(bytes);
-    if (actualHash !== entry.sha256) {
-        throw new Error(`DocYantra font hash mismatch for ${entry.file}`);
-    }
-    const extension = (0, node_path_1.extname)(entry.file).toLowerCase();
-    if (extension !== ".ttf" && extension !== ".otf") {
-        throw new Error(`Unsupported packaged font format for ${entry.file}`);
-    }
-    return {
-        family: entry.family,
-        fullName: identity.fullName,
-        postscriptName: identity.postscriptName,
-        weight: identity.weight ?? 400,
-        italic: identity.italic ?? false,
-        stretch: 5,
-        version: entry.version,
-        faceIndex: 0,
-        format: extension === ".otf" ? "otf" : "ttf",
-        sha256: actualHash,
-        source: `@samarthmn/doc-yantra/fonts/${entry.file}`,
-        coverageScripts: identity.coverageScripts,
-        license: {
-            id: "OFL-1.1",
-            embeddable: true,
-            subsettable: true,
-        },
-        bytes,
+const MANIFEST_ENTRIES = new Map(font_provider_1.fontManifest.fonts.map((entry) => [entry.file, entry]));
+const createArtifactLoader = (provider) => {
+    const resolvedFiles = new Map();
+    const resolveFile = (file, signal) => {
+        const cached = resolvedFiles.get(file);
+        if (cached)
+            return cached;
+        const pending = provider.resolve(file, signal).catch((error) => {
+            resolvedFiles.delete(file);
+            throw error;
+        });
+        resolvedFiles.set(file, pending);
+        return pending;
     };
-};
-const loadPackagedArtifacts = () => {
-    if (packagedArtifacts)
-        return packagedArtifacts;
-    const loaded = new Map();
-    for (const script of SUPPLEMENT_SCRIPTS) {
-        loaded.set(script, loadManifestArtifact(SUPPLEMENT_FONTS[script].file, SUPPLEMENT_FONTS[script]));
-    }
-    packagedArtifacts = loaded;
-    return loaded;
+    return async (file, identity, signal) => {
+        const entry = MANIFEST_ENTRIES.get(file);
+        if (!entry)
+            throw new Error(`DocYantra font manifest is missing ${file}`);
+        const resolution = await resolveFile(file, signal);
+        const bytes = (0, font_provider_1.validateFontBytes)(resolution.bytes, entry);
+        return {
+            family: entry.family,
+            fullName: identity.fullName,
+            postscriptName: entry.postscriptName,
+            weight: identity.weight ?? 400,
+            italic: identity.italic ?? false,
+            stretch: 5,
+            version: entry.version,
+            faceIndex: entry.faceIndex,
+            format: entry.format,
+            sha256: entry.sha256,
+            source: resolution.url ??
+                `@samarthmn/doc-yantra-fonts:${resolution.source ?? "provider"}/${entry.file}`,
+            coverageScripts: identity.coverageScripts,
+            license: {
+                id: "OFL-1.1",
+                embeddable: true,
+                subsettable: true,
+            },
+            bytes,
+        };
+    };
 };
 const cjkVariantFor = (request) => {
     const families = [request.family, ...request.altFamilies].map((family) => family.toLowerCase());
@@ -271,21 +249,10 @@ const cjkStyleFor = (request) => {
     }
     return "sans";
 };
-const cjkArtifactFor = (request) => {
+const cjkConfigFor = (request) => {
     const variant = cjkVariantFor(request);
     const style = cjkStyleFor(request);
-    const key = `${style}/${variant}`;
-    const cached = cjkArtifacts.get(key);
-    if (cached)
-        return cached;
-    const config = CJK_FONTS[style][variant];
-    const artifact = loadManifestArtifact(config.file, {
-        fullName: config.fullName,
-        postscriptName: config.postscriptName,
-        coverageScripts: ["cjk"],
-    });
-    cjkArtifacts.set(key, artifact);
-    return artifact;
+    return CJK_FONTS[style][variant];
 };
 const arialMetricStyle = (request) => {
     const bold = request.weight >= 600;
@@ -323,36 +290,40 @@ const ARIAL_METRIC_IDENTITIES = {
         italic: true,
     },
 };
-const arialMetricArtifactFor = (request) => {
+const arialMetricArtifactFor = (request, loadArtifact, signal) => {
     const style = arialMetricStyle(request);
-    const cached = arialMetricArtifacts.get(style);
-    if (cached)
-        return cached;
     const identity = ARIAL_METRIC_IDENTITIES[style];
-    const artifact = loadManifestArtifact(ARIAL_METRIC_FACES[style], {
+    return loadArtifact(ARIAL_METRIC_FACES[style], {
         ...identity,
         coverageScripts: ["latin"],
-    });
-    arialMetricArtifacts.set(style, artifact);
-    return artifact;
+    }, signal);
 };
 // True when the caller literally asked for Arimo (then its own metrics are
 // the author's intent and no replacement happens).
 const requestsArimoItself = (request) => [request.family, ...request.altFamilies].some((family) => family.trim().toLowerCase() === "arimo");
-const supplementsFor = (request) => {
-    const artifacts = loadPackagedArtifacts();
+const supplementConfigurationsFor = (request) => {
     const selected = new Map();
     for (const script of request.scripts) {
         if (script === "cjk") {
-            const artifact = cjkArtifactFor(request);
-            selected.set(artifact.sha256, artifact);
+            const config = cjkConfigFor(request);
+            selected.set(config.file, {
+                file: config.file,
+                identity: { ...config, coverageScripts: ["cjk"] },
+            });
             continue;
         }
         if (!isSupplementScript(script))
             continue;
-        const artifact = artifacts.get(script);
-        if (artifact)
-            selected.set(artifact.sha256, artifact);
+        const config = SUPPLEMENT_FONTS[script];
+        selected.set(config.file, { file: config.file, identity: config });
+    }
+    return [...selected.values()];
+};
+const supplementsFor = async (request, loadArtifact, signal) => {
+    const selected = new Map();
+    for (const { file, identity } of supplementConfigurationsFor(request)) {
+        const artifact = await loadArtifact(file, identity, signal);
+        selected.set(artifact.sha256, artifact);
     }
     return [...selected.values()];
 };
@@ -367,62 +338,69 @@ const requestKey = (request) => JSON.stringify({
 const uniqueArtifacts = (artifacts) => [
     ...new Map(artifacts.map((artifact) => [artifact.sha256, artifact])).values(),
 ];
-const createPackagedOfficeFontProvider = (primary) => ({
-    id: "dockosha-office-font-provider-v1",
-    async cacheKey(request) {
-        const primaryKey = primary.cacheKey
-            ? await primary.cacheKey(request)
-            : "uncached";
-        const supplementKey = supplementsFor(request)
-            .map((artifact) => artifact.sha256)
-            .sort()
-            .join(",");
-        return `${primary.id}|${primaryKey}|${supplementKey}`;
-    },
-    async resolve(requests, signal) {
-        if (signal.aborted) {
-            throw signal.reason ?? new Error("Office font resolution aborted");
-        }
-        const primaryResults = await primary.resolve(requests, signal);
-        const primaryByRequest = new Map(primaryResults.map((result) => [requestKey(result.request), result]));
-        return requests.map((request) => {
-            const primaryResult = primaryByRequest.get(requestKey(request));
-            const supplements = supplementsFor(request);
-            if (primaryResult?.status === "found") {
-                let primaryArtifacts = primaryResult.artifacts ?? [primaryResult.artifact];
-                if (!requestsArimoItself(request) &&
-                    primaryArtifacts.some((artifact) => artifact.family === "Arimo")) {
-                    primaryArtifacts = [
-                        arialMetricArtifactFor(request),
-                        ...primaryArtifacts.filter((artifact) => artifact.family !== "Arimo"),
-                    ];
+const createPackagedOfficeFontProvider = (primary, options = {}) => {
+    const exactProvider = options.fontProvider ?? (0, font_provider_1.createFontProvider)();
+    const loadArtifact = createArtifactLoader(exactProvider);
+    return {
+        id: "dockosha-office-font-provider-v2",
+        async cacheKey(request) {
+            const primaryKey = primary.cacheKey
+                ? await primary.cacheKey(request)
+                : "uncached";
+            const supplementKey = supplementConfigurationsFor(request)
+                .map(({ file }) => MANIFEST_ENTRIES.get(file)?.sha256 ?? file)
+                .sort()
+                .join(",");
+            return `${primary.id}|${primaryKey}|${supplementKey}`;
+        },
+        async resolve(requests, signal) {
+            if (signal.aborted) {
+                throw signal.reason ?? new Error("Office font resolution aborted");
+            }
+            const [primaryResults, supplementsByIndex] = await Promise.all([
+                primary.resolve(requests, signal),
+                Promise.all(requests.map((request) => supplementsFor(request, loadArtifact, signal))),
+            ]);
+            const primaryByRequest = new Map(primaryResults.map((result) => [requestKey(result.request), result]));
+            return Promise.all(requests.map(async (request, index) => {
+                const primaryResult = primaryByRequest.get(requestKey(request));
+                const supplements = supplementsByIndex[index];
+                if (primaryResult?.status === "found") {
+                    let primaryArtifacts = primaryResult.artifacts ?? [primaryResult.artifact];
+                    if (!requestsArimoItself(request) &&
+                        primaryArtifacts.some((artifact) => artifact.family === "Arimo")) {
+                        primaryArtifacts = [
+                            await arialMetricArtifactFor(request, loadArtifact, signal),
+                            ...primaryArtifacts.filter((artifact) => artifact.family !== "Arimo"),
+                        ];
+                    }
+                    const artifacts = uniqueArtifacts([
+                        ...primaryArtifacts,
+                        ...supplements,
+                    ]);
+                    return {
+                        status: "found",
+                        request,
+                        artifact: artifacts[0],
+                        artifacts,
+                    };
                 }
-                const artifacts = uniqueArtifacts([
-                    ...primaryArtifacts,
-                    ...supplements,
-                ]);
-                return {
-                    status: "found",
+                if (supplements.length > 0) {
+                    return {
+                        status: "found",
+                        request,
+                        artifact: supplements[0],
+                        artifacts: supplements,
+                    };
+                }
+                return (primaryResult ?? {
+                    status: "temporary_failure",
                     request,
-                    artifact: artifacts[0],
-                    artifacts,
-                };
-            }
-            if (supplements.length > 0) {
-                return {
-                    status: "found",
-                    request,
-                    artifact: supplements[0],
-                    artifacts: supplements,
-                };
-            }
-            return (primaryResult ?? {
-                status: "temporary_failure",
-                request,
-                reason: "primary font provider omitted a result",
-            });
-        });
-    },
-});
+                    reason: "primary font provider omitted a result",
+                });
+            }));
+        },
+    };
+};
 exports.createPackagedOfficeFontProvider = createPackagedOfficeFontProvider;
 //# sourceMappingURL=office-font-provider.js.map

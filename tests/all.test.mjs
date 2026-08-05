@@ -2,6 +2,7 @@ import "./package-features.test.mjs";
 import "./office.test.mjs";
 import "./office-coverage.test.mjs";
 import "./release-contract.test.mjs";
+import "./doc-yantra-font-provider.test.mjs";
 import "./redact-package.test.mjs";
 import "./worker-pdf.test.mjs";
 import "./worker-office.test.mjs";

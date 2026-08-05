@@ -1654,7 +1654,9 @@ fn chart_and_smartart_text_use_the_shared_logical_cluster_mapping() {
         r#"<?xml version="1.0"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>{source}</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
     );
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     for (label, bytes) in [
@@ -1825,7 +1827,9 @@ fn pptx_cluster_fallback_shapes_cjk_and_arabic() {
         r#"<p:sp><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="6400800" cy="1828800"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr><a:latin typeface="Arial"/></a:rPr><a:t>你好 مرحبا</a:t></a:r></a:p></p:txBody></p:sp>"#,
     );
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let prof = profile_with_options(&bytes, OfficeFormat::Pptx, &options).unwrap();
@@ -1849,7 +1853,9 @@ fn pptx_shaped_clusters_keep_the_complete_logical_source_once() {
         r#"<p:sp><p:spPr><a:xfrm><a:off x="457200" y="457200"/><a:ext cx="8229600" cy="1828800"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr><a:latin typeface="Arial"/></a:rPr><a:t>{source}</a:t></a:r></a:p></p:txBody></p:sp>"#
     ));
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let prof = profile_with_options(&bytes, OfficeFormat::Pptx, &options).unwrap();
@@ -1870,7 +1876,9 @@ fn pptx_complex_run_before_direct_run_keeps_source_order() {
         r#"<p:sp><p:spPr><a:xfrm><a:off x="457200" y="457200"/><a:ext cx="3657600" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>é</a:t></a:r><a:r><a:t xml:space="preserve"> Latin</a:t></a:r></a:p></p:txBody></p:sp>"#,
     );
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let doc = PptxDoc::open(&bytes, &options).unwrap();
@@ -1892,7 +1900,9 @@ fn pptx_wrapped_rtl_semantics_stay_owned_by_each_physical_line() {
         r#"<p:sp><p:spPr><a:xfrm><a:off x="457200" y="457200"/><a:ext cx="1828800" cy="3657600"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr lIns="0" rIns="0" tIns="0" bIns="0"/><a:lstStyle/><a:p><a:pPr rtl="1" algn="r"/><a:r><a:rPr sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>{source}</a:t></a:r></a:p></p:txBody></p:sp>"#
     ));
     let options = ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..opts()
     };
     let doc = PptxDoc::open(&bytes, &options).unwrap();

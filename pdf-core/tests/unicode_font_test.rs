@@ -20,14 +20,14 @@ use pdf_core::raster::{RenderOptions, render_page};
 const CYRILLIC: &str = "Конфиденциально";
 const GREEK: &str = "Εμπιστευτικό";
 
-fn liberation_path(file: &str) -> PathBuf {
+fn packaged_font_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../office-core/fonts/liberation")
+        .join("../packages/doc-yantra-fonts/fonts")
         .join(file)
 }
 
 fn read_liberation(file: &str) -> Vec<u8> {
-    let path = liberation_path(file);
+    let path = packaged_font_path(file);
     std::fs::read(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
 }
 
@@ -44,7 +44,7 @@ fn register_liberation_faces() {
 
 fn register_packaged_font(file: &str) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("wasm/pkg/fonts")
+        .join("../packages/doc-yantra-fonts/fonts")
         .join(file);
     register_font(
         &std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
@@ -260,8 +260,8 @@ fn absent_pictograph_names_real_codepoint_not_replacement_character() {
 #[test]
 #[serial(unicode_fonts)]
 fn astral_emoji_watermark_uses_variable_noto_face() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wasm/pkg/fonts/NotoEmoji-Variable.ttf");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../packages/doc-yantra-fonts/fonts/NotoEmoji-Variable.ttf");
     register_font(&std::fs::read(path).expect("read Noto Emoji")).expect("register Noto Emoji");
     let source = sample_pdf(&["source"]);
     let output = apply_watermark(&source, &unicode_watermark("🔒"))

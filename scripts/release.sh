@@ -26,6 +26,7 @@ cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 PACKAGES=(pdf-core office-core)
 DOCKOSHA_ADAPTER="packages/dockosha-provider"
+FONT_PACKAGE="packages/doc-yantra-fonts"
 WASM_PACK_VERSION="0.15.0"
 CARGO_LOCKS=(
   pdf-core/Cargo.lock
@@ -69,6 +70,12 @@ preflight_tools() {
     echo "error: releases require cargo-audit on PATH." >&2
     exit 1
   fi
+  for tool in npm zip unzip; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+      echo "error: releases require ${tool} on PATH." >&2
+      exit 1
+    fi
+  done
 }
 
 # ─── Version: next patch on 0.0.x, derived from existing tags ────────────────
@@ -116,11 +123,13 @@ dry_run_report() {
   done
   echo "[dry-run] would set version and both engine dependency pins to ${version} in:"
   echo "          ${DOCKOSHA_ADAPTER}/package.json"
+  echo "[dry-run] would set the optional font peer and ${FONT_PACKAGE} to ${version}"
   echo "[dry-run] would update the adapter engine entries in:"
   echo "          ${DOCKOSHA_ADAPTER}/pnpm-lock.yaml"
   echo "[dry-run] would run wasm/build.sh for: ${PACKAGES[*]}"
-  echo "[dry-run] would rebuild and test ${DOCKOSHA_ADAPTER} against the local engine pkgs"
-  echo "[dry-run] would run every test gate, commit ${PACKAGES[*]} ${DOCKOSHA_ADAPTER},"
+  echo "[dry-run] would rebuild and test ${DOCKOSHA_ADAPTER} against all local packages"
+  echo "[dry-run] would audit package contents/sizes, verify CDN bytes, build the consumer assets,"
+  echo "          clean-install the core ZIP, commit ${PACKAGES[*]} ${FONT_PACKAGE} ${DOCKOSHA_ADAPTER},"
   echo "          tag ${tag}, push origin main ${tag}"
 }
 
@@ -136,12 +145,13 @@ set_version() {
   ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
 }
 
-set_dockosha_adapter_version() {
+set_javascript_package_versions() {
   node - "${DOCKOSHA_ADAPTER}/package.json" \
-    "${DOCKOSHA_ADAPTER}/pnpm-lock.yaml" "${version}" <<'NODE'
+    "${DOCKOSHA_ADAPTER}/pnpm-lock.yaml" \
+    "${FONT_PACKAGE}/package.json" "${version}" <<'NODE'
 const fs = require("node:fs");
 
-const [manifestPath, lockfilePath, version] = process.argv.slice(2);
+const [manifestPath, lockfilePath, fontManifestPath, version] = process.argv.slice(2);
 const enginePackages = [
   "@samarthmn/doc-yantra",
   "@samarthmn/doc-yantra-office",
@@ -161,7 +171,21 @@ if (new Set(oldVersions.values()).size !== 1) {
   throw new Error("adapter engine dependency pins must already match");
 }
 manifest.version = version;
+if (manifest.peerDependencies?.["@samarthmn/doc-yantra-fonts"] === undefined) {
+  throw new Error("adapter must declare @samarthmn/doc-yantra-fonts as an optional peer");
+}
+if (manifest.peerDependenciesMeta?.["@samarthmn/doc-yantra-fonts"]?.optional !== true) {
+  throw new Error("adapter font peer must be optional");
+}
+manifest.peerDependencies["@samarthmn/doc-yantra-fonts"] = version;
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+const fontManifest = JSON.parse(fs.readFileSync(fontManifestPath, "utf8"));
+if (!/^0\.0\.\d+$/.test(fontManifest.version)) {
+  throw new Error("font package version must stay on the 0.0.x line");
+}
+fontManifest.version = version;
+fs.writeFileSync(fontManifestPath, `${JSON.stringify(fontManifest, null, 2)}\n`);
 
 let activeImporter = null;
 const lockUpdates = new Map(enginePackages.map((packageName) => [packageName, 0]));
@@ -216,9 +240,9 @@ bump_versions() {
       set_version "$manifest"
     done
   done
-  set_dockosha_adapter_version
+  set_javascript_package_versions
   echo "  set version = \"${version}\" in the lockstep Cargo.tomls"
-  echo "  set adapter version and engine dependency pins = \"${version}\""
+  echo "  set adapter, dependency pins, optional font peer, and font package = \"${version}\""
 }
 
 # ─── Build: regenerate every committed wasm package ──────────────────────────
@@ -296,10 +320,33 @@ gate_dockosha_adapter() {
       mv node_modules "${node_modules_backup}/node_modules"
     fi
     npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund \
-      ../../pdf-core/wasm/pkg ../../office-core/wasm/pkg
+      ../../pdf-core/wasm/pkg ../../office-core/wasm/pkg ../doc-yantra-fonts
     npm run build
     node --test test/*.test.mjs
   )
+}
+
+gate_distribution() {
+  echo "  auditing packed package contents and size budgets ..."
+  node scripts/package-audit.mjs
+  echo "  verifying immutable first-party font assets ..."
+  node scripts/verify-font-cdn.mjs
+  local asset_dir="tmp/release-assets-gate-${version}"
+  if [[ -e "${asset_dir}" ]]; then
+    echo "error: release asset gate directory already exists: ${asset_dir}" >&2
+    exit 1
+  fi
+  cleanup_release_assets() {
+    rm -rf -- "${asset_dir}"
+  }
+  trap cleanup_release_assets RETURN
+  echo "  building and clean-installing the consumer release assets ..."
+  node scripts/create-release-assets.mjs --out-dir "${asset_dir}"
+  node scripts/verify-release-assets.mjs \
+    --core "${asset_dir}/doc-yantra-wasm-core-${version}.zip" \
+    --fonts "${asset_dir}/doc-yantra-fonts-offline-${version}.tgz"
+  cleanup_release_assets
+  trap - RETURN
 }
 
 run_gates() {
@@ -308,12 +355,13 @@ run_gates() {
   gate_office_core
   gate_package_suite
   gate_dockosha_adapter
+  gate_distribution
   # New packages: add a gate_<package> above and call it here.
 }
 
 # ─── Ship: one commit and one tag cover every package ────────────────────────
 ship() {
-  git add "${PACKAGES[@]}" "${DOCKOSHA_ADAPTER}"
+  git add "${PACKAGES[@]}" "${FONT_PACKAGE}" "${DOCKOSHA_ADAPTER}"
   git commit -m "wasm: v${version}"
   git tag "$tag"
   git push --atomic origin main "$tag"

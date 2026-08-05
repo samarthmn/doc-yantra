@@ -23,7 +23,9 @@ fn numbering_docx() -> Vec<u8> {
 
 fn options() -> ConvertOptions {
     ConvertOptions {
-        font_dirs: vec![std::path::PathBuf::from("../pdf-core/wasm/pkg/fonts")],
+        font_dirs: vec![std::path::PathBuf::from(
+            "../packages/doc-yantra-fonts/fonts",
+        )],
         ..ConvertOptions::default()
     }
 }

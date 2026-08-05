@@ -1,7 +1,7 @@
 name: Publish wasm packages
 
-# Publishes all three committed npm packages to GitHub Packages when the local
-# release script pushes a version tag, e.g. 0.0.8.
+# Publishes the four lockstep npm packages and creates named consumer assets
+# when the local release script pushes a version tag, e.g. 0.0.21.
 on:
   push:
     tags:
@@ -10,9 +10,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write # create/upload the named GitHub Release assets
       packages: write # lets the built-in GITHUB_TOKEN publish to GitHub Packages
     defaults:
       run:
@@ -46,15 +46,21 @@ jobs:
           }
           PDF_VERSION="$(node -p "require('./pdf-core/wasm/pkg/package.json').version")"
           OFFICE_VERSION="$(node -p "require('./office-core/wasm/pkg/package.json').version")"
+          FONT_VERSION="$(node -p "require('./packages/doc-yantra-fonts/package.json').version")"
           ADAPTER_VERSION="$(node -p "require('./packages/dockosha-provider/package.json').version")"
           ADAPTER_PDF_PIN="$(node -p "require('./packages/dockosha-provider/package.json').dependencies['@samarthmn/doc-yantra']")"
           ADAPTER_OFFICE_PIN="$(node -p "require('./packages/dockosha-provider/package.json').dependencies['@samarthmn/doc-yantra-office']")"
+          ADAPTER_FONT_PIN="$(node -p "require('./packages/dockosha-provider/package.json').peerDependencies['@samarthmn/doc-yantra-fonts']")"
           test "${TAG_VERSION}" = "${PDF_VERSION}" || {
             echo "Tag ${TAG_VERSION} does not match PDF package ${PDF_VERSION}." >&2
             exit 1
           }
           test "${TAG_VERSION}" = "${OFFICE_VERSION}" || {
             echo "Tag ${TAG_VERSION} does not match Office package ${OFFICE_VERSION}." >&2
+            exit 1
+          }
+          test "${TAG_VERSION}" = "${FONT_VERSION}" || {
+            echo "Tag ${TAG_VERSION} does not match font package ${FONT_VERSION}." >&2
             exit 1
           }
           test "${TAG_VERSION}" = "${ADAPTER_VERSION}" || {
@@ -69,10 +75,33 @@ jobs:
             echo "Tag ${TAG_VERSION} does not match adapter Office pin ${ADAPTER_OFFICE_PIN}." >&2
             exit 1
           }
+          test "${TAG_VERSION}" = "${ADAPTER_FONT_PIN}" || {
+            echo "Tag ${TAG_VERSION} does not match adapter font peer ${ADAPTER_FONT_PIN}." >&2
+            exit 1
+          }
           node scripts/source-fingerprint.mjs pdf --verify pdf-core/wasm/pkg/build-fingerprint.json
           node scripts/source-fingerprint.mjs office --verify office-core/wasm/pkg/build-fingerprint.json
           node scripts/wasm-version.mjs verify pdf-core/wasm/Cargo.toml pdf-core/wasm/pkg
           node scripts/wasm-version.mjs verify office-core/wasm/Cargo.toml office-core/wasm/pkg
+          node scripts/package-audit.mjs
+
+      # Publishing is intentionally blocked until every content-addressed URL
+      # serves the exact canonical bytes with immutable caching and CORS.
+      - name: Verify first-party font assets
+        working-directory: .
+        run: node scripts/verify-font-cdn.mjs
+
+      - name: Publish offline font package to GitHub Packages
+        working-directory: packages/doc-yantra-fonts
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@samarthmn/doc-yantra-fonts@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "@samarthmn/doc-yantra-fonts@${VERSION} already published — skipping."
+          else
+            npm publish --ignore-scripts
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish PDF package to GitHub Packages
         working-directory: pdf-core/wasm/pkg
@@ -113,3 +142,43 @@ jobs:
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and verify named consumer release assets
+        working-directory: .
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          ASSET_DIR="tmp/release-assets-${VERSION}"
+          node scripts/create-release-assets.mjs --out-dir "${ASSET_DIR}"
+          node scripts/verify-release-assets.mjs \
+            --core "${ASSET_DIR}/doc-yantra-wasm-core-${VERSION}.zip" \
+            --fonts "${ASSET_DIR}/doc-yantra-fonts-offline-${VERSION}.tgz"
+
+      - name: Create or update GitHub Release
+        working-directory: .
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          ASSET_DIR="tmp/release-assets-${VERSION}"
+          NOTES="${ASSET_DIR}/RELEASE-NOTES.md"
+          cat > "${NOTES}" <<EOF
+          ## Consumer downloads
+
+          - **doc-yantra-wasm-core-${VERSION}.zip** — installable PDF, Office, and adapter npm tarballs only, plus checksums and install instructions.
+          - **doc-yantra-fonts-offline-${VERSION}.tgz** — optional exact-font pack for fully offline conversion.
+
+          GitHub's automatic **Source code (zip)** and **Source code (tar.gz)** links contain the complete development repository and are not consumer packages.
+          EOF
+          CORE="${ASSET_DIR}/doc-yantra-wasm-core-${VERSION}.zip"
+          FONTS="${ASSET_DIR}/doc-yantra-fonts-offline-${VERSION}.tgz"
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            gh release edit "${VERSION}" \
+              --title "DocYantra ${VERSION}" \
+              --notes-file "${NOTES}"
+            gh release upload "${VERSION}" "${CORE}" "${FONTS}" --clobber
+          else
+            gh release create "${VERSION}" "${CORE}" "${FONTS}" \
+              --verify-tag \
+              --title "DocYantra ${VERSION}" \
+              --notes-file "${NOTES}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

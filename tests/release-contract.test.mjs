@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -82,6 +84,23 @@ function cargoPackageVersion(relativePath) {
 
 function packageVersion(relativePath) {
   return JSON.parse(readFileSync(join(root, relativePath), "utf8")).version;
+}
+
+function npmPackManifest(packageRoot, label) {
+  const cache = join(root, "tmp", `npm-pack-cache-${label}-${process.pid}`);
+  mkdirSync(cache, { recursive: true });
+  try {
+    const result = JSON.parse(
+      execFileSync("npm", ["pack", "--dry-run", "--json", "--cache", cache], {
+        cwd: packageRoot,
+        encoding: "utf8",
+      }),
+    );
+    assert.equal(result.length, 1, `${label}: npm pack returned ${result.length} manifests`);
+    return result[0];
+  } finally {
+    rmSync(cache, { recursive: true, force: true });
+  }
 }
 
 function runWasmVersionGuard(...args) {
@@ -192,11 +211,25 @@ test("publish workflow pins its execution surface and validates committed artifa
     "node scripts/source-fingerprint.mjs office --verify office-core/wasm/pkg/build-fingerprint.json",
     "node scripts/wasm-version.mjs verify pdf-core/wasm/Cargo.toml pdf-core/wasm/pkg",
     "node scripts/wasm-version.mjs verify office-core/wasm/Cargo.toml office-core/wasm/pkg",
+    "node scripts/package-audit.mjs",
+    "node scripts/verify-font-cdn.mjs",
+    "node scripts/create-release-assets.mjs",
+    "node scripts/verify-release-assets.mjs",
   ]) {
     assert.ok(workflow.includes(command), `publish workflow is missing: ${command}`);
   }
   assert.doesNotMatch(workflow, /\bnpm publish\s*$/mu);
   assert.match(workflow, /\bnpm publish --ignore-scripts\b/u);
+  assert.equal(
+    [...workflow.matchAll(/\bnpm publish --ignore-scripts\b/gu)].length,
+    4,
+    "the workflow must publish the font pack, both engines, and adapter",
+  );
+  assert.match(workflow, /gh release (?:create|upload)/u);
+  assert.match(workflow, /doc-yantra-wasm-core-\$\{VERSION\}\.zip/u);
+  assert.match(workflow, /doc-yantra-fonts-offline-\$\{VERSION\}\.tgz/u);
+  assert.match(workflow, /verify-release-assets\.mjs[\s\\]+--core[\s\S]*--fonts/u);
+  assert.match(workflow, /Source code \(zip\).*development repository/u);
 });
 
 test("release gate requires a pinned builder and audits every Rust lockfile", () => {
@@ -215,6 +248,15 @@ test("release gate requires a pinned builder and audits every Rust lockfile", ()
     assert.ok(release.includes(lockfile), `release audit is missing ${lockfile}`);
   }
   assert.match(release, /--ignore RUSTSEC-2026-0192/u);
+  for (const command of [
+    "node scripts/package-audit.mjs",
+    "node scripts/verify-font-cdn.mjs",
+    "node scripts/create-release-assets.mjs",
+    "node scripts/verify-release-assets.mjs",
+  ]) {
+    assert.ok(release.includes(command), `release gate is missing: ${command}`);
+  }
+  assert.match(release, /verify-release-assets\.mjs[\s\\]+--core[\s\S]*--fonts/u);
 
   const toolchainPath = join(root, "rust-toolchain.toml");
   assert.ok(existsSync(toolchainPath), "release builds must pin the Rust toolchain");
@@ -231,6 +273,8 @@ test("all release surfaces carry one immutable version", () => {
     ["office-core-wasm", cargoPackageVersion("office-core/wasm/Cargo.toml")],
     ["PDF npm package", packageVersion("pdf-core/wasm/pkg/package.json")],
     ["Office npm package", packageVersion("office-core/wasm/pkg/package.json")],
+    ["offline font npm package", packageVersion("packages/doc-yantra-fonts/package.json")],
+    ["DocKosha adapter", packageVersion("packages/dockosha-provider/package.json")],
     ["PDF wasm engine", require(join(root, "pdf-core/wasm/pkg/pdf_core_wasm.js")).version()],
     [
       "Office wasm engine",
@@ -292,19 +336,8 @@ test("Office CJS provider subpaths are also importable from ESM", () => {
 
 test("packed Office artifact contains no font file or embedded font program", () => {
   const packageRoot = join(root, "office-core", "wasm", "pkg");
-  const cache = join(root, "tmp", `npm-pack-cache-${process.pid}`);
-  mkdirSync(cache, { recursive: true });
-  let manifest;
-  try {
-    manifest = JSON.parse(execFileSync(
-      "npm",
-      ["pack", "--dry-run", "--json", "--cache", cache],
-      { cwd: packageRoot, encoding: "utf8" },
-    ));
-  } finally {
-    rmSync(cache, { recursive: true, force: true });
-  }
-  const files = manifest[0]?.files?.map(({ path }) => path);
+  const manifest = npmPackManifest(packageRoot, "office");
+  const files = manifest.files?.map(({ path }) => path);
   assert.ok(Array.isArray(files) && files.length > 0, "npm pack returned no Office files");
   for (const path of files) {
     assert.doesNotMatch(path, FONT_EXTENSION, `packed font binary: ${path}`);
@@ -326,4 +359,92 @@ test("packed Office artifact contains no font file or embedded font program", ()
       `generated font byte array in packed file: ${path}`,
     );
   }
+});
+
+test("packed PDF core contains no font binary or embedded font program", () => {
+  const packageRoot = join(root, "pdf-core", "wasm", "pkg");
+  const manifest = npmPackManifest(packageRoot, "pdf");
+  const files = manifest.files?.map(({ path }) => path);
+  assert.ok(Array.isArray(files) && files.length > 0, "npm pack returned no PDF files");
+  for (const path of files) {
+    assert.doesNotMatch(path, FONT_EXTENSION, `packed font binary: ${path}`);
+    const bytes = readFileSync(join(packageRoot, path));
+    assert.equal(findFontProgram(bytes), -1, `embedded font program in packed file: ${path}`);
+  }
+});
+
+test("offline font package owns every hash-pinned font and licence", () => {
+  const packageRoot = join(root, "packages", "doc-yantra-fonts");
+  const metadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  assert.equal(metadata.name, "@samarthmn/doc-yantra-fonts");
+
+  const manifest = JSON.parse(readFileSync(join(packageRoot, "fonts", "manifest.json"), "utf8"));
+  assert.equal(manifest.fonts.length, 17);
+  for (const font of manifest.fonts) {
+    const fontPath = join(packageRoot, "fonts", font.file);
+    const actualHash = createHash("sha256").update(readFileSync(fontPath)).digest("hex");
+    assert.equal(actualHash, font.sha256, `${font.file}: canonical hash mismatch`);
+    assert.ok(existsSync(join(packageRoot, "fonts", font.license)), `${font.file}: missing licence`);
+  }
+});
+
+test("canonical distribution fonts are not duplicated in native fixture directories", () => {
+  const packageRoot = join(root, "packages", "doc-yantra-fonts");
+  const manifest = JSON.parse(readFileSync(join(packageRoot, "fonts", "manifest.json"), "utf8"));
+  const canonicalHashes = new Map(manifest.fonts.map((font) => [font.sha256, font.file]));
+  const nativeFontRoot = join(root, "office-core", "fonts");
+
+  const pending = [nativeFontRoot];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(path);
+        continue;
+      }
+      if (!FONT_EXTENSION.test(entry.name)) continue;
+      const hash = createHash("sha256").update(readFileSync(path)).digest("hex");
+      assert.equal(
+        canonicalHashes.has(hash),
+        false,
+        `${path} duplicates canonical font ${canonicalHashes.get(hash)}`,
+      );
+    }
+  }
+});
+
+test("each packed engine contains exactly one WebAssembly binary", () => {
+  for (const [label, packageRoot] of [
+    ["PDF", join(root, "pdf-core", "wasm", "pkg")],
+    ["Office", join(root, "office-core", "wasm", "pkg")],
+  ]) {
+    const manifest = npmPackManifest(packageRoot, `${label.toLowerCase()}-wasm-count`);
+    const wasmFiles = manifest.files.map(({ path }) => path).filter((path) => path.endsWith(".wasm"));
+    assert.deepEqual(wasmFiles, [wasmFiles[0]], `${label} package contains duplicate WASM binaries`);
+    assert.equal(wasmFiles.length, 1, `${label} package must contain exactly one WASM binary`);
+  }
+});
+
+test("package audit enforces the release contents and byte budgets", () => {
+  const audit = JSON.parse(
+    execFileSync(process.execPath, [join(root, "scripts", "package-audit.mjs"), "--json"], {
+      cwd: root,
+      encoding: "utf8",
+    }),
+  );
+  assert.equal(audit.version, packageVersion("pdf-core/wasm/pkg/package.json"));
+  assert.deepEqual(
+    audit.core.packages.map(({ name }) => name),
+    [
+      "@samarthmn/doc-yantra",
+      "@samarthmn/doc-yantra-office",
+      "@samarthmn/dockosha-provider-docyantra",
+    ],
+  );
+  assert.ok(audit.core.packedBytes <= 6 * 1024 * 1024, audit.core);
+  assert.ok(audit.core.unpackedBytes <= 15 * 1024 * 1024, audit.core);
+  assert.equal(audit.fonts.name, "@samarthmn/doc-yantra-fonts");
+  assert.equal(audit.fonts.fontCount, 17);
+  assert.ok(audit.fonts.packedBytes <= 145 * 1024 * 1024, audit.fonts);
 });

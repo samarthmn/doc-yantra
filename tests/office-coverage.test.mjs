@@ -109,7 +109,7 @@ function fontsourceStub({ withMath = true } = {}) {
   });
 }
 
-const CJK_FONT_DIR = join(ROOT, "pdf-core", "wasm", "pkg", "fonts");
+const CJK_FONT_DIR = join(ROOT, "packages", "doc-yantra-fonts", "fonts");
 const CJK_FILES = {
   sc: ["NotoSansCJKsc-Regular.otf", "Noto Sans CJK SC", "NotoSansCJKsc-Regular"],
   jp: ["NotoSansCJKjp-Regular.otf", "Noto Sans CJK JP", "NotoSansCJKjp-Regular"],
@@ -130,7 +130,7 @@ function cjkArtifact(variant) {
     faceIndex: 0,
     format: "otf",
     sha256: sha256(bytes),
-    source: "pdf-core-package-fonts",
+    source: "doc-yantra-offline-fonts",
     coverageScripts: ["cjk"],
     license: { id: "OFL-1.1", embeddable: true, subsettable: true },
     bytes,

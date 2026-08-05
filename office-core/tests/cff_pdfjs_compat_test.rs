@@ -22,7 +22,7 @@ fn register_noto_jp() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let noto = std::fs::read(repo_path(
-            "../pdf-core/wasm/pkg/fonts/NotoSansCJKjp-Regular.otf",
+            "../packages/doc-yantra-fonts/fonts/NotoSansCJKjp-Regular.otf",
         ))
         .expect("repo-committed Noto Sans CJK JP OTF");
         office_core::register_font(&noto).expect("register CJK face");
@@ -124,7 +124,7 @@ fn parse_cidchar_entries(cmap_text: &str) -> Vec<(u32, u32)> {
 #[test]
 fn cff_encoding_cmap_is_invertible_for_pdfjs() {
     let noto = std::fs::read(repo_path(
-        "../pdf-core/wasm/pkg/fonts/NotoSansCJKjp-Regular.otf",
+        "../packages/doc-yantra-fonts/fonts/NotoSansCJKjp-Regular.otf",
     ))
     .expect("repo-committed Noto Sans CJK JP OTF");
     office_core::register_font(&noto).expect("register CJK face");

@@ -15,6 +15,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const PDF_PKG = join(ROOT, "pdf-core", "wasm", "pkg");
 const OFFICE_PKG = join(ROOT, "office-core", "wasm", "pkg");
+const OFFLINE_FONTS = require(join(ROOT, "packages", "doc-yantra-fonts"));
 const { createPdfEngineWorker } = require(join(PDF_PKG, "worker.js"));
 const { createOfficeEngineWorker } = require(join(OFFICE_PKG, "worker.js"));
 const { EngineWorkerClient } = require(join(PDF_PKG, "worker-client.cjs"));
@@ -57,7 +58,7 @@ test("pdf worker: corrupt PDF surfaces malformed_container from the enum, not pr
 });
 
 test("pdf worker: uncovered script is missing_glyph with the machine sub-code in detail", async () => {
-  const worker = createPdfEngineWorker();
+  const worker = createPdfEngineWorker({ offlineFontPackage: OFFLINE_FONTS });
   try {
     // Ogham is not in the packaged font set; coverage preflight must reject
     // with the TextUnsupported glyph-coverage code.

@@ -1,21 +1,34 @@
 //! Build script: generates the bundled-font manifest.
 //!
-//! Scans `office-core/fonts/**` for `.ttf`/`.otf`/`.ttc` files and emits a
+//! Scans `office-core/fonts/**` for native-only fixture faces and adds the five
+//! shared Liberation faces from the canonical offline font package. It emits a
 //! `BUNDLED_FONTS` table of `(file_stem, include_bytes!(abs_path))` into
-//! `$OUT_DIR/bundled_fonts.rs`. When the directory is empty (before human task
-//! H2 vendors the OFL fonts) the table is simply empty — the crate still
-//! compiles and every non-font test passes.
+//! `$OUT_DIR/bundled_fonts.rs`.
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
+const SHARED_LIBERATION_FONTS: &[&str] = &[
+    "LiberationMono-Regular.ttf",
+    "LiberationSans-Bold.ttf",
+    "LiberationSans-BoldItalic.ttf",
+    "LiberationSans-Italic.ttf",
+    "LiberationSans-Regular.ttf",
+];
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let fonts_dir = manifest_dir.join("fonts");
+    let canonical_fonts_dir = manifest_dir.join("../packages/doc-yantra-fonts/fonts");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let mut fonts = Vec::new();
     collect_fonts(&fonts_dir, &mut fonts);
+    fonts.extend(
+        SHARED_LIBERATION_FONTS
+            .iter()
+            .map(|file| canonical_fonts_dir.join(file)),
+    );
     // Deterministic ordering so builds are reproducible.
     fonts.sort();
 
@@ -39,6 +52,7 @@ fn main() {
 
     fs::write(out_dir.join("bundled_fonts.rs"), code).expect("write bundled_fonts.rs");
     println!("cargo:rerun-if-changed=fonts");
+    println!("cargo:rerun-if-changed={}", canonical_fonts_dir.display());
 }
 
 fn collect_fonts(dir: &Path, out: &mut Vec<PathBuf>) {

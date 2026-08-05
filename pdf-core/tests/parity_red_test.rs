@@ -26,7 +26,7 @@ fn area(page_index: u32) -> RedactArea {
 
 fn register_liberation_faces() {
     let font_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../office-core/fonts/liberation");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../packages/doc-yantra-fonts/fonts");
     for file in [
         "LiberationSans-Regular.ttf",
         "LiberationSans-Bold.ttf",

@@ -10,7 +10,8 @@ This repo is DocKosha's **proprietary PDF engine** and its distributable
 | `office-core/` | The pure-Rust **Office → PDF** engine: DOCX/PPTX/XLSX layout + PDF emission, fail-closed envelope, DocProfile router contract. No LibreOffice/Chromium/pdfium in the conversion path. See [`office-core/README.md`](office-core/README.md). |
 | `office-core/wasm/` | The **`@samarthmn/doc-yantra-office`** npm package (Node CJS + browser ESM). `office_profile()` / `office_to_pdf()` / `register_font()`. DocKosha routes all office conversions here; envelope misses fail closed (no LibreOffice anywhere). |
 | `packages/dockosha-provider/` | The **`@samarthmn/dockosha-provider-docyantra`** TypeScript adapter. Its committed `dist/` and exact engine pins release in lockstep with both wasm engines. |
-| `.github/workflows/publish-wasm.yml` | Validates a `0.0.*` tag against `main` and all three committed package versions, then publishes both engines followed by the adapter to **GitHub Packages** without rebuilding or retesting them. |
+| `packages/doc-yantra-fonts/` | The optional **`@samarthmn/doc-yantra-fonts`** offline pack. It owns the one canonical copy of all 17 hash-pinned distribution fonts and their licences; neither engine package contains font binaries. |
+| `.github/workflows/publish-wasm.yml` | Validates a `0.0.*` tag, publishes all four lockstep packages to **GitHub Packages**, and attaches the small named consumer ZIP plus the separate offline font pack to the GitHub Release. |
 
 > **History note:** the DocYantra HTTP service (NestJS + Gotenberg) has been
 > retired and deleted from the DocKosha app repo. These packages are the only
@@ -23,8 +24,8 @@ Packages; consume the registry version (this is how DocKosha ships today):
 
 ```jsonc
 // app package.json — needs @samarthmn:registry in .npmrc + a read:packages token
-"@samarthmn/doc-yantra": "0.0.7",
-"@samarthmn/doc-yantra-office": "0.0.7"
+"@samarthmn/doc-yantra": "0.0.21",        // example: use the latest tag
+"@samarthmn/doc-yantra-office": "0.0.21"
 ```
 
 > Releases stay on the **0.0.x** line. On `0.0.x`, a caret pins the exact patch
@@ -34,6 +35,13 @@ Packages; consume the registry version (this is how DocKosha ships today):
 For local engine iteration you can temporarily `link:` a sibling checkout
 (`link:../doc-yantra/pdf-core/wasm/pkg`), but switch back to the registry range
 before committing — see CONSUMING.md § "Local development".
+
+The default install is fontless. Unicode text operations resolve only the
+required exact faces, in this order: memory cache, persistent cache, installed
+offline font pack, then immutable first-party HTTPS assets. Font-independent
+merge, redaction, validation, and page counting perform no font I/O. Install
+`@samarthmn/doc-yantra-fonts` at the same exact version only when the deployment
+must work fully offline.
 
 ```ts
 import * as pdf from "@samarthmn/doc-yantra"; // server-side only (CJS)
@@ -80,6 +88,18 @@ It contains no fonts: hosts discover canonical requests with
 `office_register_font()`, then profile and convert. Native Office builds retain
 the default `bundled-fonts` feature for hermetic engine tests; fidelity corpus
 runs register the hash-pinned provider fonts described below.
+
+## Consumer release downloads
+
+Use the named `doc-yantra-wasm-core-<version>.zip` GitHub Release asset for a
+downloadable distribution. It contains only the PDF, Office, and adapter npm
+tarballs, checksums, and installation instructions. The optional
+`doc-yantra-fonts-offline-<version>.tgz` is separate.
+
+GitHub's automatic **Source code (zip)** and **Source code (tar.gz)** links are
+development snapshots of the entire tagged repository—including Rust source,
+fixtures, corpora, and committed artifacts. They are intentionally not consumer
+packages.
 
 ## Running the full fidelity suite
 
@@ -129,11 +149,13 @@ and commit the resulting `fonts.lock` change together with that upgrade.
 
 Releases stay on the **0.0.x** line — only the patch increments. From a clean
 `main`, one script picks the next `x`, bumps all four engine/wasm manifests plus
-the adapter manifest and engine pins, rebuilds and tests all three packages,
+the adapter and font-package manifests, rebuilds and tests the four packages,
 runs the blocking DOCX fidelity corpus, then commits, tags, and atomically
-pushes `main` + `0.0.x`. The tag workflow verifies that the tagged commit is on
-`main` and all three committed package versions match the tag, then publishes
-both engines followed by the adapter without rebuilding or retesting them:
+pushes `main` + `0.0.x`. Before tagging, it audits every `npm pack`, enforces
+the core/font byte budgets, verifies the first-party CDN bytes and headers, and
+clean-installs the generated consumer ZIP. The tag workflow repeats those
+distribution checks, publishes the font pack, both engines, and the adapter,
+then creates the named GitHub Release assets:
 
 ```bash
 scripts/release.sh            # auto: next patch, commit, tag, push

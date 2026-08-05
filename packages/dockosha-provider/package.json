@@ -31,6 +31,14 @@
     "@samarthmn/doc-yantra-office": "0.0.20",
     "zod": "^4.1.1"
   },
+  "peerDependencies": {
+    "@samarthmn/doc-yantra-fonts": "0.0.20"
+  },
+  "peerDependenciesMeta": {
+    "@samarthmn/doc-yantra-fonts": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^20",
     "typescript": "^5"

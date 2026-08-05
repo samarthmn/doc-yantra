@@ -1,12 +1,17 @@
 'use strict';
 
-const { join } = require('node:path');
 const { types: { isProxy } } = require('node:util');
 const {
   EngineWorkerClient,
   EngineWorkerError,
   errorFor,
 } = require('./worker-client.cjs');
+const {
+  FontProviderError,
+  createFontProvider,
+  fontManifest,
+  validateFontBytes,
+} = require('./font-provider.cjs');
 
 const MAX_INPUT_BYTES = 100 * 1024 * 1024;
 const MAX_MERGE_TOTAL_BYTES = 200 * 1024 * 1024;
@@ -17,35 +22,33 @@ const MAX_JSON_DEPTH = 64;
 const MAX_JSON_ITEMS = 100_000;
 const MAX_PAGE_COUNT = 10_000;
 const MAX_RANGE_COUNT = 10_000;
-// First-covering-face wins in pdf-core. Keep Latin on Liberation and prefer
-// Simplified Chinese for shared Han code points; never depend on dir ordering.
-// fonts/manifest.json array order is the single source of truth so a font-pack
-// change cannot silently miss registration; the static list is only the
-// fallback for a package whose manifest is unreadable.
-const FALLBACK_FONT_ORDER = [
+const MAX_FONT_BYTES = 32 * 1024 * 1024;
+const FONT_ORDER = fontManifest.fonts.map(({ file }) => file);
+const FONT_ENTRIES = new Map(fontManifest.fonts.map((entry) => [entry.file, entry]));
+const LIBERATION_STYLE_FONTS = [
   'LiberationSans-Regular.ttf',
   'LiberationSans-Bold.ttf',
+  'LiberationSans-Italic.ttf',
+  'LiberationSans-BoldItalic.ttf',
   'LiberationMono-Regular.ttf',
-  'NotoSansCJKsc-Regular.otf',
-  'NotoSansCJKtc-Regular.otf',
-  'NotoSansCJKjp-Regular.otf',
-  'NotoSansCJKkr-Regular.otf',
-  'NotoEmoji-Variable.ttf',
 ];
 
-function fontRegistrationOrder() {
-  try {
-    const manifest = JSON.parse(
-      require('node:fs').readFileSync(join(__dirname, 'fonts', 'manifest.json'), 'utf8'),
-    );
-    const files = manifest.fonts.map((font) => font.file);
-    if (files.length > 0 && files.every((file) => typeof file === 'string')) {
-      return files;
-    }
-  } catch {
-    // fall through to the static list
+function requiredFontFiles(text) {
+  if (typeof text !== 'string' || !/[\u0100-\u{10ffff}]/u.test(text)) return [];
+  const required = new Set(LIBERATION_STYLE_FONTS);
+  if (/[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/u.test(text)) {
+    required.add('NotoSansArabic-Variable.ttf');
   }
-  return FALLBACK_FONT_ORDER;
+  if (/[\u0900-\u097f]/u.test(text)) required.add('NotoSansDevanagari-Variable.ttf');
+  if (/[\u0e00-\u0e7f]/u.test(text)) required.add('NotoSansThai-Variable.ttf');
+  if (/[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\u3040-\u30ff\u{20000}-\u{3134f}]/u.test(text)) {
+    // First-covering-face order historically chose SC for shared Han glyphs.
+    required.add('NotoSansCJKsc-Regular.otf');
+  }
+  if (/\p{Extended_Pictographic}|[\u2600-\u27bf]/u.test(text)) {
+    required.add('NotoEmoji-Variable.ttf');
+  }
+  return FONT_ORDER.filter((file) => required.has(file));
 }
 
 function requireRecord(value, label) {
@@ -145,6 +148,111 @@ function invokeValidated(client, op, input, validate) {
   }
 }
 
+function providerError(error, file) {
+  if (error instanceof EngineWorkerError) return error;
+  if (error instanceof FontProviderError && error.code === 'font_too_large') {
+    return errorFor('resource_limit', error.message, { reason: error.code });
+  }
+  const reason = typeof error?.code === 'string' ? error.code : 'font_unavailable';
+  return errorFor(
+    'missing_asset',
+    `required font ${file} could not be resolved`,
+    { reason, context: String(error?.message ?? error).slice(0, 1024) },
+  );
+}
+
+function operationDeadlineError(invocation) {
+  return errorFor(
+    'deadline_exceeded',
+    `operation ${invocation.op} exceeded its ${invocation.timeoutMs} ms deadline`,
+  );
+}
+
+async function resolveFontWithDeadline(provider, file, invocation) {
+  const remainingMs = invocation.deadlineAt - Date.now();
+  if (remainingMs <= 0) throw operationDeadlineError(invocation);
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = operationDeadlineError(invocation);
+      controller.abort(error);
+      reject(error);
+    }, remainingMs);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => provider.resolve(file, controller.signal)),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function registerRequiredFonts(client, provider, resolvedFonts, files, invocation) {
+  if (files.length === 0) return;
+  if (provider === undefined) {
+    throw errorFor('missing_asset', 'Unicode text requires a fontProvider', {
+      reason: 'font_provider_missing',
+    });
+  }
+  for (const file of files) {
+    client.assertInvocationActive(invocation);
+    let bytes = resolvedFonts.get(file);
+    if (bytes === undefined) {
+      try {
+        const result = await resolveFontWithDeadline(provider, file, invocation);
+        if (!result || typeof result !== 'object' || result.bytes === undefined) {
+          throw new TypeError('fontProvider.resolve() must return an object containing bytes');
+        }
+        bytes = validateFontBytes(result.bytes, FONT_ENTRIES.get(file));
+      } catch (error) {
+        throw providerError(error, file);
+      }
+      if (bytes.byteLength > MAX_FONT_BYTES) {
+        throw errorFor('resource_limit', `${file} exceeds the 32 MiB font limit`);
+      }
+      resolvedFonts.set(file, new Uint8Array(bytes));
+    }
+    client.assertInvocationActive(invocation);
+    await client.invoke(
+      'registerFont',
+      { bytes, key: file },
+      Math.max(1, invocation.deadlineAt - Date.now()),
+    );
+  }
+}
+
+function invokeWithFonts(client, provider, resolvedFonts, op, input, validate, textFor) {
+  const startedAt = Date.now();
+  let invocation;
+  try {
+    const snapshot = requireRecord(input, `${op} input`);
+    invocation = client.createInvocation(op, snapshot.timeoutMs, startedAt);
+    const args = validate(invocation, snapshot);
+    const files = requiredFontFiles(textFor(snapshot));
+    return registerRequiredFonts(client, provider, resolvedFonts, files, invocation)
+      .then(() => {
+        client.assertInvocationActive(invocation);
+        return client.invoke(op, args, invocation);
+      })
+      .catch((error) => {
+        client.assertInvocationActive(invocation);
+        throw error;
+      });
+  } catch (error) {
+    if (invocation) {
+      try {
+        client.assertInvocationActive(invocation);
+      } catch (deadline) {
+        return Promise.reject(deadline);
+      }
+    }
+    return Promise.reject(error);
+  }
+}
+
 function parseBoundedJson(value, label, maxBytes, invocation, expected) {
   const bytes = stringBytes(value, label);
   if (bytes > maxBytes) {
@@ -195,15 +303,34 @@ function parseBoundedJson(value, label, maxBytes, invocation, expected) {
 
 function clientDeadlineCheck(invocation) {
   if (Date.now() >= invocation.deadlineAt) {
-    throw errorFor(
-      'deadline_exceeded',
-      `operation ${invocation.op} exceeded its ${invocation.timeoutMs} ms deadline`,
-    );
+    throw operationDeadlineError(invocation);
   }
 }
 
 function createPdfEngineWorker(options = {}) {
   options = requireRecord(options, 'options');
+  let fontProvider;
+  if (options.fontProvider === false) {
+    fontProvider = undefined;
+  } else if (options.fontProvider !== undefined) {
+    if (!options.fontProvider || typeof options.fontProvider !== 'object' ||
+        typeof options.fontProvider.resolve !== 'function' || isProxy(options.fontProvider)) {
+      throw errorFor('invalid_input', 'fontProvider must expose resolve(file, signal) or be false');
+    }
+    fontProvider = options.fontProvider;
+  } else {
+    fontProvider = createFontProvider({
+      memoryCache: options.fontMemoryCache,
+      persistentCache: options.fontPersistentCache,
+      offlinePackage: options.offlineFontPackage,
+      fetch: options.fontFetch,
+      baseUrl: options.fontCdnBaseUrl,
+      timeoutMs: options.fontProviderTimeoutMs,
+      maxRedirects: options.fontMaxRedirects,
+      telemetry: options.fontTelemetry,
+    });
+  }
+  const resolvedFonts = new Map();
   const entryPath = process.env.DOC_YANTRA_WORKER_TEST_HOOKS === '1' && options.__workerEntryPath
     ? options.__workerEntryPath
     : require.resolve('./worker-entry.cjs');
@@ -212,14 +339,12 @@ function createPdfEngineWorker(options = {}) {
     workerData: {
       gluePath: require.resolve('./pdf_core_wasm.js'),
       opsPath: require.resolve('./worker-ops.cjs'),
-      fontsDir: join(__dirname, 'fonts'),
-      fontOrder: fontRegistrationOrder(),
     },
   }, options);
 
   const api = {
     mergePdfs(input) {
-      return invokeValidated(client, 'mergePdfs', input, (invocation, snapshot) => {
+      return invokeWithFonts(client, fontProvider, resolvedFonts, 'mergePdfs', input, (invocation, snapshot) => {
       const { watermarkJson, watermarkImage } = snapshot;
       const pdfs = requireDataArray(snapshot.pdfs, 'pdfs');
       if (pdfs.length === 0) {
@@ -237,37 +362,37 @@ function createPdfEngineWorker(options = {}) {
       }
       optionalBinary(watermarkImage, 'watermark image');
       return { pdfs, watermarkJson, watermarkImage };
-      });
+      }, (snapshot) => snapshot.watermarkJson ?? '');
     },
     applyWatermark(input) {
-      return invokeValidated(client, 'applyWatermark', input, (invocation, snapshot) => {
+      return invokeWithFonts(client, fontProvider, resolvedFonts, 'applyWatermark', input, (invocation, snapshot) => {
       const { pdf, watermarkJson, watermarkImage } = snapshot;
       cap(binaryLength(pdf, 'pdf'), MAX_INPUT_BYTES, 'PDF');
       parseBoundedJson(watermarkJson, 'watermarkJson', MAX_WATERMARK_JSON_BYTES, invocation, 'object');
       optionalBinary(watermarkImage, 'watermark image');
       return { pdf, watermarkJson, watermarkImage };
-      });
+      }, (snapshot) => snapshot.watermarkJson);
     },
     csvToPdf(input) {
-      return invokeValidated(client, 'csvToPdf', input, (_invocation, snapshot) => {
+      return invokeWithFonts(client, fontProvider, resolvedFonts, 'csvToPdf', input, (_invocation, snapshot) => {
       const { csv } = snapshot;
       cap(binaryLength(csv, 'csv'), MAX_INPUT_BYTES, 'CSV');
       return { csv };
-      });
+      }, (snapshot) => new TextDecoder().decode(snapshot.csv));
     },
     markdownToPdf(input) {
-      return invokeValidated(client, 'markdownToPdf', input, (_invocation, snapshot) => {
+      return invokeWithFonts(client, fontProvider, resolvedFonts, 'markdownToPdf', input, (_invocation, snapshot) => {
       const { markdown } = snapshot;
       cap(stringBytes(markdown, 'markdown'), MAX_INPUT_BYTES, 'Markdown');
       return { markdown };
-      });
+      }, (snapshot) => snapshot.markdown);
     },
     textToPdf(input) {
-      return invokeValidated(client, 'textToPdf', input, (_invocation, snapshot) => {
+      return invokeWithFonts(client, fontProvider, resolvedFonts, 'textToPdf', input, (_invocation, snapshot) => {
       const { text } = snapshot;
       cap(stringBytes(text, 'text'), MAX_INPUT_BYTES, 'text');
       return { text };
-      });
+      }, (snapshot) => snapshot.text);
     },
     redactPdf(input) {
       return invokeValidated(client, 'redactPdf', input, (invocation, snapshot) => {

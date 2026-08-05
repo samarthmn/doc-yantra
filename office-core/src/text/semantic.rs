@@ -246,7 +246,7 @@ mod tests {
         // Use the deterministic repository CJK fixture rather than relying on
         // an implicitly scanned OS font for Extension-B coverage.
         let source = "e\u{301} é لا שָׁ क्षि ก้ 日 ⌚️ 👍🏽 👩‍💻 LTR שלום 123";
-        let db = FontDb::with_system(&["../pdf-core/wasm/pkg/fonts".into()]);
+        let db = FontDb::with_system(&["../packages/doc-yantra-fonts/fonts".into()]);
         let faces: Vec<_> = db.faces().iter().collect();
         let shaped =
             shape::require_glyphs(shape::shape_with_fallback(source, &faces, 12.0, 0.0, true))
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn simple_monotonic_ltr_maps_source_directly_onto_painted_glyphs() {
         let source = "Alpha Bravo 123";
-        let db = FontDb::with_system(&["../pdf-core/wasm/pkg/fonts".into()]);
+        let db = FontDb::with_system(&["../packages/doc-yantra-fonts/fonts".into()]);
         let faces: Vec<_> = db.faces().iter().collect();
         let shaped =
             shape::require_glyphs(shape::shape_with_fallback(source, &faces, 12.0, 0.0, false))
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn direct_mapping_can_be_disabled_for_an_explicit_bidi_container() {
         let source = "Latin inside bidi";
-        let db = FontDb::with_system(&["../pdf-core/wasm/pkg/fonts".into()]);
+        let db = FontDb::with_system(&["../packages/doc-yantra-fonts/fonts".into()]);
         let faces: Vec<_> = db.faces().iter().collect();
         let shaped =
             shape::require_glyphs(shape::shape_with_fallback(source, &faces, 12.0, 0.0, false))
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn combining_cluster_uses_a_nonzero_advance_semantic_owner() {
         let source = "ب\u{08CA}\u{08CB}";
-        let db = FontDb::with_system(&["../pdf-core/wasm/pkg/fonts".into()]);
+        let db = FontDb::with_system(&["../packages/doc-yantra-fonts/fonts".into()]);
         let faces: Vec<_> = db.faces().iter().collect();
         let shaped =
             shape::require_glyphs(shape::shape_with_fallback(source, &faces, 12.0, 0.0, true))

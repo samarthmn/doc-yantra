@@ -70,7 +70,7 @@ fn register_packaged_fonts(root: &std::path::Path) {
         "NotoSansThai-Variable.ttf",
         "NotoEmoji-Variable.ttf",
     ] {
-        let path = root.join("pdf-core/wasm/pkg/fonts").join(file);
+        let path = root.join("packages/doc-yantra-fonts/fonts").join(file);
         register_font(
             &std::fs::read(&path)
                 .unwrap_or_else(|error| panic!("read packaged font {}: {error}", path.display())),

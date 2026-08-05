@@ -15,9 +15,8 @@ const syncBrowserAssets = (options = {}) => {
     const webDirectory = (0, node_path_1.join)(packageDirectory, "web");
     const targetDirectory = options.targetDirectory ?? (0, node_path_1.join)(process.cwd(), "public", "wasm");
     (0, node_fs_1.mkdirSync)(targetDirectory, { recursive: true });
-    for (const file of ["pdf_core_wasm.js", "pdf_core_wasm_bg.wasm"]) {
-        (0, node_fs_1.copyFileSync)((0, node_path_1.join)(webDirectory, file), (0, node_path_1.join)(targetDirectory, file));
-    }
+    (0, node_fs_1.copyFileSync)((0, node_path_1.join)(webDirectory, "pdf_core_wasm.js"), (0, node_path_1.join)(targetDirectory, "pdf_core_wasm.js"));
+    (0, node_fs_1.copyFileSync)((0, node_path_1.join)(packageDirectory, "pdf_core_wasm_bg.wasm"), (0, node_path_1.join)(targetDirectory, "pdf_core_wasm_bg.wasm"));
 };
 exports.syncBrowserAssets = syncBrowserAssets;
 //# sourceMappingURL=sync-browser-assets.js.map

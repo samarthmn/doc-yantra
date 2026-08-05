@@ -24,7 +24,12 @@ export const syncBrowserAssets = (
     options.targetDirectory ?? join(process.cwd(), "public", "wasm");
 
   mkdirSync(targetDirectory, { recursive: true });
-  for (const file of ["pdf_core_wasm.js", "pdf_core_wasm_bg.wasm"]) {
-    copyFileSync(join(webDirectory, file), join(targetDirectory, file));
-  }
+  copyFileSync(
+    join(webDirectory, "pdf_core_wasm.js"),
+    join(targetDirectory, "pdf_core_wasm.js"),
+  );
+  copyFileSync(
+    join(packageDirectory, "pdf_core_wasm_bg.wasm"),
+    join(targetDirectory, "pdf_core_wasm_bg.wasm"),
+  );
 };

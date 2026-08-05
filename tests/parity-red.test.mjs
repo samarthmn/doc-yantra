@@ -41,11 +41,11 @@ function mockPdf() {
 function registerPackagedFonts() {
   if (packagedFontsRegistered) return;
 
-  const fontDir = join(PKG, "fonts");
+  const fontDir = join(ROOT, "packages", "doc-yantra-fonts", "fonts");
   const fontNames = JSON.parse(readFileSync(join(fontDir, "manifest.json"), "utf8"))
     .fonts
     .map((font) => font.file);
-  assert.ok(fontNames.length > 0, "built package must contain runtime fonts");
+  assert.ok(fontNames.length > 0, "offline font package must contain runtime fonts");
 
   for (const name of fontNames) {
     main.register_font(readFileSync(join(fontDir, name)));

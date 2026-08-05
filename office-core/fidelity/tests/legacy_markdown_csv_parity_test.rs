@@ -79,8 +79,11 @@ fn register_packaged_fonts(root: &Path) {
         "NotoSansThai-Variable.ttf",
         "NotoEmoji-Variable.ttf",
     ] {
-        register_font(&read(root, &format!("pdf-core/wasm/pkg/fonts/{file}")))
-            .unwrap_or_else(|error| panic!("register {file}: {error}"));
+        register_font(&read(
+            root,
+            &format!("packages/doc-yantra-fonts/fonts/{file}"),
+        ))
+        .unwrap_or_else(|error| panic!("register {file}: {error}"));
     }
 }
 

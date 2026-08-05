@@ -335,7 +335,8 @@ mod tests {
 
     #[test]
     fn liberation_sans_natural_and_auto_line_heights_include_hhea_line_gap() {
-        let bytes = include_bytes!("../../fonts/liberation/LiberationSans-Regular.ttf");
+        let bytes =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf");
         let face = ttf_parser::Face::parse(bytes, 0).expect("bundled Liberation Sans face");
         let os2 = face.tables().os2.expect("Liberation Sans OS/2 table");
         assert!(face.line_gap() > 0, "fixture must exercise a real hhea gap");

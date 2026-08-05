@@ -5,6 +5,13 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 
 const ROOT = join(__dirname, '..', '..');
+const SHARED_DISTRIBUTION_FILES = new Set([
+  'LiberationMono-Regular.ttf',
+  'LiberationSans-Bold.ttf',
+  'LiberationSans-BoldItalic.ttf',
+  'LiberationSans-Italic.ttf',
+  'LiberationSans-Regular.ttf',
+]);
 
 const FAMILIES = {
   Carlito: { directory: 'carlito', version: 'Version 1.104' },
@@ -56,7 +63,10 @@ function artifactFor(request) {
   if (!descriptor) return undefined;
   const style = styleFor(request);
   const file = fontFile(family, style);
-  const bytes = readFileSync(join(ROOT, 'office-core', 'fonts', descriptor.directory, file));
+  const path = SHARED_DISTRIBUTION_FILES.has(file)
+    ? join(ROOT, 'packages', 'doc-yantra-fonts', 'fonts', file)
+    : join(ROOT, 'office-core', 'fonts', descriptor.directory, file);
+  const bytes = readFileSync(path);
   return {
     family,
     fullName: fullName(family, style),
