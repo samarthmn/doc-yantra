@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-core"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "clap",
  "csv",
