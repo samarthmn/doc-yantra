@@ -27,8 +27,8 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 GNU Affero General Public License v3.0 only (AGPL-3.0-only)
 
 Used by:
-- pdf-core 0.0.23
-- pdf-core-wasm 0.0.23
+- pdf-core 0.0.24
+- pdf-core-wasm 0.0.24
 - text-core 0.0.10
 
 GNU AFFERO GENERAL PUBLIC LICENSE

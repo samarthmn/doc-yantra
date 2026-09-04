@@ -7,14 +7,14 @@ see [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md).
 
 ## Install
 
-Pin all required packages to the same release candidate (currently `0.0.23`):
+Pin all required packages to the same release candidate (currently `0.0.24`):
 
 ```json
 {
   "dependencies": {
-    "@samarthmn/doc-yantra": "0.0.23",
-    "@samarthmn/doc-yantra-office": "0.0.23",
-    "@samarthmn/dockosha-provider-docyantra": "0.0.23"
+    "@samarthmn/doc-yantra": "0.0.24",
+    "@samarthmn/doc-yantra-office": "0.0.24",
+    "@samarthmn/dockosha-provider-docyantra": "0.0.24"
   }
 }
 ```
@@ -30,7 +30,7 @@ Fonts are optional and are never installed by default. For an offline
 deployment, add the separate font pack at the same version:
 
 ```json
-"@samarthmn/doc-yantra-fonts": "0.0.23"
+"@samarthmn/doc-yantra-fonts": "0.0.24"
 ```
 
 The default font-free path keeps font-independent operations local. Hosts that
@@ -57,7 +57,7 @@ exports for DOCX/PPTX/XLSX, plus host font registration and worker APIs. It is
 fontless by default and fails closed outside its supported envelope.
 
 `@samarthmn/dockosha-provider-docyantra` adapts both engines to DocKosha's
-provider contract. DocKosha declares DocYantra as a mandatory direct `0.0.23`
+provider contract. DocKosha declares DocYantra as a mandatory direct `0.0.24`
 dependency; there is no provider-selection environment variable or fallback.
 
 ```js

@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@samarthmn/doc-yantra':
-        specifier: 0.0.23
-        version: 0.0.23
+        specifier: 0.0.24
+        version: 0.0.24
       '@samarthmn/doc-yantra-office':
-        specifier: 0.0.23
-        version: 0.0.23
+        specifier: 0.0.24
+        version: 0.0.24
       zod:
         specifier: ^4.1.1
         version: 4.4.3
@@ -27,11 +27,11 @@ importers:
 
 packages:
 
-  '@samarthmn/doc-yantra-office@0.0.23':
-    resolution: {integrity: sha512-m5GWTm8ogPH/x0aNwUjLcVQuoFoaji8kQgRnR5OZktgsa5/f65nw82b6u/lOgQUtTuTMhW/ZnJSPaEgH/hPEgQ==}
+  '@samarthmn/doc-yantra-office@0.0.24':
+    resolution: {integrity: sha512-r+sQcHiyombCacAg0EOgWpEHt6ixiZ3zvjG/mfb/IMk1hMsLAggAmcg2ZE33LoM05cXdS4jwP+T/l3ycb70F4w==}
 
-  '@samarthmn/doc-yantra@0.0.23':
-    resolution: {integrity: sha512-SIwN5buL7/p8Nc9patAzPZ2hv/d/ovgNg98jbrjbBKJA5QuX/9d5LLrKnjCfX4LbL3tdfxvF3hfadbuR8M8U1A==}
+  '@samarthmn/doc-yantra@0.0.24':
+    resolution: {integrity: sha512-uNSPY7iMNcXBdAT7LhxuzlLFfaYpeKlBWARHcUsqsCNyKAWQlguEj7S0+xYKOHi+vZLqQPhHnvOBBG0kiEqUjA==}
 
   '@types/node@20.19.43':
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
@@ -49,9 +49,9 @@ packages:
 
 snapshots:
 
-  '@samarthmn/doc-yantra-office@0.0.23': {}
+  '@samarthmn/doc-yantra-office@0.0.24': {}
 
-  '@samarthmn/doc-yantra@0.0.23': {}
+  '@samarthmn/doc-yantra@0.0.24': {}
 
   '@types/node@20.19.43':
     dependencies:

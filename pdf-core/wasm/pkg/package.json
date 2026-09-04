@@ -1,7 +1,7 @@
 {
   "name": "@samarthmn/doc-yantra",
   "description": "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel + browser)",
-  "version": "0.0.23",
+  "version": "0.0.24",
   "license": "AGPL-3.0-only",
   "files": [
     "pdf_core_wasm_bg.wasm",
@@ -33,7 +33,7 @@
     "registry": "https://npm.pkg.github.com"
   },
   "peerDependencies": {
-    "@samarthmn/doc-yantra-fonts": "0.0.23"
+    "@samarthmn/doc-yantra-fonts": "0.0.24"
   },
   "peerDependenciesMeta": {
     "@samarthmn/doc-yantra-fonts": {

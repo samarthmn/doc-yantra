@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -51,8 +52,15 @@ test("public export retains PDFium license notices but excludes downloaded PDFiu
       .map((name) => `pdf-core/pdfium/licenses/${name}`),
   ];
   const publicFiles = new Set(publicSourceFiles(root));
+  const trackedFiles = new Set(
+    execFileSync("git", ["ls-files", "--", "pdf-core/pdfium"], { cwd: root, encoding: "utf8" })
+      .trim()
+      .split("\n")
+      .filter(Boolean),
+  );
   for (const notice of expectedNotices) {
     assert.equal(publicFiles.has(notice), true, `missing public PDFium notice: ${notice}`);
+    assert.equal(trackedFiles.has(notice), true, `PDFium notice is not committed: ${notice}`);
   }
   assert.equal(publicFiles.has("pdf-core/pdfium/lib/libpdfium.so"), false);
   assert.equal(publicFiles.has("pdf-core/pdfium/include/fpdfview.h"), false);

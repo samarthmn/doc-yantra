@@ -2,8 +2,12 @@
 target/
 **/*.rs.bk
 
-# pdfium binary is fetched per-platform (pdf-core/scripts/fetch-pdfium.sh)
-pdf-core/pdfium/
+# pdfium binaries and headers are fetched per-platform. Legal notices are
+# committed because the public source export promises to retain them.
+pdf-core/pdfium/*
+!pdf-core/pdfium/LICENSE
+!pdf-core/pdfium/licenses/
+!pdf-core/pdfium/licenses/**
 
 # OS
 .DS_Store

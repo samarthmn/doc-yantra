@@ -1176,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "office-core"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "clap",
  "image",
@@ -1212,7 +1212,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "pdf-core"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "csv",
  "image",
