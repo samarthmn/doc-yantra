@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -52,5 +53,42 @@ test("syncBrowserAssets copies runtime glue and wasm into the requested director
     );
   } finally {
     rmSync(targetDirectory, { recursive: true, force: true });
+  }
+});
+
+test("adapter initializes in a child process without the font package", () => {
+  const scriptPath = path.join(
+    process.cwd(),
+    "tmp",
+    "dockosha-provider-fontless-" + process.pid + ".cjs",
+  );
+  const script = [
+    'const Module = require("node:module");',
+    "const originalResolve = Module._resolveFilename;",
+    "Module._resolveFilename = function (request, parent, isMain, options) {",
+    '  if (request === "@samarthmn/doc-yantra-fonts" || request.startsWith("@samarthmn/doc-yantra-fonts/")) {',
+    '    throw new Error("font package intentionally unavailable");',
+    "  }",
+    "  return originalResolve.call(this, request, parent, isMain, options);",
+    "};",
+    "(async () => {",
+    "  const provider = require(" +
+      JSON.stringify(path.join(process.cwd(), "dist", "index.js")) +
+      ").createProvider();",
+    '  if (provider.id !== "docyantra") throw new Error("adapter identity is unavailable");',
+    "  const result = await provider.mergeAndWatermark({ pdfs: [], timeoutMs: 0 });",
+    '  if (result.ok || result.code !== "deadline_exceeded") throw new Error("font-free operation did not remain portable");',
+    "})().catch((error) => { console.error(error); process.exitCode = 1; });",
+  ].join("\n");
+
+  try {
+    mkdirSync(path.dirname(scriptPath), { recursive: true });
+    writeFileSync(scriptPath, script);
+    execFileSync(process.execPath, [scriptPath], {
+      cwd: process.cwd(),
+      stdio: "pipe",
+    });
+  } finally {
+    rmSync(scriptPath, { force: true });
   }
 });

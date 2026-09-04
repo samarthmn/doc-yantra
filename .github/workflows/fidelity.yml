@@ -1,0 +1,32 @@
+name: DocYantra owner-golden fidelity
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 6"
+
+permissions:
+  contents: read
+
+jobs:
+  owner-golden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require provenance-approved Word goldens
+        run: |
+          test -f fidelity-corpus/PROVENANCE-APPROVED.md || {
+            echo "owner-golden fidelity is blocked: no provenance-approved Microsoft Word golden ledger was supplied" >&2
+            exit 1
+          }
+      - name: Set up pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Fetch pinned PDFium with owner-approved platform checksum
+        env:
+          PDFIUM_SHA256_LINUX_X64: ${{ vars.DOCYANTRA_PDFIUM_SHA256_LINUX_X64 }}
+        run: ./pdf-core/scripts/fetch-pdfium.sh
+      - name: Run owner-golden fidelity gate
+        run: cargo test --manifest-path office-core/fidelity/Cargo.toml --locked

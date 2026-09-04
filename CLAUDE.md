@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-`doc-yantra` is DocKosha's proprietary **PDF engine** (`pdf-core/`, Rust) plus its
+`doc-yantra` is DocKosha's AGPL-3.0-only **PDF engine** (`pdf-core/`, Rust) plus its
 distributable **npm package** `@samarthmn/doc-yantra` (`pdf-core/wasm/`, the Zone-1
 engine compiled to WebAssembly). Consumers install the package and run PDF ops
 in-process — no Rust toolchain, no network hop.
@@ -61,14 +61,14 @@ kept in lockstep by
 `scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
 `office-core/Cargo.toml`, `office-core/wasm/Cargo.toml`,
 `packages/dockosha-provider/package.json`, and
-`packages/doc-yantra-fonts/package.json`. One `0.0.*` tag publishes all four npm
-packages plus named consumer release assets via `publish-wasm.yml`.
+`packages/doc-yantra-fonts/package.json`. The owner-only public npm workflow
+validates and publishes all four packages together after preparation checks.
 
 ## Build / test / run commands
 
 Rust engine (`cd pdf-core`):
 ```bash
-./scripts/fetch-pdfium.sh          # ONE-TIME: fetches pdfium dylib for Zone 2 tests
+PDFIUM_SHA256_LINUX_X64=<reviewed-sha256> ./scripts/fetch-pdfium.sh
 cargo test                         # full suite (Zone 1 + Zone 2)
 cargo test --test watermark_test   # a single test file
 cargo test page_count              # a single test by name substring
@@ -90,19 +90,15 @@ Rebuild the wasm package after any Rust change (`cd pdf-core/wasm`):
 
 ## Releasing (0.0.x line)
 
-Releases stay on `0.0.x` — **only the patch increments**. Use the script; it
-derives the next `x` from the highest `0.0.*` git tag, updates all lockstep
-versions, rebuilds and verifies the packages, commits, tags, and pushes. The
-tag Action publishes all four packages and creates the small consumer ZIP plus
-the separate offline font asset:
+Releases stay on `0.0.x` — **only the patch increments**. Use the script as a
+side-effect-free preparation gate; it validates lockstep manifests, package
+audits, and the public source candidate without changing repository or registry
+state:
 ```bash
-scripts/release.sh          # auto: next patch after the highest tag
-scripts/release.sh 7        # explicit: release 0.0.7
-DRY_RUN=1 scripts/release.sh  # preview, change nothing
+scripts/release.sh          # validate the 0.0.22 candidate
 ```
-It refuses to reuse or go below an existing tag (published versions are immutable).
-Run it from a clean-enough tree — it does `git add` for every released package and commits the version
-bump plus the regenerated `pkg/` together.
+Published versions are immutable. Build artifacts are regenerated explicitly by
+the package build scripts before running this gate.
 
 ## Rules that are easy to get wrong
 
@@ -113,18 +109,15 @@ bump plus the regenerated `pkg/` together.
 - **Version lives in TWO Cargo.tomls** — `pdf-core/Cargo.toml` and
   `pdf-core/wasm/Cargo.toml` — plus both `Cargo.lock`s and the built
   `pkg/package.json`; keep all of them on the same `0.0.x`. The package's
-  `version()` returns the wasm crate's. `scripts/release.sh` bumps them
-  for you (via the Cargo.tomls + `build.sh`). Published versions are **immutable**.
-- **Releasing** is tag-driven and stays on the `0.0.x` line — just run
-  `scripts/release.sh` (see the Releasing section above). It picks the
-  next patch, rebuilds/commits every package, tags `0.0.x`, and pushes; the
-  `publish-wasm.yml` Action publishes to GitHub Packages on `0.0.*` tags.
+  `version()` returns the wasm crate's. Published versions are **immutable**.
+- **Releasing** stays on the `0.0.x` line. `scripts/release.sh` is a
+  side-effect-free preparation gate that validates candidates and public npm
+  tarballs; it does not alter repository or registry state.
 - **Distribution fonts have one owner.** `packages/doc-yantra-fonts/` contains
   the canonical 17 binaries, hashes, and licences. Core npm packages contain
   only manifest/provider metadata and exactly one WASM binary each.
-- **GitHub Packages requires the npm scope to equal the repo owner.** If the owner
-  isn't `samarthmn`, change `OWNER`/`SCOPE`/`PKG_NAME` in `build.sh`, the `scope:`
-  in `publish-wasm.yml`, and the consumer's `.npmrc`. See `CONSUMING.md`.
+- **Package identity is fixed.** Keep the four approved names and public npm
+  registry. See `CONSUMING.md`.
 
 ## Behavioral contracts to preserve when editing
 
@@ -158,7 +151,7 @@ use `--no-default-features --features wasm`**, which drops Zone 2 and rayon.
 ## Docs worth reading
 
 `README.md` (repo overview + release flow), `pdf-core/README.md` (engine scope,
-speed table, design notes & known limitations), `CONSUMING.md` (install/auth flow
-for consumers + full panic/trap contract), `tests/README.md` (both test layers).
-Tests run against the shared `mock-files/` corpus (real docx/pptx/xlsx/csv/md/pdf).
-Requires Rust ≥ 1.89 and Node ≥ 18 (stable test runner).
+speed table, design notes & known limitations), and `CONSUMING.md` (install flow
+for consumers + full panic/trap contract). Public candidates expose only
+self-contained checks; fixture-dependent and owner-golden checks remain private.
+Requires Rust ≥ 1.89 and Node ≥ 18.

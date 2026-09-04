@@ -188,13 +188,13 @@ test("source fingerprint guard verifies committed packages and rejects a forged 
     );
     const rejected = runSourceFingerprintGuard("pdf", "--verify", scratch);
     assert.notEqual(rejected.status, 0);
-    assert.match(rejected.stderr, /source fingerprint mismatch/u);
+    assert.match(rejected.stderr, /fingerprint mismatch/u);
   } finally {
     rmSync(scratch, { force: true });
   }
 });
 
-test("publish workflow pins its execution surface and validates committed artifacts", () => {
+test("public readiness workflow pins its execution surface and runs audits", () => {
   const workflow = readFileSync(join(root, ".github/workflows/publish-wasm.yml"), "utf8");
   assert.match(workflow, /runs-on:\s*ubuntu-24\.04/u);
 
@@ -207,56 +207,53 @@ test("publish workflow pins its execution surface and validates committed artifa
   }
 
   for (const command of [
+    "node scripts/export-public-source.mjs --check-only",
+    "node scripts/package-audit.mjs",
+    "scripts/generate-rust-license-notices.sh --check",
+    "node --test tests/all.test.mjs",
+    "cargo test --manifest-path pdf-core/Cargo.toml --no-default-features --features wasm",
+    "cargo test --manifest-path office-core/Cargo.toml",
+    "cargo metadata --manifest-path office-core/Cargo.toml --locked --no-deps --format-version 1",
+    "cargo check --manifest-path office-core/Cargo.toml --locked --lib --no-default-features --features wasm",
     "node scripts/source-fingerprint.mjs pdf --verify pdf-core/wasm/pkg/build-fingerprint.json",
     "node scripts/source-fingerprint.mjs office --verify office-core/wasm/pkg/build-fingerprint.json",
-    "node scripts/wasm-version.mjs verify pdf-core/wasm/Cargo.toml pdf-core/wasm/pkg",
-    "node scripts/wasm-version.mjs verify office-core/wasm/Cargo.toml office-core/wasm/pkg",
-    "node scripts/package-audit.mjs",
-    "node scripts/verify-font-cdn.mjs",
-    "node scripts/create-release-assets.mjs",
-    "node scripts/verify-release-assets.mjs",
   ]) {
     assert.ok(workflow.includes(command), `publish workflow is missing: ${command}`);
   }
-  assert.doesNotMatch(workflow, /\bnpm publish\s*$/mu);
-  assert.match(workflow, /\bnpm publish --ignore-scripts\b/u);
-  assert.equal(
-    [...workflow.matchAll(/\bnpm publish --ignore-scripts\b/gu)].length,
-    4,
-    "the workflow must publish the font pack, both engines, and adapter",
-  );
-  assert.match(workflow, /gh release (?:create|upload)/u);
-  assert.match(workflow, /doc-yantra-wasm-core-\$\{VERSION\}\.zip/u);
-  assert.match(workflow, /doc-yantra-fonts-offline-\$\{VERSION\}\.tgz/u);
-  assert.match(workflow, /verify-release-assets\.mjs[\s\\]+--core[\s\S]*--fonts/u);
-  assert.match(workflow, /Source code \(zip\).*development repository/u);
+  assert.doesNotMatch(workflow, /npm\.pkg\.github\.com|\bnpm publish\b|GITHUB_TOKEN/u);
+  assert.match(workflow, /pull_request/u);
+  assert.match(workflow, /workflow_dispatch/u);
 });
 
-test("release gate requires a pinned builder and audits every Rust lockfile", () => {
-  const release = readFileSync(join(root, "scripts/release.sh"), "utf8");
-  assert.match(release, /command -v wasm-pack/u);
-  assert.match(release, /WASM_PACK_VERSION="0\.15\.0"/u);
-  assert.match(release, /wasm-pack \$\{WASM_PACK_VERSION\}/u);
-  assert.match(release, /command -v cargo-audit/u);
-  for (const lockfile of [
-    "pdf-core/Cargo.lock",
-    "pdf-core/wasm/Cargo.lock",
-    "office-core/Cargo.lock",
-    "office-core/wasm/Cargo.lock",
-    "text-core/Cargo.lock",
-  ]) {
-    assert.ok(release.includes(lockfile), `release audit is missing ${lockfile}`);
-  }
-  assert.match(release, /--ignore RUSTSEC-2026-0192/u);
+test("public self-contained check guide matches the exported test surface", () => {
+  const guide = readFileSync(join(root, "public-tests", "README.md"), "utf8");
   for (const command of [
-    "node scripts/package-audit.mjs",
-    "node scripts/verify-font-cdn.mjs",
-    "node scripts/create-release-assets.mjs",
-    "node scripts/verify-release-assets.mjs",
+    "node --test public-tests/*.test.mjs tests/font-cdn-tools.test.mjs tests/license-metadata.test.mjs",
+    "cargo test --manifest-path pdf-core/Cargo.toml --lib --no-default-features --features wasm",
+    "cargo metadata --manifest-path office-core/Cargo.toml --locked --no-deps --format-version 1",
+    "cargo check --manifest-path office-core/Cargo.toml --locked --lib --no-default-features --features wasm",
   ]) {
-    assert.ok(release.includes(command), `release gate is missing: ${command}`);
+    assert.ok(guide.includes(command), `public guide is missing: ${command}`);
   }
-  assert.match(release, /verify-release-assets\.mjs[\s\\]+--core[\s\S]*--fonts/u);
+  assert.doesNotMatch(guide, /office-core\/public-check/u);
+});
+
+test("release gate is a side-effect-free public preparation check", () => {
+  const beforeStatus = execFileSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8" });
+  const beforeIndex = execFileSync("git", ["diff", "--cached", "--binary"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const result = spawnSync("bash", [join(root, "scripts/release.sh")], { cwd: root, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /release preparation passed for 0\.0\.22/u);
+  assert.equal(execFileSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8" }), beforeStatus);
+  assert.equal(execFileSync("git", ["diff", "--cached", "--binary"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+  }), beforeIndex);
 
   const toolchainPath = join(root, "rust-toolchain.toml");
   assert.ok(existsSync(toolchainPath), "release builds must pin the Rust toolchain");

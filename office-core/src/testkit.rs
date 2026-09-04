@@ -8,6 +8,16 @@ use std::io::{Cursor, Write};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
+// A tiny project-authored image keeps this test-only helper self-contained.
+// Fixture-dependent integration corpora remain private and are not needed by
+// the public library or its generated package.
+const SYNTHETIC_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1,
+    0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65,
+    84, 120, 156, 99, 248, 207, 192, 240, 31, 0, 5, 0, 1, 255, 137, 153,
+    61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
 /// The namespace declarations placed on the root of every generated
 /// `document.xml` so fixtures can use any common OOXML prefix.
 pub const DOC_NAMESPACES: &str = concat!(
@@ -107,7 +117,7 @@ fn image_docx(body_inner: &str) -> Vec<u8> {
         ("word/_rels/document.xml.rels", IMAGE_RELS.as_bytes()),
         (
             "word/media/image1.png",
-            include_bytes!("../../mock-files/png/file1.png"),
+            SYNTHETIC_PNG,
         ),
     ])
 }

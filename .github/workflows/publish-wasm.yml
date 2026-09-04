@@ -1,184 +1,98 @@
-name: Publish wasm packages
+name: DocYantra public package readiness
 
-# Publishes the four lockstep npm packages and creates named consumer assets
-# when the local release script pushes a version tag, e.g. 0.0.21.
 on:
-  push:
-    tags:
-      - "0.0.*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  publish:
+  audit-and-core-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    permissions:
-      contents: write # create/upload the named GitHub Release assets
-      packages: write # lets the built-in GITHUB_TOKEN publish to GitHub Packages
-    defaults:
-      run:
-        working-directory: pdf-core/wasm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-
-      - name: Setup Node + GitHub Packages registry
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 22
+          node-version: 22.14.0
           package-manager-cache: false
-          registry-url: https://npm.pkg.github.com
-          scope: "@samarthmn"
-
-      # release.sh builds and tests locally before it creates this tag. GitHub
-      # validates release identity, then publishes those committed artifacts.
-      - name: Validate tag and package versions
-        working-directory: .
+      - name: Install pinned npm
+        run: npm install --global npm@11.5.1
+      - name: Set up pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal --target wasm32-unknown-unknown
+      - name: Install pinned Rust license inventory tool
+        run: cargo install --locked --features cli cargo-about@0.9.2
+      - name: Verify locked Rust dependency notices
+        run: scripts/generate-rust-license-notices.sh --check
+      - name: Audit public source and package manifests
+        run: node scripts/export-public-source.mjs --check-only
+      - name: Audit packed packages
+        run: node scripts/package-audit.mjs
+      - name: Run exported Node checks
+        run: node --test tests/all.test.mjs
+      - name: Verify a clean public export
+        run: scripts/clean-export-smoke.sh
+      - name: Test PDF engine
+        run: cargo test --manifest-path pdf-core/Cargo.toml --no-default-features --features wasm
+      - name: Test Office engine
+        run: cargo test --manifest-path office-core/Cargo.toml
+      - name: Verify locked public Office library workspace
         run: |
-          case "${GITHUB_REF}" in
-            refs/tags/0.0.*) TAG_VERSION="${GITHUB_REF#refs/tags/}" ;;
-            *) echo "Publishing requires a 0.0.* tag ref; got ${GITHUB_REF}." >&2; exit 1 ;;
-          esac
-          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main || {
-            echo "Tagged commit ${GITHUB_SHA} is not on origin/main." >&2
-            exit 1
-          }
-          PDF_VERSION="$(node -p "require('./pdf-core/wasm/pkg/package.json').version")"
-          OFFICE_VERSION="$(node -p "require('./office-core/wasm/pkg/package.json').version")"
-          FONT_VERSION="$(node -p "require('./packages/doc-yantra-fonts/package.json').version")"
-          ADAPTER_VERSION="$(node -p "require('./packages/dockosha-provider/package.json').version")"
-          ADAPTER_PDF_PIN="$(node -p "require('./packages/dockosha-provider/package.json').dependencies['@samarthmn/doc-yantra']")"
-          ADAPTER_OFFICE_PIN="$(node -p "require('./packages/dockosha-provider/package.json').dependencies['@samarthmn/doc-yantra-office']")"
-          ADAPTER_FONT_PIN="$(node -p "require('./packages/dockosha-provider/package.json').peerDependencies['@samarthmn/doc-yantra-fonts']")"
-          test "${TAG_VERSION}" = "${PDF_VERSION}" || {
-            echo "Tag ${TAG_VERSION} does not match PDF package ${PDF_VERSION}." >&2
-            exit 1
-          }
-          test "${TAG_VERSION}" = "${OFFICE_VERSION}" || {
-            echo "Tag ${TAG_VERSION} does not match Office package ${OFFICE_VERSION}." >&2
-            exit 1
-          }
-          test "${TAG_VERSION}" = "${FONT_VERSION}" || {
-            echo "Tag ${TAG_VERSION} does not match font package ${FONT_VERSION}." >&2
-            exit 1
-          }
-          test "${TAG_VERSION}" = "${ADAPTER_VERSION}" || {
-            echo "Tag ${TAG_VERSION} does not match DocKosha adapter ${ADAPTER_VERSION}." >&2
-            exit 1
-          }
-          test "${TAG_VERSION}" = "${ADAPTER_PDF_PIN}" || {
-            echo "Tag ${TAG_VERSION} does not match adapter PDF pin ${ADAPTER_PDF_PIN}." >&2
-            exit 1
-          }
-          test "${TAG_VERSION}" = "${ADAPTER_OFFICE_PIN}" || {
-            echo "Tag ${TAG_VERSION} does not match adapter Office pin ${ADAPTER_OFFICE_PIN}." >&2
-            exit 1
-          }
-          test "${TAG_VERSION}" = "${ADAPTER_FONT_PIN}" || {
-            echo "Tag ${TAG_VERSION} does not match adapter font peer ${ADAPTER_FONT_PIN}." >&2
-            exit 1
-          }
+          cargo metadata --manifest-path office-core/Cargo.toml --locked --no-deps --format-version 1
+          cargo check --manifest-path office-core/Cargo.toml --locked --lib --no-default-features --features wasm
+
+  package-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.5.1
+      - name: Set up pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal --target wasm32-unknown-unknown
+      - name: Install pinned Rust license inventory tool
+        run: cargo install --locked --features cli cargo-about@0.9.2
+      - name: Verify locked Rust dependency notices
+        run: scripts/generate-rust-license-notices.sh --check
+      - name: Verify committed generated package fingerprints
+        run: |
           node scripts/source-fingerprint.mjs pdf --verify pdf-core/wasm/pkg/build-fingerprint.json
           node scripts/source-fingerprint.mjs office --verify office-core/wasm/pkg/build-fingerprint.json
-          node scripts/wasm-version.mjs verify pdf-core/wasm/Cargo.toml pdf-core/wasm/pkg
-          node scripts/wasm-version.mjs verify office-core/wasm/Cargo.toml office-core/wasm/pkg
-          node scripts/package-audit.mjs
+          node scripts/source-fingerprint.mjs adapter --verify packages/dockosha-provider/build-fingerprint.json
 
-      # Publishing is intentionally blocked until every content-addressed URL
-      # serves the exact canonical bytes with immutable caching and CORS.
-      - name: Verify first-party font assets
-        working-directory: .
-        run: node scripts/verify-font-cdn.mjs
-
-      - name: Publish offline font package to GitHub Packages
-        working-directory: packages/doc-yantra-fonts
+      - name: Regenerate PDF and Office packages and require byte-identical output
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          if npm view "@samarthmn/doc-yantra-fonts@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "@samarthmn/doc-yantra-fonts@${VERSION} already published — skipping."
-          else
-            npm publish --ignore-scripts
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ./pdf-core/wasm/build.sh
+          ./office-core/wasm/build.sh
+          git diff --exit-code -- pdf-core/wasm/pkg office-core/wasm/pkg
 
-      - name: Publish PDF package to GitHub Packages
-        working-directory: pdf-core/wasm/pkg
+      - name: Build adapter from locally packed engine artifacts
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          if npm view "@samarthmn/doc-yantra@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "@samarthmn/doc-yantra@${VERSION} already published — skipping."
-          else
-            npm publish --ignore-scripts
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          mkdir -p tmp/local-packages
+          (cd pdf-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
+          (cd office-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
+          VERSION="$(node -p "require('./pdf-core/wasm/pkg/package.json').version")"
+          PDF_TARBALL="../../tmp/local-packages/samarthmn-doc-yantra-${VERSION}.tgz"
+          OFFICE_TARBALL="../../tmp/local-packages/samarthmn-doc-yantra-office-${VERSION}.tgz"
+          test -f "$PDF_TARBALL" && test -f "$OFFICE_TARBALL"
+          cd packages/dockosha-provider
+          npm install --ignore-scripts --no-save --package-lock=false \
+            "$PDF_TARBALL" \
+            "$OFFICE_TARBALL"
+          npm run build
+          cd ../..
+          node scripts/source-fingerprint.mjs adapter --out packages/dockosha-provider/build-fingerprint.json
+          git diff --exit-code -- packages/dockosha-provider/dist packages/dockosha-provider/build-fingerprint.json
 
-      # A retry may encounter an already published PDF package, so the Office
-      # publish keeps the same idempotent guard.
-      - name: Publish office package to GitHub Packages
-        working-directory: office-core/wasm/pkg
-        run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          if npm view "@samarthmn/doc-yantra-office@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "@samarthmn/doc-yantra-office@${VERSION} already published — skipping."
-          else
-            npm publish --ignore-scripts
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Publish the adapter only after both of its exact-pinned engine
-      # dependencies exist. Retries keep the same immutable-version guard.
-      - name: Publish DocKosha adapter to GitHub Packages
-        working-directory: packages/dockosha-provider
-        run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          if npm view "@samarthmn/dockosha-provider-docyantra@${VERSION}" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "@samarthmn/dockosha-provider-docyantra@${VERSION} already published — skipping."
-          else
-            npm publish --ignore-scripts
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and verify named consumer release assets
-        working-directory: .
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          ASSET_DIR="tmp/release-assets-${VERSION}"
-          node scripts/create-release-assets.mjs --out-dir "${ASSET_DIR}"
-          node scripts/verify-release-assets.mjs \
-            --core "${ASSET_DIR}/doc-yantra-wasm-core-${VERSION}.zip" \
-            --fonts "${ASSET_DIR}/doc-yantra-fonts-offline-${VERSION}.tgz"
-
-      - name: Create or update GitHub Release
-        working-directory: .
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          ASSET_DIR="tmp/release-assets-${VERSION}"
-          NOTES="${ASSET_DIR}/RELEASE-NOTES.md"
-          cat > "${NOTES}" <<EOF
-          ## Consumer downloads
-
-          - **doc-yantra-wasm-core-${VERSION}.zip** — installable PDF, Office, and adapter npm tarballs only, plus checksums and install instructions.
-          - **doc-yantra-fonts-offline-${VERSION}.tgz** — optional exact-font pack for fully offline conversion.
-
-          GitHub's automatic **Source code (zip)** and **Source code (tar.gz)** links contain the complete development repository and are not consumer packages.
-          EOF
-          CORE="${ASSET_DIR}/doc-yantra-wasm-core-${VERSION}.zip"
-          FONTS="${ASSET_DIR}/doc-yantra-fonts-offline-${VERSION}.tgz"
-          if gh release view "${VERSION}" >/dev/null 2>&1; then
-            gh release edit "${VERSION}" \
-              --title "DocYantra ${VERSION}" \
-              --notes-file "${NOTES}"
-            gh release upload "${VERSION}" "${CORE}" "${FONTS}" --clobber
-          else
-            gh release create "${VERSION}" "${CORE}" "${FONTS}" \
-              --verify-tag \
-              --title "DocYantra ${VERSION}" \
-              --notes-file "${NOTES}"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# Full owner-golden fidelity is intentionally manual/scheduled only. It must
+# fail closed when the owner has not supplied a provenance-approved Word
+# golden; it must never silently substitute or lower a fidelity threshold.

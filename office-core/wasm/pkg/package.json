@@ -1,7 +1,8 @@
 {
   "name": "@samarthmn/doc-yantra-office",
   "description": "DocKosha office-core Office->PDF engine compiled to WebAssembly (Node/Vercel + browser)",
-  "version": "0.0.21",
+  "version": "0.0.22",
+  "license": "AGPL-3.0-only",
   "files": [
     "office_core_wasm_bg.wasm",
     "office_core_wasm.js",
@@ -20,7 +21,11 @@
     "worker-client.cjs",
     "worker-entry.cjs",
     "worker-ops.cjs",
-    "build-fingerprint.json"
+    "build-fingerprint.json",
+    "LICENSE",
+    "COMMERCIAL-LICENSING.md",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_RUST_LICENSES.txt"
   ],
   "main": "index.cjs",
   "types": "index.d.ts",
@@ -28,9 +33,17 @@
     "type": "git",
     "url": "git+https://github.com/samarthmn/doc-yantra.git"
   },
-  "license": "UNLICENSED",
+  "peerDependencies": {
+    "@samarthmn/doc-yantra-fonts": "0.0.22"
+  },
+  "peerDependenciesMeta": {
+    "@samarthmn/doc-yantra-fonts": {
+      "optional": true
+    }
+  },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "exports": {
     ".": {

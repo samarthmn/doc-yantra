@@ -1,385 +1,56 @@
 #!/usr/bin/env bash
-#
-# Cut a new patch release on the fixed 0.0.x line for every published package.
-#
-# The packages release in lockstep: one version, one commit, one 0.0.x tag; the
-# publish-wasm.yml Action publishes the committed packages to GitHub Packages
-# when the tag lands. GitHub never rebuilds or retests them, so this script is
-# the supported local build-and-gate path (R2-Y1).
-#
-# Usage:
-#   scripts/release.sh            # auto: next patch after the highest tag
-#   scripts/release.sh 7          # explicit: release 0.0.7
-#   DRY_RUN=1 scripts/release.sh  # print what it would do, change nothing
-#
-# Extending the release
-#   A released package is a directory that follows these conventions:
-#     <pkg>/Cargo.toml        engine crate manifest (version bumped in lockstep)
-#     <pkg>/wasm/Cargo.toml   wasm crate manifest   (version bumped in lockstep)
-#     <pkg>/wasm/build.sh     rebuilds the committed <pkg>/wasm/pkg/ artifact
-#   To add an engine: append its directory to PACKAGES, and register any
-#   package-specific test gates in run_gates. Non-engine packages need their
-#   own bump/build conventions and must also be staged in ship.
-#
+# Validate a lockstep DocYantra release candidate without changing Git state,
+# publishing bytes, or contacting a registry. Shipping is an owner-controlled
+# operation outside this preparation gate.
 set -euo pipefail
-cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+cd "$(dirname "$0")/.."
 
-PACKAGES=(pdf-core office-core)
-DOCKOSHA_ADAPTER="packages/dockosha-provider"
-FONT_PACKAGE="packages/doc-yantra-fonts"
-WASM_PACK_VERSION="0.15.0"
-CARGO_LOCKS=(
-  pdf-core/Cargo.lock
-  pdf-core/wasm/Cargo.lock
-  office-core/Cargo.lock
-  office-core/wasm/Cargo.lock
-  text-core/Cargo.lock
-)
+# This gate is deliberately preparation-only; the flag is retained as a
+# searchable contract for automation and reviewers.
+RELEASE_PREPARE_ONLY=1
 
-version=""
-tag=""
-
-# ─── Preflight: releases cut only from a clean, up-to-date local main ────────
-preflight_git() {
-  if [[ "$(git branch --show-current)" != "main" ]]; then
-    echo "error: releases must be cut from the local main branch." >&2
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "error: release preparation requires $1 on PATH" >&2
     exit 1
-  fi
-  if [[ -n "$(git status --short)" ]]; then
-    echo "error: releases require a clean worktree." >&2
-    exit 1
-  fi
-  git fetch origin main --tags --quiet
-  if ! git merge-base --is-ancestor origin/main HEAD; then
-    echo "error: local main is behind or diverged from origin/main; update it before releasing." >&2
-    exit 1
-  fi
+  }
 }
 
-preflight_tools() {
-  if ! command -v wasm-pack >/dev/null 2>&1; then
-    echo "error: releases require a preinstalled wasm-pack ${WASM_PACK_VERSION}." >&2
-    echo "       Refusing a release-time network installer." >&2
-    exit 1
-  fi
-  if [[ "$(wasm-pack --version)" != "wasm-pack ${WASM_PACK_VERSION}" ]]; then
-    echo "error: expected wasm-pack ${WASM_PACK_VERSION}; found $(wasm-pack --version)." >&2
-    exit 1
-  fi
-  if ! command -v cargo-audit >/dev/null 2>&1; then
-    echo "error: releases require cargo-audit on PATH." >&2
-    exit 1
-  fi
-  for tool in npm zip unzip; do
-    if ! command -v "${tool}" >/dev/null 2>&1; then
-      echo "error: releases require ${tool} on PATH." >&2
-      exit 1
-    fi
-  done
-}
-
-# ─── Version: next patch on 0.0.x, derived from existing tags ────────────────
-# Scans both the current tag form (0.0.x) and the legacy one (wasm-v0.0.x) so
-# the highest patch is found across the naming switch.
-pick_version() {
-  local highest
-  highest="$(git tag --list '0.0.*' 'wasm-v0.0.*' \
-    | sed -n -E 's/^(wasm-v)?0\.0\.([0-9]+)$/\2/p' \
-    | sort -n | tail -1)"
-  highest="${highest:-0}"
-
-  local patch
-  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
-    patch="$1"
-  else
-    patch=$((highest + 1))
-  fi
-  version="0.0.${patch}"
-  tag="${version}"
-
-  if [[ "$patch" -le "$highest" ]]; then
-    echo "error: ${tag} is not newer than the highest existing patch 0.0.${highest}." >&2
-    echo "       Published versions are immutable — pick a higher patch." >&2
-    exit 1
-  fi
-  if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-    echo "error: tag ${tag} already exists. Versions are immutable; bump instead." >&2
-    exit 1
-  fi
-
-  echo "Releasing ${version}  (highest existing: 0.0.${highest})"
-}
-
-manifests_for() {
-  local package="$1"
-  echo "${package}/Cargo.toml ${package}/wasm/Cargo.toml"
-}
-
-dry_run_report() {
-  local package
-  echo "[dry-run] would set version=\"${version}\" in the lockstep Cargo.tomls:"
-  for package in "${PACKAGES[@]}"; do
-    echo "          $(manifests_for "$package")"
-  done
-  echo "[dry-run] would set version and both engine dependency pins to ${version} in:"
-  echo "          ${DOCKOSHA_ADAPTER}/package.json"
-  echo "[dry-run] would set the optional font peer and ${FONT_PACKAGE} to ${version}"
-  echo "[dry-run] would update the adapter engine entries in:"
-  echo "          ${DOCKOSHA_ADAPTER}/pnpm-lock.yaml"
-  echo "[dry-run] would run wasm/build.sh for: ${PACKAGES[*]}"
-  echo "[dry-run] would rebuild and test ${DOCKOSHA_ADAPTER} against all local packages"
-  echo "[dry-run] would audit package contents/sizes, verify CDN bytes, build the consumer assets,"
-  echo "          clean-install the core ZIP, commit ${PACKAGES[*]} ${FONT_PACKAGE} ${DOCKOSHA_ADAPTER},"
-  echo "          tag ${tag}, push origin main ${tag}"
-}
-
-# ─── Bump: update every lockstep engine and adapter manifest ─────────────────
-# Only the first `version =` line of each manifest (the [package] version).
-# Cargo.locks follow during the builds; each pkg/package.json follows via its
-# package's build.sh.
-set_version() {
-  local file="$1"
-  awk -v v="$version" '
-    !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" v "\""); done=1 }
-    { print }
-  ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
-}
-
-set_javascript_package_versions() {
-  node - "${DOCKOSHA_ADAPTER}/package.json" \
-    "${DOCKOSHA_ADAPTER}/pnpm-lock.yaml" \
-    "${FONT_PACKAGE}/package.json" "${version}" <<'NODE'
+check_versions() {
+  node <<'NODE'
 const fs = require("node:fs");
-
-const [manifestPath, lockfilePath, fontManifestPath, version] = process.argv.slice(2);
-const enginePackages = [
-  "@samarthmn/doc-yantra",
-  "@samarthmn/doc-yantra-office",
+const json = [
+  "pdf-core/wasm/pkg/package.json",
+  "office-core/wasm/pkg/package.json",
+  "packages/doc-yantra-fonts/package.json",
+  "packages/dockosha-provider/package.json",
 ];
-const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-const oldVersions = new Map();
-
-for (const packageName of enginePackages) {
-  const oldVersion = manifest.dependencies?.[packageName];
-  if (typeof oldVersion !== "string" || !/^0\.0\.\d+$/.test(oldVersion)) {
-    throw new Error(`adapter dependency ${packageName} must have an exact 0.0.x pin`);
-  }
-  oldVersions.set(packageName, oldVersion);
-  manifest.dependencies[packageName] = version;
+const expected = JSON.parse(fs.readFileSync(json[0], "utf8")).version;
+if (!/^0\.0\.\d+$/.test(expected)) throw new Error(`release package version must stay on 0.0.x, found ${expected}`);
+for (const path of json) {
+  const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
+  if (manifest.version !== expected) throw new Error(`${path}: expected ${expected}, found ${manifest.version}`);
 }
-if (new Set(oldVersions.values()).size !== 1) {
-  throw new Error("adapter engine dependency pins must already match");
-}
-manifest.version = version;
-if (manifest.peerDependencies?.["@samarthmn/doc-yantra-fonts"] === undefined) {
-  throw new Error("adapter must declare @samarthmn/doc-yantra-fonts as an optional peer");
-}
-if (manifest.peerDependenciesMeta?.["@samarthmn/doc-yantra-fonts"]?.optional !== true) {
-  throw new Error("adapter font peer must be optional");
-}
-manifest.peerDependencies["@samarthmn/doc-yantra-fonts"] = version;
-fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-const fontManifest = JSON.parse(fs.readFileSync(fontManifestPath, "utf8"));
-if (!/^0\.0\.\d+$/.test(fontManifest.version)) {
-  throw new Error("font package version must stay on the 0.0.x line");
-}
-fontManifest.version = version;
-fs.writeFileSync(fontManifestPath, `${JSON.stringify(fontManifest, null, 2)}\n`);
-
-let activeImporter = null;
-const lockUpdates = new Map(enginePackages.map((packageName) => [packageName, 0]));
-const replaceEngineVersion = (line, packageName) => {
-  const oldVersion = oldVersions.get(packageName);
-  const occurrences = line.split(oldVersion).length - 1;
-  lockUpdates.set(packageName, lockUpdates.get(packageName) + occurrences);
-  return line.replaceAll(oldVersion, version);
-};
-const lockfile = fs
-  .readFileSync(lockfilePath, "utf8")
-  .split("\n")
-  .map((line) => {
-    const importer = line.match(
-      /^\s+'(@samarthmn\/doc-yantra(?:-office)?)':\s*$/,
-    );
-    if (importer) {
-      activeImporter = importer[1];
-      return line;
-    }
-    if (activeImporter && /^\s+(specifier|version):/.test(line)) {
-      const updated = replaceEngineVersion(line, activeImporter);
-      if (/^\s+version:/.test(line)) activeImporter = null;
-      return updated;
-    }
-    for (const packageName of enginePackages) {
-      if (
-        line.includes(`${packageName}@`) ||
-        line.includes(`/download/${packageName}/`)
-      ) {
-        return replaceEngineVersion(line, packageName);
-      }
-    }
-    return line;
-  })
-  .join("\n");
-for (const packageName of enginePackages) {
-  if (lockUpdates.get(packageName) !== 5) {
-    throw new Error(
-      `expected 5 ${packageName} lock entries; updated ${lockUpdates.get(packageName)}`,
-    );
+for (const path of ["pdf-core/Cargo.toml", "pdf-core/wasm/Cargo.toml", "office-core/Cargo.toml", "office-core/wasm/Cargo.toml"]) {
+  const source = fs.readFileSync(path, "utf8");
+  if (!new RegExp(`^version\\s*=\\s*"${expected.replaceAll(".", "\\.")}"`, "m").test(source)) {
+    throw new Error(`${path}: package version is not ${expected}`);
   }
 }
-fs.writeFileSync(lockfilePath, lockfile);
+process.stdout.write(expected);
 NODE
 }
 
-bump_versions() {
-  local package manifest
-  for package in "${PACKAGES[@]}"; do
-    for manifest in $(manifests_for "$package"); do
-      set_version "$manifest"
-    done
-  done
-  set_javascript_package_versions
-  echo "  set version = \"${version}\" in the lockstep Cargo.tomls"
-  echo "  set adapter, dependency pins, optional font peer, and font package = \"${version}\""
-}
-
-# ─── Build: regenerate every committed wasm package ──────────────────────────
-build_packages() {
-  local package
-  for package in "${PACKAGES[@]}"; do
-    echo "  rebuilding ${package} wasm package ..."
-    ( cd "${package}/wasm" && ./build.sh )
-  done
-}
-
-# ─── Gates (R2-Y1): every release-blocking test, run locally ─────────────────
-gate_security() {
-  echo "  auditing Rust dependency locks ..."
-  local lockfile
-  for lockfile in "${CARGO_LOCKS[@]}"; do
-    # ttf-parser is marked unmaintained with no patched release. Keep this
-    # single documented exception while failing on every vulnerability and
-    # every other informational advisory discovered at release time.
-    cargo audit --file "${lockfile}" --ignore RUSTSEC-2026-0192
-  done
-}
-
-gate_pdf_core() {
-  if [[ ! -d pdf-core/pdfium ]]; then
-    echo "error: pdf-core/pdfium/ is missing — cargo's default (pdfium) tests need it." >&2
-    echo "       Run pdf-core/scripts/fetch-pdfium.sh once, then re-run the release." >&2
-    exit 1
-  fi
-  echo "  running pdf-core cargo tests ..."
-  ( cd pdf-core && cargo test --quiet )
-  ( cd pdf-core && cargo test --quiet --no-default-features --features wasm )
-}
-
-gate_office_core() {
-  echo "  running office-core cargo tests ..."
-  ( cd office-core && cargo test --quiet )
-  echo "  running fidelity harness unit tests ..."
-  ( cd office-core && cargo test --quiet -p fidelity )
-  echo "  running blocking DOCX fidelity corpus ..."
-  ( cd office-core && cargo run --quiet -p fidelity -- run --format docx )
-}
-
-gate_package_suite() {
-  echo "  running package tests against the rebuilt pkgs ..."
-  # The Office suite configures its deterministic local mock provider; release
-  # verification must never depend on a public font CDN.
-  node --test tests/all.test.mjs
-  # Font-registering suites run per-file (the wasm font registry is process
-  # global) and include the pdf.js CJK paint regression — CIDFontType0C
-  # structure alone does not prove a viewer paints ink. The paint test skips
-  # when its pinned deps are missing; a skip must never gate a release, so
-  # install exactly the committed lockfile and force the test to hard-fail
-  # if the pdf.js stack still cannot load.
-  npm --prefix tests ci --no-audit --no-fund
-  REQUIRE_PDFJS_PAINT=1 node --test tests/office-cjk.test.mjs tests/office-cjk-pdfjs-paint.test.mjs
-}
-
-gate_dockosha_adapter() {
-  echo "  installing locally built engines for the DocKosha adapter gate ..."
-  mkdir -p tmp
-  local node_modules_backup
-  node_modules_backup="$(mktemp -d "${PWD}/tmp/dockosha-adapter-node-modules.XXXXXX")"
-  (
-    cd "${DOCKOSHA_ADAPTER}"
-    cleanup_adapter_modules() {
-      rm -rf -- node_modules
-      if [[ -e "${node_modules_backup}/node_modules" || -L "${node_modules_backup}/node_modules" ]]; then
-        mv "${node_modules_backup}/node_modules" node_modules
-      fi
-      rmdir "${node_modules_backup}"
-    }
-    trap cleanup_adapter_modules EXIT
-    if [[ -e node_modules || -L node_modules ]]; then
-      mv node_modules "${node_modules_backup}/node_modules"
-    fi
-    npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund \
-      ../../pdf-core/wasm/pkg ../../office-core/wasm/pkg ../doc-yantra-fonts
-    npm run build
-    node --test test/*.test.mjs
-  )
-}
-
-gate_distribution() {
-  echo "  auditing packed package contents and size budgets ..."
-  node scripts/package-audit.mjs
-  echo "  verifying immutable first-party font assets ..."
-  node scripts/verify-font-cdn.mjs
-  local asset_dir="tmp/release-assets-gate-${version}"
-  if [[ -e "${asset_dir}" ]]; then
-    echo "error: release asset gate directory already exists: ${asset_dir}" >&2
-    exit 1
-  fi
-  cleanup_release_assets() {
-    rm -rf -- "${asset_dir}"
-  }
-  trap cleanup_release_assets RETURN
-  echo "  building and clean-installing the consumer release assets ..."
-  node scripts/create-release-assets.mjs --out-dir "${asset_dir}"
-  node scripts/verify-release-assets.mjs \
-    --core "${asset_dir}/doc-yantra-wasm-core-${version}.zip" \
-    --fonts "${asset_dir}/doc-yantra-fonts-offline-${version}.tgz"
-  cleanup_release_assets
-  trap - RETURN
-}
-
-run_gates() {
-  gate_security
-  gate_pdf_core
-  gate_office_core
-  gate_package_suite
-  gate_dockosha_adapter
-  gate_distribution
-  # New packages: add a gate_<package> above and call it here.
-}
-
-# ─── Ship: one commit and one tag cover every package ────────────────────────
-ship() {
-  git add "${PACKAGES[@]}" "${FONT_PACKAGE}" "${DOCKOSHA_ADAPTER}"
-  git commit -m "wasm: v${version}"
-  git tag "$tag"
-  git push --atomic origin main "$tag"
-  echo "Done. Pushed ${tag}; publish-wasm.yml will publish ${version} to GitHub Packages."
-}
-
 main() {
-  preflight_git
-  preflight_tools
-  pick_version "$@"
-  if [[ -n "${DRY_RUN:-}" ]]; then
-    dry_run_report
-    exit 0
-  fi
-  bump_versions
-  build_packages
-  run_gates
-  ship
+  require_tool node
+  require_tool npm
+  require_tool cargo-about
+  VERSION="$(check_versions)"
+  ./scripts/generate-rust-license-notices.sh --check
+  node scripts/package-audit.mjs
+  node scripts/export-public-source.mjs --check-only
+  ./scripts/clean-export-smoke.sh
+  echo "release preparation passed for ${VERSION}; no repository or registry state was changed"
 }
 
 main "$@"

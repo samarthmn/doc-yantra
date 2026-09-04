@@ -1,10 +1,11 @@
 # pdf-core — DocKosha's native PDF engine
 
-Proprietary Rust engine for every PDF-native operation DocKosha performs.
+AGPL-3.0-only Rust engine for every PDF-native operation DocKosha performs.
 Replaces the pdf-lib (Node) + PyMuPDF (Python, AGPL) paths inside DocYantra
 with one in-process, memory-safe library — no subprocess spawns, no
-cross-language hops, permissively-licensed throughout (lopdf/pdf-writer:
-MIT/Apache-2.0; pdfium: BSD — the AGPL PyMuPDF dependency is gone).
+cross-language hops. First-party code is under AGPL-3.0-only;
+upstream dependencies retain their own notices (lopdf/pdf-writer: MIT/Apache-2.0;
+pdfium: BSD — the AGPL PyMuPDF dependency is gone).
 
 ## Scope
 
@@ -69,12 +70,17 @@ pdfcore thumb in.pdf -o page0.png --width 480
 ## Setup
 
 ```
-./scripts/fetch-pdfium.sh   # downloads the pdfium dylib (build 7763) for your platform
+PDFIUM_SHA256_LINUX_X64=<reviewed-sha256> ./scripts/fetch-pdfium.sh
 cargo test                  # 162 tests (includes regressions from an adversarial audit)
 ```
 
 pdfium resolution order: `PDFIUM_DYNAMIC_LIB_PATH` env var → crate-local
 `pdfium/lib/` → system library.
+
+Use the checksum variable matching the host (`PDFIUM_SHA256_MAC_ARM64`,
+`PDFIUM_SHA256_MAC_X64`, `PDFIUM_SHA256_LINUX_ARM64`, or
+`PDFIUM_SHA256_LINUX_X64`). Obtain the SHA-256 for the exact build-7763 release
+asset through a trusted channel; the fetch script refuses unverified downloads.
 
 ## Design notes & known limitations
 

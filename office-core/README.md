@@ -1,11 +1,14 @@
 # office-core — DocKosha's pure-Rust Office → PDF engine
 
 Own OOXML parsing, own layout, own PDF emission. **No LibreOffice, Chromium,
-pdfium, or Typst in the conversion path** — only small, permissive, pure-Rust
+pdfium, or Typst in the conversion path** — first-party code is under
+AGPL-3.0-only and upstream dependencies retain their own terms; only small,
+pure-Rust
 leaf crates. Ships as a native CLI (`officecore`) and a WebAssembly npm package
 (`@samarthmn/doc-yantra-office`), mirroring `pdf-core`'s conventions.
 
-Two contracts anchor everything (see `../hyper-agent/office-engine/README.md`):
+Two contracts anchor everything: a fail-closed conversion envelope and the
+predictive `DocProfile` router contract.
 
 1. **Fail-closed envelope.** `convert()` returns `Err(Unsupported{code})` for
    anything outside the documented envelope — never a silently-degraded page.
@@ -107,7 +110,8 @@ The server worker also accepts `extraFontDirs: string[]`. At boot it registers
 every `.ttf`, `.ttc`, `.otf`, and `.otc` file found there in deterministic path
 order. This is an explicit host-authorized asset path; the production wasm
 package itself contains no fonts. `convertOnDemand` and `profileOnDemand`
-resolve missing faces through the configured provider and caches.
+resolve missing faces through the DocYantra font resolver and cache the
+checked, hash-pinned assets.
 
 For the isolated Node worker, `FontsourceProvider` maps Office families to
 fetchable metric-compatible faces (for example Calibri → Carlito and Courier
@@ -125,55 +129,13 @@ stable API (DocKosha parses them). Trap contract is identical to `pdf-core`:
 recoverable failures are `JsError`; a panic/OOM traps and the instance must be
 discarded.
 
-## Fidelity
+## Verification
 
-The `fidelity/` harness (dev-only) diffs our output against **Word's own PDF
-export** with SSIM. `cargo run -p fidelity -- seed` regenerates the synthetic
-corpus; committed DOCX ground truths were exported from Microsoft Word and
-their producer and export-date provenance are recorded in each manifest.
-`run --format docx` requires every selected ground truth, blocks on any core
-failure or an extended-tier pass rate below 90%, and emits
-`tmp/fidelity-report/index.html` at the repository root. Pass
-`--report-dir <path>` to keep a named audit report elsewhere under the repo.
-Normal corpus runs resolve the document's fonts automatically from the
-hash-pinned `fidelity/fonts.lock`, populating the ignored, content-addressed
-`fidelity/fonts-cache/` on the first run and reusing verified cached bytes
-thereafter. The cache needs network access only when a required entry is cold.
-Set `DOC_YANTRA_FIDELITY_FONT_CACHE` to an alternate cache directory when the
-default repository-local cache is unsuitable (for example, an isolated CI
-workspace under the repository's `tmp/` directory).
-Do not pass host font directories to `run`; repeatable `--font-dir <path>` is
-available only on `probe` for host-font diagnostics. Run
-`cargo run -p fidelity -- lock-fonts` only when deliberately refreshing the
-committed font lock.
-Calibration constants and their adjustments are logged in
-`LAYOUT_CALIBRATION.md`.
-
-The frozen `fidelity-corpus/docx/complex/` regression identifies both reference
-files by SHA-256:
-
-- DOCX: `8c2a8c4725e77bbfb4ddc7925674dc221611a39b876dbd7ea2efc829e70b8530`
-- Word PDF: `e808b449e27436d74f81d5d5df9f9fe4daa4cc28e426ec1619bbe3fcfb55255c`
-
-The direct converter and final WASM worker produce the same deterministic PDF
-(`SHA-256 a3629b6aae822d56127cba7ab07ea6c0fc3ab51910b72bad0e0db301cdde3e1a`):
-six 612×792-point pages, the same front/behind layer order as Word, and image
-bounds within 0.06 pt. Tight wrapping releases text on the first baseline below
-the authored polygon, and table flow includes the top and bottom outer-border
-half-strokes; the table edges are within 0.4 pt and the following baseline is
-within 0.3 pt of Word. The executable core gate is 0.90, and the rebuilt
-six-page fixture passes with a minimum SSIM of 0.9374006584. PDF.js extracts zero NUL or
-U+FFFE characters and finds the expected headings and body phrases. The final
-package source fingerprint is
-`add0e1fe34024cc8b5494cb4c2bd99dc31c05702c50127b7b1abf632cfdc962d`.
-Focused native PDFium and package-level PDF.js regressions preserve logical
-source order, line ownership, and selection geometry for decomposed Latin,
-Arabic and Hebrew mark stacks, and wrapped right-to-left text.
-
-These measurements are a structural regression for this exact fixture, not a
-universal Word-parity or pixel-identity claim. Word's PDF embeds proprietary
-Calibri, while the package uses OFL-licensed, metric-compatible Carlito. Glyph
-outlines and antialiasing therefore still differ.
+The public candidate provides self-contained checks in `public-tests/`; run
+those checks before sharing a package. Owner-supplied golden-document
+comparison is a separate scheduled/manual gate and requires the approved
+rights and provenance intake described in the repository's top-level
+`FIXTURE_PROVENANCE.md`. No public package depends on that owner-only gate.
 
 ## Design notes
 

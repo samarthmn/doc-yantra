@@ -11,29 +11,119 @@ const {
   fontManifest,
 } = require("../pdf-core/wasm/font-provider.cjs");
 
+class FontCdnHeaderError extends Error {}
+
 function option(name, fallback) {
   const at = process.argv.indexOf(name);
   return at === -1 ? fallback : process.argv[at + 1];
 }
 
+function expectedFontContentType(url) {
+  const pathname = new URL(url).pathname.toLowerCase();
+  if (pathname.endsWith(".otf")) return "font/otf";
+  if (pathname.endsWith(".ttf")) return "font/ttf";
+  throw new Error(`${url}: expected a .ttf or .otf font URL`);
+}
+
 function assertCdnHeaders(response, url) {
   if (!response.ok) return;
   const cors = response.headers.get("access-control-allow-origin");
-  if (cors !== "*") throw new Error(`${url}: expected Access-Control-Allow-Origin: *`);
-  const cacheControl = response.headers.get("cache-control")?.toLowerCase() ?? "";
-  if (!cacheControl.includes("immutable") || !/max-age=(?:31536000|[4-9]\d{7,})/u.test(cacheControl)) {
-    throw new Error(`${url}: expected immutable one-year Cache-Control`);
+  if (cors !== "*") {
+    throw new FontCdnHeaderError(
+      `${url}: expected Access-Control-Allow-Origin: *`,
+    );
   }
+  const cacheControl = response.headers.get("cache-control")?.toLowerCase() ?? "";
+  const maxAgeMatch = cacheControl.match(/(?:^|,)\s*max-age=(\d+)/u);
+  const maxAge = maxAgeMatch ? Number(maxAgeMatch[1]) : Number.NaN;
+  if (
+    !cacheControl.includes("immutable") ||
+    !Number.isSafeInteger(maxAge) ||
+    maxAge < 31_536_000
+  ) {
+    throw new FontCdnHeaderError(
+      `${url}: expected immutable one-year Cache-Control`,
+    );
+  }
+  const expectedContentType = expectedFontContentType(url);
+  const contentType =
+    response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ??
+    "";
+  if (contentType !== expectedContentType) {
+    throw new FontCdnHeaderError(
+      `${url}: expected ${expectedContentType} Content-Type`,
+    );
+  }
+  const contentTypeOptions =
+    response.headers.get("x-content-type-options")?.trim().toLowerCase() ?? "";
+  if (contentTypeOptions !== "nosniff") {
+    throw new FontCdnHeaderError(
+      `${url}: expected X-Content-Type-Options: nosniff`,
+    );
+  }
+}
+
+function findHeaderError(error) {
+  const seen = new Set();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof FontCdnHeaderError) return current;
+    seen.add(current);
+    current = current.cause;
+  }
+  return null;
+}
+
+function requireHttpsBaseUrl(baseUrl) {
+  const parsed = new URL(baseUrl);
+  if (parsed.protocol !== "https:") {
+    throw new Error("font CDN base URL must use HTTPS");
+  }
+  return parsed.toString().replace(/\/$/u, "");
+}
+
+function requireOrigin(origin) {
+  const parsed = new URL(origin);
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    parsed.origin !== origin
+  ) {
+    throw new Error("font CDN verification origin must be an HTTP(S) origin");
+  }
+  return parsed.origin;
+}
+
+export function createVerifiedCdnFetch({ origin, fetchImplementation }) {
+  if (typeof fetchImplementation !== "function") {
+    throw new Error("global fetch is unavailable");
+  }
+  const verifiedOrigin = requireOrigin(origin);
+  return async (url, options) => {
+    const headers = new Headers(options?.headers);
+    headers.set("Origin", verifiedOrigin);
+    const response = await fetchImplementation(url, {
+      ...options,
+      headers,
+    });
+    assertCdnHeaders(response, url);
+    return response;
+  };
 }
 
 export async function verifyFontCdn({
   baseUrl = CDN_BASE_URL,
+  origin = "https://www.dockosha.com",
   timeoutMs = 30_000,
   fetchImplementation = globalThis.fetch,
 } = {}) {
-  if (typeof fetchImplementation !== "function") throw new Error("global fetch is unavailable");
+  const verifiedBaseUrl = requireHttpsBaseUrl(baseUrl);
+  const verifiedOrigin = requireOrigin(origin);
+  const verifiedFetch = createVerifiedCdnFetch({
+    origin: verifiedOrigin,
+    fetchImplementation,
+  });
   const provider = createFontProvider({
-    baseUrl,
+    baseUrl: verifiedBaseUrl,
     timeoutMs,
     offlinePackage: false,
     memoryCache: {
@@ -41,27 +131,34 @@ export async function verifyFontCdn({
       async putArtifact() {},
       async deleteArtifact() {},
     },
-    fetch: async (url, options) => {
-      const response = await fetchImplementation(url, options);
-      assertCdnHeaders(response, url);
-      return response;
-    },
+    fetch: verifiedFetch,
   });
   let bytes = 0;
   for (const entry of fontManifest.fonts) {
-    const result = await provider.resolve(entry.file);
+    let result;
+    try {
+      result = await provider.resolve(entry.file);
+    } catch (error) {
+      throw findHeaderError(error) ?? error;
+    }
     if (result.entry.sha256 !== entry.sha256 || result.bytes.byteLength !== entry.byteLength) {
       throw new Error(`${entry.file}: CDN bytes differ from the canonical manifest`);
     }
     bytes += result.bytes.byteLength;
   }
-  return Object.freeze({ baseUrl, fontCount: fontManifest.fonts.length, bytes });
+  return Object.freeze({
+    baseUrl: verifiedBaseUrl,
+    origin: verifiedOrigin,
+    fontCount: fontManifest.fonts.length,
+    bytes,
+  });
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const timeoutMs = Number(option("--timeout-ms", "30000"));
   const result = await verifyFontCdn({
     baseUrl: option("--base-url", CDN_BASE_URL),
+    origin: option("--origin", "https://www.dockosha.com"),
     timeoutMs,
   });
   process.stdout.write(

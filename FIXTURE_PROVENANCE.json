@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "retainedFixtures": [],
+  "omittedRoots": [
+    { "path": "mock-files", "reason": "mixed-origin regression corpus; rights are not individually cleared", "status": "omitted" },
+    { "path": "fidelity-corpus", "reason": "owner-supplied goldens and mixed-origin fixtures await approval", "status": "omitted" },
+    { "path": "real-world-test-files", "reason": "real-world inputs are not redistributed", "status": "omitted" }
+  ],
+  "ownerGoldenIntake": {
+    "schema": {
+      "requiredFields": ["caseId", "sourceSha256", "goldenSha256", "origin", "rights", "reviewer", "reviewedAt", "status"],
+      "statusValues": ["pending", "approved", "rejected"],
+      "hash": "lowercase SHA-256 hex"
+    },
+    "steps": [
+      "Owner supplies a synthetic or rights-cleared Word source and its Word-exported PDF golden outside this checkout.",
+      "Record both SHA-256 hashes, origin, license/rights evidence, reviewer, and review date in a case ledger.",
+      "A maintainer verifies the bytes and sets status to approved before copying the pair into the private fidelity corpus.",
+      "Only approved entries may be added to a future public candidate; pending or rejected entries remain omitted."
+    ]
+  }
+}

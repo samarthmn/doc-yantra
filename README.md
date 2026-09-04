@@ -1,17 +1,25 @@
 # doc-yantra — DocKosha's native PDF engine (Rust + WebAssembly)
 
-This repo is DocKosha's **proprietary PDF engine** and its distributable
+This repo is DocKosha's **AGPL-3.0-only PDF engine** and its distributable
 **npm package**. It contains:
 
-| Path | What it is |
-| --- | --- |
-| `pdf-core/` | The Rust engine: merge, split, watermark, metadata, CSV/Markdown/text/image → PDF, and pure-Rust redaction (Zone 1), plus pdfium-backed raster/extract/forms and legacy redaction cross-validation (Zone 2, native-only). See [`pdf-core/README.md`](pdf-core/README.md). |
-| `pdf-core/wasm/` | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS), `./web` (browser ESM); both expose Zone 1, including fail-closed redaction. Office→PDF is provided by the separate Office package below. |
-| `office-core/` | The pure-Rust **Office → PDF** engine: DOCX/PPTX/XLSX layout + PDF emission, fail-closed envelope, DocProfile router contract. No LibreOffice/Chromium/pdfium in the conversion path. See [`office-core/README.md`](office-core/README.md). |
-| `office-core/wasm/` | The **`@samarthmn/doc-yantra-office`** npm package (Node CJS + browser ESM). `office_profile()` / `office_to_pdf()` / `register_font()`. DocKosha routes all office conversions here; envelope misses fail closed (no LibreOffice anywhere). |
-| `packages/dockosha-provider/` | The **`@samarthmn/dockosha-provider-docyantra`** TypeScript adapter. Its committed `dist/` and exact engine pins release in lockstep with both wasm engines. |
-| `packages/doc-yantra-fonts/` | The optional **`@samarthmn/doc-yantra-fonts`** offline pack. It owns the one canonical copy of all 17 hash-pinned distribution fonts and their licences; neither engine package contains font binaries. |
-| `.github/workflows/publish-wasm.yml` | Validates a `0.0.*` tag, publishes all four lockstep packages to **GitHub Packages**, and attaches the small named consumer ZIP plus the separate offline font pack to the GitHub Release. |
+| Path                                 | What it is                                                                                                                                                                                                                                                                                     |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pdf-core/`                          | The Rust engine: merge, split, watermark, metadata, CSV/Markdown/text/image → PDF, and pure-Rust redaction (Zone 1), plus pdfium-backed raster/extract/forms and legacy redaction cross-validation (Zone 2, native-only). See [`pdf-core/README.md`](pdf-core/README.md).                      |
+| `pdf-core/wasm/`                     | The **`@samarthmn/doc-yantra`** npm package (built output committed at `pdf-core/wasm/pkg`; consumers never need Rust). Two modules: main (Node CJS), `./web` (browser ESM); both expose Zone 1, including fail-closed redaction. Office→PDF is provided by the separate Office package below. |
+| `office-core/`                       | The pure-Rust **Office → PDF** engine: DOCX/PPTX/XLSX layout + PDF emission, fail-closed envelope, DocProfile router contract. No LibreOffice/Chromium/pdfium in the conversion path. See [`office-core/README.md`](office-core/README.md).                                                    |
+| `office-core/wasm/`                  | The **`@samarthmn/doc-yantra-office`** npm package (Node CJS + browser ESM). `office_profile()` / `office_to_pdf()` / `register_font()`. DocKosha routes all office conversions here; envelope misses fail closed (no LibreOffice anywhere).                                                   |
+| `packages/dockosha-provider/`        | The **`@samarthmn/dockosha-provider-docyantra`** TypeScript adapter. Its committed `dist/` and exact engine pins release in lockstep with both wasm engines.                                                                                                                                   |
+| `packages/doc-yantra-fonts/`         | The optional **`@samarthmn/doc-yantra-fonts`** offline pack. It owns the one canonical copy of all 17 hash-pinned distribution fonts and their licences; neither engine package contains font binaries.                                                                                        |
+| `.github/workflows/publish-wasm.yml` | PR/manual readiness checks: rebuilds and audits the four lockstep packages without publishing.                                                                                                                                                                                                 |
+| `.github/workflows/publish-npm.yml`  | Owner-triggered public npm publication after immutable version and tarball checks.                                                                                                                                                                                                             |
+
+The first-party source and wrapper code is licensed under the AGPL-3.0-only
+terms in [`LICENSE`](LICENSE). Enterprise licensing is available only through a
+separate signed agreement; see [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md).
+See
+[`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md),
+[`SUPPORT.md`](SUPPORT.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 > **History note:** the DocYantra HTTP service (NestJS + Gotenberg) has been
 > retired and deleted from the DocKosha app repo. These packages are the only
@@ -19,22 +27,22 @@ This repo is DocKosha's **proprietary PDF engine** and its distributable
 
 ## Quick start (consume the package)
 
-Full guide: **[CONSUMING.md](CONSUMING.md)**. The package is published to GitHub
-Packages; consume the registry version (this is how DocKosha ships today):
+Full guide: **[CONSUMING.md](CONSUMING.md)**. Consume the public npm registry
+version:
 
 ```jsonc
-// app package.json — needs @samarthmn:registry in .npmrc + a read:packages token
-"@samarthmn/doc-yantra": "0.0.21",        // example: use the latest tag
-"@samarthmn/doc-yantra-office": "0.0.21"
+// app package.json — public npm registry
+"@samarthmn/doc-yantra": "0.0.22",
+"@samarthmn/doc-yantra-office": "0.0.22"
 ```
 
 > Releases stay on the **0.0.x** line. On `0.0.x`, a caret pins the exact patch
 > (`^0.0.7` resolves only `0.0.7`), so pin the exact version and bump it in the
 > consumer each time a new patch is published.
 
-For local engine iteration you can temporarily `link:` a sibling checkout
-(`link:../doc-yantra/pdf-core/wasm/pkg`), but switch back to the registry range
-before committing — see CONSUMING.md § "Local development".
+For local engine iteration, build and pack the workspace packages into a
+disposable consumer project; keep application manifests on public registry
+versions.
 
 The default install is fontless. Unicode text operations resolve only the
 required exact faces, in this order: memory cache, persistent cache, installed
@@ -66,11 +74,11 @@ honored exactly as before.
 
 ```bash
 cd pdf-core
-./scripts/fetch-pdfium.sh   # one-time: pdfium dylib for native Zone 2
+PDFIUM_SHA256_LINUX_X64=<reviewed-sha256> ./scripts/fetch-pdfium.sh
 cargo test                  # full engine suite (Zone 1 + Zone 2)
 cargo build --release       # CLI at target/release/pdfcore
 
-# rebuild the npm package after Rust changes (updates pkg/ — commit it)
+# rebuild the npm package after Rust changes (updates pkg/)
 cd wasm && ./build.sh
 
 # rebuild the fontless Office package after office-core changes
@@ -86,84 +94,51 @@ The Office wasm package is also built with `--no-default-features --features was
 It contains no fonts: hosts discover canonical requests with
 `office_font_requests()`, supply validated SFNT bytes with
 `office_register_font()`, then profile and convert. Native Office builds retain
-the default `bundled-fonts` feature for hermetic engine tests; fidelity corpus
-runs register the hash-pinned provider fonts described below.
+the default `bundled-fonts` feature for local engine tests.
 
-## Consumer release downloads
+### Clean and rebuild Rust artifacts
 
-Use the named `doc-yantra-wasm-core-<version>.zip` GitHub Release asset for a
-downloadable distribution. It contains only the PDF, Office, and adapter npm
-tarballs, checksums, and installation instructions. The optional
-`doc-yantra-fonts-offline-<version>.tgz` is separate.
-
-GitHub's automatic **Source code (zip)** and **Source code (tar.gz)** links are
-development snapshots of the entire tagged repository—including Rust source,
-fixtures, corpora, and committed artifacts. They are intentionally not consumer
-packages.
-
-## Running the full fidelity suite
-
-The full fidelity check runs the harness tests, verifies that every corpus case
-has a Word-exported ground truth, then scores the complete blocking DOCX corpus.
-Run it from the repository root (the first command is needed only once per
-machine):
+Cargo stores compiled dependencies and build artifacts in `target/` directories.
+From the repository root, remove all DocYantra `target/` directories with:
 
 ```bash
-./pdf-core/scripts/fetch-pdfium.sh  # one-time: install the native pdfium library
-cd office-core
-cargo test -p fidelity
-cargo run -p fidelity -- missing-ground-truth
-cargo run -p fidelity -- run --format docx
+find pdf-core office-core text-core -type d -name target -prune -exec rm -rf {} +
 ```
 
-The corpus command requires every core case to pass and at least 90% of the
-extended cases to pass. It writes the HTML report to
-`tmp/fidelity-report/index.html` at the repository root. Use
-`--report-dir ../tmp/<name>` to keep a separate report for a specific run.
-Each page is gated by the frozen legacy/unweighted SSIM threshold and the
-vector geometry bounds for border segments and text-run origins. Ink-weighted
-SSIM and heatmaps remain diagnostic: both SSIM variants and the geometry result
-are included in the JSON and HTML reports.
-
-Corpus runs resolve the fonts declared by each DOCX automatically from the
-committed `office-core/fidelity/fonts.lock`. On a cold cache they require
-network access and populate the ignored, content-addressed
-`office-core/fidelity/fonts-cache/`; warm runs verify and reuse those bytes
-without downloading them again. Do not pass host font directories to `run`.
-`--font-dir` remains available only on the diagnostic `probe` command.
-
-To score one case while developing:
+Recreate the active crates' artifacts when needed by rebuilding them:
 
 ```bash
-cd office-core
-cargo run -p fidelity -- run \
-  --case gdocs-anchors-toc \
-  --report-dir ../tmp/fidelity-gdocs-anchors-toc
+for manifest in \
+  pdf-core/Cargo.toml pdf-core/wasm/Cargo.toml \
+  office-core/Cargo.toml office-core/wasm/Cargo.toml \
+  text-core/Cargo.toml; do
+  cargo build --manifest-path "$manifest"
+done
 ```
 
-`cargo run -p fidelity -- lock-fonts` is a maintenance command for an
-intentional font-version refresh; it is not part of a normal test run. Review
-and commit the resulting `fonts.lock` change together with that upgrade.
+`uv sync` restores Python dependencies only; it does not recreate Cargo's Rust
+build artifacts.
+
+## Public verification surface
+
+The exported candidate contains only self-contained checks in `public-tests/`.
+Run them from its root with `node --test public-tests/*.test.mjs`, then follow
+the PDF and Office build/test commands in `public-tests/README.md`. Owner-only
+golden-document validation is a separate scheduled/manual gate and requires
+the provenance-approved intake described in `FIXTURE_PROVENANCE.md`; it is not
+part of the public candidate.
 
 ## Releasing
 
-Releases stay on the **0.0.x** line — only the patch increments. From a clean
-`main`, one script picks the next `x`, bumps all four engine/wasm manifests plus
-the adapter and font-package manifests, rebuilds and tests the four packages,
-runs the blocking DOCX fidelity corpus, then commits, tags, and atomically
-pushes `main` + `0.0.x`. Before tagging, it audits every `npm pack`, enforces
-the core/font byte budgets, verifies the first-party CDN bytes and headers, and
-clean-installs the generated consumer ZIP. The tag workflow repeats those
-distribution checks, publishes the font pack, both engines, and the adapter,
-then creates the named GitHub Release assets:
+Releases stay on the **0.0.x** line — only the patch increments. The release
+script is a side-effect-free preparation gate: it validates lockstep manifests,
+audits every `npm pack`, enforces core/font byte budgets, and checks the public
+source candidate without changing repository or registry state:
 
 ```bash
-scripts/release.sh            # auto: next patch, commit, tag, push
-scripts/release.sh 7          # explicit: release 0.0.7
-DRY_RUN=1 scripts/release.sh  # preview only
-
-# then, in a follow-up, bump DocKosha's package.json pin to the new 0.0.x + pnpm install
+scripts/release.sh            # validate the 0.0.22 candidate
 ```
 
-Published versions are immutable — the script refuses to reuse or go below an
-existing tag; always bump.
+Published versions are immutable. The owner-only npm workflow performs the
+public-registry reuse check and publishes only after all four audited tarballs
+are prepared; this checkout does not publish.

@@ -1,8 +1,9 @@
 [package]
 name = "pdf-core-wasm"
-version = "0.0.21"
+version = "0.0.22"
 edition = "2024"
 rust-version = "1.89"
+license = "AGPL-3.0-only"
 description = "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel + browser)"
 publish = false
 

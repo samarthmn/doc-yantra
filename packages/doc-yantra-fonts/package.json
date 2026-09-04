@@ -1,12 +1,15 @@
 {
   "name": "@samarthmn/doc-yantra-fonts",
   "description": "Optional offline font pack for the DocYantra PDF and Office WebAssembly engines",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "files": [
     "fonts",
     "index.cjs",
     "index.d.ts",
-    "LICENSES.md"
+    "LICENSES.md",
+    "LICENSE",
+    "COMMERCIAL-LICENSING.md",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "main": "index.cjs",
   "types": "index.d.ts",
@@ -15,9 +18,10 @@
     "type": "git",
     "url": "git+https://github.com/samarthmn/doc-yantra.git"
   },
-  "license": "SEE LICENSE IN LICENSES.md",
+  "license": "AGPL-3.0-only AND OFL-1.1",
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "exports": {
     ".": {

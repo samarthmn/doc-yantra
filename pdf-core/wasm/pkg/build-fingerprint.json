@@ -1,6 +1,119 @@
 {
   "target": "pdf",
-  "sourceHash": "63c0316be1224818f89922ab8066ec8fe477ae0e66e3344db4f015a117eff038",
-  "fileCount": 33,
-  "builtAt": "2026-08-07T06:12:27.089Z"
+  "sourceHash": "5756b8545e00cc403b8be5c317156a5b63899b924348ba2d98cb0332279c779d",
+  "fileCount": 43,
+  "artifactHash": "2de12c98dc536d17491aeb3bf2a08e6b6f0985ba810ca9da5bd3c4464908149e",
+  "artifactFileCount": 22,
+  "artifacts": [
+    {
+      "path": "COMMERCIAL-LICENSING.md",
+      "sha256": "812dad7da869ac16688c90fea09c408612c24c0403915d1e3870c2483fb93938",
+      "byteLength": 582
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "byteLength": 34523
+    },
+    {
+      "path": "NOTICE-ADOBE-CMAP.md",
+      "sha256": "742665db9c8e1bc72603c6d319ca3e90b83bd6d95202f0cd4ef11068a07a9c29",
+      "byteLength": 1453
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "sha256": "0d90cf56d11f8efe91e57d21a2320ea27d5d664b7b915df96915a85638d32d8e",
+      "byteLength": 1252
+    },
+    {
+      "path": "THIRD_PARTY_RUST_LICENSES.txt",
+      "sha256": "b48e019d2f4344d86c0917b9f5cadb13b12a8dd4705f99e16d0a27169d682c6e",
+      "byteLength": 267416
+    },
+    {
+      "path": "font-manifest.json",
+      "sha256": "6ab761ec0c7e8bc684d1aaf1a7d9bf2686da2647fe1b4bb2f5b3c8b7ec4dbea8",
+      "byteLength": 6925
+    },
+    {
+      "path": "font-provider.cjs",
+      "sha256": "1a2736779634262e60867ecb3873efd19ecb437e3c3ff70dbab2b550eeccd35e",
+      "byteLength": 22129
+    },
+    {
+      "path": "font-provider.d.ts",
+      "sha256": "4f041b9284db9cb0ca41be28fe588257fab38ea3c82e66cd2fdca070f3943b2e",
+      "byteLength": 2776
+    },
+    {
+      "path": "package.json",
+      "sha256": "cf97666d4c21bafc691fdb73e286e997a43332743c4a2eacc2ebf38c2c6f82ef",
+      "byteLength": 1878
+    },
+    {
+      "path": "pdf_core_wasm.d.ts",
+      "sha256": "bad618d8139ed3a03e7ba1b2557451dd7ea7ab90318ee8c2b9727d13bb9f008d",
+      "byteLength": 2435
+    },
+    {
+      "path": "pdf_core_wasm.js",
+      "sha256": "7a933c7c689ff68f27f8b1e9f0b19dc54e5db788fa02e4cf0b33d6da4c116b59",
+      "byteLength": 18309
+    },
+    {
+      "path": "pdf_core_wasm_bg.wasm",
+      "sha256": "554e97529b6b5d2c20c35a5300ba2fc65d75b093883067c9efd3e9c03ddaf6be",
+      "byteLength": 5992980
+    },
+    {
+      "path": "pdf_core_wasm_bg.wasm.d.ts",
+      "sha256": "71cc75aac8324728af86ae65ca2e870526136f9f2440e38a247b6171f49eedc0",
+      "byteLength": 1633
+    },
+    {
+      "path": "web/package.json",
+      "sha256": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+      "byteLength": 23
+    },
+    {
+      "path": "web/pdf_core_wasm.d.ts",
+      "sha256": "6710de3734587ab47663a706147d9c222227f6e756e0567291b49ce9c3d675c2",
+      "byteLength": 5011
+    },
+    {
+      "path": "web/pdf_core_wasm.js",
+      "sha256": "e978bd720ea04b4aef9c40f968228e084b7a66275ca864e31e7712a544d4a95b",
+      "byteLength": 21170
+    },
+    {
+      "path": "web/pdf_core_wasm_bg.wasm.d.ts",
+      "sha256": "71cc75aac8324728af86ae65ca2e870526136f9f2440e38a247b6171f49eedc0",
+      "byteLength": 1633
+    },
+    {
+      "path": "worker-client.cjs",
+      "sha256": "f27c1eb547205fba8d609ce3b075acddd596603245c7baefaea914fd9b2a3dae",
+      "byteLength": 25903
+    },
+    {
+      "path": "worker-entry.cjs",
+      "sha256": "48bc28545422defc797c36f9204d147f4c56f981621ee3500c134e5ee69e64c7",
+      "byteLength": 8104
+    },
+    {
+      "path": "worker-ops.cjs",
+      "sha256": "deda86114ce5141ca70a21fc2bde7dbabc2c01fff8bcf0350ab0904e1c22dd16",
+      "byteLength": 1035
+    },
+    {
+      "path": "worker.d.ts",
+      "sha256": "a236083c5824e37240ddb7a5483d02b2de39d1086a380a8574a34489f981e690",
+      "byteLength": 4760
+    },
+    {
+      "path": "worker.js",
+      "sha256": "c85f108d34aa46e2f82962c715d45609c1d9c22e014a735de361a299e204c863",
+      "byteLength": 16962
+    }
+  ]
 }

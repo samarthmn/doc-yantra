@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Builds the office-core WebAssembly package (both targets) and stamps the npm
-# metadata for GitHub Packages. Mirrors pdf-core/wasm/build.sh. The output
+# metadata for the public npm registry. Mirrors pdf-core/wasm/build.sh. The output
 # (pkg/) is committed so consumers and CI install without a Rust toolchain.
 #
 #   pkg/       Node/server build (CJS)
@@ -11,6 +11,13 @@
 #
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# Keep debug/source paths deterministic and avoid leaking a builder's checkout
+# or Cargo home into the committed WASM bytes.
+REPO_ROOT="$(cd ../.. && pwd -P)"
+CARGO_ROOT="${CARGO_HOME:-${HOME}/.cargo}"
+RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }--remap-path-prefix=${REPO_ROOT}=/doc-yantra --remap-path-prefix=${CARGO_ROOT}=/cargo"
+export RUSTFLAGS
 
 OWNER="samarthmn"                          # GitHub owner (user/org) == npm scope
 REPO="doc-yantra"                          # GitHub repo name
@@ -83,6 +90,8 @@ cp font-provider-web.js pkg/web/font-provider.js
 cp font-provider-web.d.ts pkg/web/font-provider.d.ts
 cp fontsource-provider-web.js pkg/web/fontsource-provider.js
 cp fontsource-provider.d.ts pkg/web/fontsource-provider.d.ts
+cp ../../LICENSE ../../COMMERCIAL-LICENSING.md ../../THIRD_PARTY_NOTICES.md pkg/
+cp THIRD_PARTY_RUST_LICENSES.txt pkg/
 
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \
 node -e '
@@ -90,11 +99,13 @@ node -e '
   const j = JSON.parse(fs.readFileSync(p, "utf8"));
   j.name = process.env.PKG_NAME;
   j.repository = { type: "git", url: process.env.REPO_URL };
-  j.license = "UNLICENSED";
+  j.license = "AGPL-3.0-only";
+  j.peerDependencies = { ...(j.peerDependencies || {}), "@samarthmn/doc-yantra-fonts": j.version };
+  j.peerDependenciesMeta = { ...(j.peerDependenciesMeta || {}), "@samarthmn/doc-yantra-fonts": { optional: true } };
   j.main = "index.cjs";
   j.types = "index.d.ts";
-  j.publishConfig = { registry: "https://npm.pkg.github.com" };
-  j.files = Array.from(new Set([...(j.files || []), "web", "index.cjs", "index.d.ts", "font-provider.cjs", "font-provider.d.ts", "fontsource-provider.cjs", "fontsource-provider.d.ts", "noto-fallback.cjs", "noto-fallback.d.ts", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json"]));
+  j.publishConfig = { access: "public", registry: "https://registry.npmjs.org" };
+  j.files = Array.from(new Set([...(j.files || []), "web", "index.cjs", "index.d.ts", "font-provider.cjs", "font-provider.d.ts", "fontsource-provider.cjs", "fontsource-provider.d.ts", "noto-fallback.cjs", "noto-fallback.d.ts", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json", "LICENSE", "COMMERCIAL-LICENSING.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_RUST_LICENSES.txt"]));
   j.exports = {
     ".": {
       types: "./index.d.ts",

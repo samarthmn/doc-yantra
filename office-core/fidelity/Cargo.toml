@@ -4,6 +4,10 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+# Private, native-only harness workspace. Keeping this separate prevents its
+# pdfium/corpus dependencies from entering office-core's public lockfile.
+[workspace]
+
 # Dev-only fidelity harness: converts corpus cases with office-core, rasterizes
 # both our output and the Word ground truth via pdf-core's pdfium, and scores
 # similarity (SSIM). Never published, never wasm.

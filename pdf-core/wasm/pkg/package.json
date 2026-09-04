@@ -1,7 +1,8 @@
 {
   "name": "@samarthmn/doc-yantra",
   "description": "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel + browser)",
-  "version": "0.0.21",
+  "version": "0.0.22",
+  "license": "AGPL-3.0-only",
   "files": [
     "pdf_core_wasm_bg.wasm",
     "pdf_core_wasm.js",
@@ -15,7 +16,12 @@
     "font-provider.cjs",
     "font-provider.d.ts",
     "font-manifest.json",
-    "build-fingerprint.json"
+    "build-fingerprint.json",
+    "LICENSE",
+    "COMMERCIAL-LICENSING.md",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_RUST_LICENSES.txt",
+    "NOTICE-ADOBE-CMAP.md"
   ],
   "main": "pdf_core_wasm.js",
   "types": "pdf_core_wasm.d.ts",
@@ -23,12 +29,12 @@
     "type": "git",
     "url": "git+https://github.com/samarthmn/doc-yantra.git"
   },
-  "license": "UNLICENSED",
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "peerDependencies": {
-    "@samarthmn/doc-yantra-fonts": "0.0.21"
+    "@samarthmn/doc-yantra-fonts": "0.0.22"
   },
   "peerDependenciesMeta": {
     "@samarthmn/doc-yantra-fonts": {

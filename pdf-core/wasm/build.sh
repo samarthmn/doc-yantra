@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Builds the pdf-core WebAssembly package (both targets) and stamps the npm
-# metadata needed to publish it to GitHub Packages. The output (pkg/) is
+# metadata needed to publish it to the public npm registry. The output (pkg/) is
 # committed to the repo so consumers and CI can install without a Rust
 # toolchain.
 #
@@ -13,13 +13,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# ─── EDIT THESE IF YOUR GITHUB OWNER / REPO / PACKAGE NAME DIFFER ────────────
-# For GitHub Packages, the package's npm scope MUST equal the GitHub owner
-# (user or org) that hosts the repo, or the publish is rejected. PKG_NAME is
-# therefore scoped to OWNER.
-OWNER="samarthmn"                    # GitHub owner (user/org) == npm scope
-REPO="doc-yantra"                    # GitHub repo name
-PKG_NAME="@samarthmn/doc-yantra"     # published npm package name
+# Keep debug/source paths deterministic and avoid leaking a builder's checkout
+# or Cargo home into the committed WASM bytes.
+REPO_ROOT="$(cd ../.. && pwd -P)"
+CARGO_ROOT="${CARGO_HOME:-${HOME}/.cargo}"
+RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }--remap-path-prefix=${REPO_ROOT}=/doc-yantra --remap-path-prefix=${CARGO_ROOT}=/cargo"
+export RUSTFLAGS
+
+# ─── Package identity ────────────────────────────────────────────────────────
+OWNER="samarthmn"
+REPO="doc-yantra"
+PKG_NAME="@samarthmn/doc-yantra"
 WASM_PACK_VERSION="0.15.0"           # generated glue is committed; upgrades are deliberate
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -88,18 +92,21 @@ rm -rf pkg/fonts
 cp ../../wasm-worker/worker-client.cjs ../../wasm-worker/worker-entry.cjs pkg/
 cp worker.js worker.d.ts worker-ops.cjs font-provider.cjs font-provider.d.ts pkg/
 cp ../../packages/doc-yantra-fonts/fonts/manifest.json pkg/font-manifest.json
+cp ../../LICENSE ../../COMMERCIAL-LICENSING.md ../../THIRD_PARTY_NOTICES.md pkg/
+cp THIRD_PARTY_RUST_LICENSES.txt pkg/
+cp ../assets/cmaps/LICENSE-adobe-cmap-resources.md pkg/NOTICE-ADOBE-CMAP.md
 
-# wasm-pack derives the name from the crate (@OWNER/pdf-core-wasm) and does not
-# emit repository / license / publishConfig / exports; set the final metadata.
+# wasm-pack derives the name from the crate and does not emit repository,
+# license, publishConfig, or exports; set the final metadata.
 REPO_URL="git+https://github.com/${OWNER}/${REPO}.git" PKG_NAME="${PKG_NAME}" \
 node -e '
   const fs = require("fs"), p = "pkg/package.json";
   const j = JSON.parse(fs.readFileSync(p, "utf8"));
   j.name = process.env.PKG_NAME;
   j.repository = { type: "git", url: process.env.REPO_URL };
-  j.license = "UNLICENSED";
-  j.publishConfig = { registry: "https://npm.pkg.github.com" };
-  j.files = Array.from(new Set([...(j.files || []), "web", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "font-provider.cjs", "font-provider.d.ts", "font-manifest.json", "build-fingerprint.json"]));
+  j.license = "AGPL-3.0-only";
+  j.publishConfig = { access: "public", registry: "https://registry.npmjs.org" };
+  j.files = Array.from(new Set([...(j.files || []), "web", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "font-provider.cjs", "font-provider.d.ts", "font-manifest.json", "build-fingerprint.json", "LICENSE", "COMMERCIAL-LICENSING.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_RUST_LICENSES.txt", "NOTICE-ADOBE-CMAP.md"]));
   j.peerDependencies = { ...(j.peerDependencies || {}), "@samarthmn/doc-yantra-fonts": j.version };
   j.peerDependenciesMeta = { ...(j.peerDependenciesMeta || {}), "@samarthmn/doc-yantra-fonts": { optional: true } };
   j.exports = {

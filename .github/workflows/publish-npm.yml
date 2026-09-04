@@ -1,0 +1,94 @@
+name: Publish DocYantra packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_mode:
+        description: "Registry authentication mode"
+        required: true
+        default: trusted-publisher
+        type: choice
+        options:
+          - trusted-publisher
+          - bootstrap-token
+      dry_run:
+        description: "Pack and compare registry integrity without publishing"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: docyantra-npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.ref == 'refs/heads/main' && github.actor == github.repository_owner }}
+    environment: npm-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22.14.0
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.5.1
+      - name: Require supported Node and npm runtimes
+        run: |
+          node --input-type=module -e "const [a,b,c]=process.versions.node.split('.').map(Number); if (a < 22 || (a === 22 && (b < 14 || (b === 14 && c < 0)))) process.exit(1)"
+          npm --version
+      - name: Set up pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal --target wasm32-unknown-unknown
+      - name: Install pinned Rust license inventory tool
+        run: cargo install --locked --features cli cargo-about@0.9.2
+      - name: Verify locked Rust dependency notices
+        run: scripts/generate-rust-license-notices.sh --check
+      - name: Regenerate PDF and Office packages and require byte-identical output
+        run: |
+          ./pdf-core/wasm/build.sh
+          ./office-core/wasm/build.sh
+          git diff --exit-code -- pdf-core/wasm/pkg office-core/wasm/pkg
+      - name: Regenerate adapter from the exact engine packages
+        run: |
+          mkdir -p tmp/local-packages
+          (cd pdf-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
+          (cd office-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
+          VERSION="$(node -p "require('./pdf-core/wasm/pkg/package.json').version")"
+          cd packages/dockosha-provider
+          npm install --ignore-scripts --no-save --package-lock=false \
+            "../../tmp/local-packages/samarthmn-doc-yantra-${VERSION}.tgz" \
+            "../../tmp/local-packages/samarthmn-doc-yantra-office-${VERSION}.tgz"
+          npm run build
+          cd ../..
+          node scripts/source-fingerprint.mjs adapter --out packages/dockosha-provider/build-fingerprint.json
+          git diff --exit-code -- packages/dockosha-provider/dist packages/dockosha-provider/build-fingerprint.json
+      - name: Validate the immutable release candidate
+        run: |
+          node scripts/package-audit.mjs
+          node scripts/export-public-source.mjs --check-only
+          scripts/clean-export-smoke.sh
+      - name: Verify the public font CDN
+        if: ${{ !inputs.dry_run }}
+        run: node scripts/verify-font-cdn.mjs
+      - name: Enable bootstrap-token authentication
+        if: inputs.auth_mode == 'bootstrap-token'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NPM_TOKEN" || { echo "bootstrap-token requires NPM_TOKEN" >&2; exit 1; }
+          npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+      - name: Dry-run publish plan
+        if: inputs.dry_run
+        run: node scripts/publish-npm.mjs --dry-run
+      - name: Publish integrity-addressed tarballs
+        if: ${{ !inputs.dry_run }}
+        run: node scripts/publish-npm.mjs
