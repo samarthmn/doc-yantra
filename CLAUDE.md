@@ -57,12 +57,12 @@ wasm (`--no-default-features --features wasm`) and ships as the fontless
 `@samarthmn/doc-yantra-office`. See `office-core/README.md`.
 
 **Versioning spans four Cargo.tomls plus the adapter and optional font pack**,
-kept in lockstep by
-`scripts/release.sh`: `pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
+validated in lockstep by `scripts/release.sh`:
+`pdf-core/Cargo.toml`, `pdf-core/wasm/Cargo.toml`,
 `office-core/Cargo.toml`, `office-core/wasm/Cargo.toml`,
 `packages/dockosha-provider/package.json`, and
-`packages/doc-yantra-fonts/package.json`. The owner-only public npm workflow
-validates and publishes all four packages together after preparation checks.
+`packages/doc-yantra-fonts/package.json`. The owner-only tag workflow validates
+and publishes all four packages together to GitHub Packages.
 
 ## Build / test / run commands
 
@@ -95,7 +95,8 @@ side-effect-free preparation gate; it validates lockstep manifests, package
 audits, and the public source candidate without changing repository or registry
 state:
 ```bash
-scripts/release.sh          # validate the 0.0.22 candidate
+scripts/release.sh             # validate the 0.0.22 candidate
+scripts/release.sh --publish   # push its tag and start GitHub Packages release
 ```
 Published versions are immutable. Build artifacts are regenerated explicitly by
 the package build scripts before running this gate.
@@ -110,14 +111,13 @@ the package build scripts before running this gate.
   `pdf-core/wasm/Cargo.toml` — plus both `Cargo.lock`s and the built
   `pkg/package.json`; keep all of them on the same `0.0.x`. The package's
   `version()` returns the wasm crate's. Published versions are **immutable**.
-- **Releasing** stays on the `0.0.x` line. `scripts/release.sh` is a
-  side-effect-free preparation gate that validates candidates and public npm
-  tarballs; it does not alter repository or registry state.
+- **Releasing** stays on the `0.0.x` line. `scripts/release.sh` is the
+  side-effect-free preparation gate; `--publish` pushes the reviewed tag.
 - **Distribution fonts have one owner.** `packages/doc-yantra-fonts/` contains
   the canonical 17 binaries, hashes, and licences. Core npm packages contain
   only manifest/provider metadata and exactly one WASM binary each.
-- **Package identity is fixed.** Keep the four approved names and public npm
-  registry. See `CONSUMING.md`.
+- **Package identity is fixed.** Keep the four approved names on GitHub
+  Packages. See `CONSUMING.md`.
 
 ## Behavioral contracts to preserve when editing
 

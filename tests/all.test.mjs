@@ -4,6 +4,7 @@ import "./office-coverage.test.mjs";
 import "./release-contract.test.mjs";
 import "./doc-yantra-font-provider.test.mjs";
 import "./font-cdn-tools.test.mjs";
+import "./github-packages-release.test.mjs";
 import "./license-metadata.test.mjs";
 import "./redact-package.test.mjs";
 import "./worker-pdf.test.mjs";

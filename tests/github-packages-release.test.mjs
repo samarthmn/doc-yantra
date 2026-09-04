@@ -1,0 +1,41 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const githubRegistry = "https://npm.pkg.github.com";
+
+function readJson(path) {
+  return JSON.parse(readFileSync(join(root, path), "utf8"));
+}
+
+test("all DocYantra packages publish only to GitHub Packages", () => {
+  for (const path of [
+    "pdf-core/wasm/pkg/package.json",
+    "office-core/wasm/pkg/package.json",
+    "packages/doc-yantra-fonts/package.json",
+    "packages/dockosha-provider/package.json",
+  ]) {
+    assert.equal(readJson(path).publishConfig?.registry, githubRegistry, path);
+  }
+});
+
+test("a 0.0.x tag publishes through GitHub Packages and creates a GitHub release", () => {
+  const workflow = readFileSync(join(root, ".github/workflows/publish-npm.yml"), "utf8");
+  assert.match(workflow, /push:\s*\n\s+tags:\s*\n\s+- ["']0\.0\.\*["']/u);
+  assert.match(workflow, /registry-url:\s*https:\/\/npm\.pkg\.github\.com/u);
+  assert.match(workflow, /packages:\s*write/u);
+  assert.match(workflow, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
+  assert.match(workflow, /node scripts\/publish-npm\.mjs/u);
+  assert.match(workflow, /gh release (?:create|upload)/u);
+  assert.doesNotMatch(workflow, /registry\.npmjs\.org|npm-production|NPM_TOKEN/u);
+});
+
+test("the release script can safely push the prepared version tag", () => {
+  const release = readFileSync(join(root, "scripts/release.sh"), "utf8");
+  assert.match(release, /--publish/u);
+  assert.match(release, /git tag "\$VERSION"/u);
+  assert.match(release, /git push --atomic origin main "\$VERSION"/u);
+});

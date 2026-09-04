@@ -105,7 +105,7 @@ node -e '
   j.name = process.env.PKG_NAME;
   j.repository = { type: "git", url: process.env.REPO_URL };
   j.license = "AGPL-3.0-only";
-  j.publishConfig = { access: "public", registry: "https://registry.npmjs.org" };
+  j.publishConfig = { registry: "https://npm.pkg.github.com" };
   j.files = Array.from(new Set([...(j.files || []), "web", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "font-provider.cjs", "font-provider.d.ts", "font-manifest.json", "build-fingerprint.json", "LICENSE", "COMMERCIAL-LICENSING.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_RUST_LICENSES.txt", "NOTICE-ADOBE-CMAP.md"]));
   j.peerDependencies = { ...(j.peerDependencies || {}), "@samarthmn/doc-yantra-fonts": j.version };
   j.peerDependenciesMeta = { ...(j.peerDependenciesMeta || {}), "@samarthmn/doc-yantra-fonts": { optional: true } };

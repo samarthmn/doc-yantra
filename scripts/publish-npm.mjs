@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const REGISTRY = "https://registry.npmjs.org";
+const REGISTRY = "https://npm.pkg.github.com";
 const PACKAGE_ORDER = [
   ["packages/doc-yantra-fonts", "@samarthmn/doc-yantra-fonts"],
   ["pdf-core/wasm/pkg", "@samarthmn/doc-yantra"],
@@ -140,7 +140,7 @@ export async function publishPackages({ root = ROOT, dryRun = false, run = defau
         wouldPublish.push(tarball);
         continue;
       }
-      const result = invoke(run, "npm", ["publish", tarball.tarball, "--provenance", "--access", "public", "--registry", REGISTRY]);
+      const result = invoke(run, "npm", ["publish", tarball.tarball, "--registry", REGISTRY]);
       if (result.status !== 0) {
         if (!/\b(?:E409|409)\b/u.test(`${result.stdout}\n${result.stderr}`)) {
           throw new Error(`npm publish failed for ${tarball.name}@${tarball.version}: ${result.stderr || result.stdout}`);

@@ -35,7 +35,7 @@ const SECRET_PATTERNS = [
   /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}\b/gu,
   /\b(?:ghp_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|npm_[A-Za-z0-9]{36,}|AIza[A-Za-z0-9_-]{35})\b/gu,
   /https?:\/\/[^\s/@:]+:([^\s/@]+)@/giu,
-  /(?:npm\.pkg\.github\.com|registry\.npmjs\.org\/.+_authToken\s*=\s*[^\s]+)/giu,
+  /(?:npm\.pkg\.github\.com|registry\.npmjs\.org)\/.+_authToken\s*=\s*([^\s]+)/giu,
 ];
 const BINARY_ALLOW = /\.(?:wasm|pdf|png|jpe?g|gif|webp|docx|pptx|xlsx|xlsm|xls|ttf|otf|ttc|woff2?)$/iu;
 const TEXT_EXT = /\.(?:c|cc|cpp|css|cmake|csv|d\.ts|d\.tsx|gn|h|hbs|hh|hpp|inc|inl|html?|js|json|mjs|cjs|map|md|py|rs|sh|toml|ts|tsx|yaml|yml|lock|txt|xml)$/iu;
@@ -60,7 +60,12 @@ function fail(message) {
 function isExcluded(path) {
   // The CDN-tool contract is deliberately public: consumers must be able to
   // reproduce the checked-in font assets without the private test corpus.
-  if (path === "tests" || path === "tests/font-cdn-tools.test.mjs" || path === "tests/license-metadata.test.mjs") return false;
+  if (
+    path === "tests" ||
+    path === "tests/font-cdn-tools.test.mjs" ||
+    path === "tests/github-packages-release.test.mjs" ||
+    path === "tests/license-metadata.test.mjs"
+  ) return false;
   if (path === "pdf-core/pdfium" || path === "pdf-core/pdfium/licenses") return false;
   if (path.startsWith("pdf-core/pdfium/")) return !isPdfiumNotice(path);
   return EXCLUDED_PATHS.has(path) || path.split("/").some((part) => EXCLUDED.has(part));

@@ -30,8 +30,7 @@
     "url": "git+https://github.com/samarthmn/doc-yantra.git"
   },
   "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org"
+    "registry": "https://npm.pkg.github.com"
   },
   "peerDependencies": {
     "@samarthmn/doc-yantra-fonts": "0.0.22"

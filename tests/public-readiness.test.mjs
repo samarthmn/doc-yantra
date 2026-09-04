@@ -219,13 +219,16 @@ test("release workflows gate the exact publish commit and exercise the clean pub
   );
   assert.match(auditJob, /cargo install --locked --features cli cargo-about@0\.9\.2/u);
   assert.match(auditJob, /scripts\/generate-rust-license-notices\.sh --check/u);
-  assert.match(publisher, /^\s+environment:\s*npm-production\s*$/mu);
-  assert.match(publisher, /github\.ref\s*==\s*'refs\/heads\/main'/u);
+  assert.match(publisher, /push:\s*\n\s+tags:\s*\n\s+- ["']0\.0\.\*["']/u);
+  assert.match(publisher, /registry-url:\s*https:\/\/npm\.pkg\.github\.com/u);
   assert.match(publisher, /github\.actor\s*==\s*github\.repository_owner/u);
-  assert.match(publisher, /Regenerate PDF and Office packages/u);
+  assert.match(publisher, /Regenerate engines and require byte-identical packages/u);
   assert.match(publisher, /git diff --exit-code/u);
   assert.match(publisher, /scripts\/clean-export-smoke\.sh/u);
   assert.match(publisher, /scripts\/verify-font-cdn\.mjs/u);
+  assert.match(publisher, /packages:\s*write/u);
+  assert.match(publisher, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
+  assert.doesNotMatch(publisher, /registry\.npmjs\.org|npm-production|NPM_TOKEN/u);
 });
 
 test("exporter never recursively deletes an existing destination", () => {
@@ -298,15 +301,23 @@ test("package audit rejects changed third-party notice bytes", () => {
   }
 });
 
-test("package audit rejects private or sibling lockfile sources", () => {
+test("package audit rejects a public-registry source for a private engine", () => {
   const lockfile = join(root, "packages/dockosha-provider/pnpm-lock.yaml");
+  const stamp = join(root, "packages/dockosha-provider/build-fingerprint.json");
   const original = readFileSync(lockfile, "utf8");
+  const originalStamp = readFileSync(stamp);
   try {
-    writeFileSync(lockfile, original.replace("https://registry.npmjs.org", "https://npm.pkg.github.com"));
+    writeFileSync(lockfile, original.replace(
+      "resolution: {integrity:",
+      "resolution: {tarball: https://registry.npmjs.org/private-engine.tgz, integrity:",
+    ));
+    const restamped = runFingerprint("adapter", "--out", stamp);
+    assert.equal(restamped.status, 0, restamped.stderr);
     const result = runScript("package-audit.mjs");
-    assert.notEqual(result.status, 0, "private lockfile registry must fail package audit");
+    assert.notEqual(result.status, 0, "public-registry engine source must fail package audit");
   } finally {
     writeFileSync(lockfile, original);
+    writeFileSync(stamp, originalStamp);
   }
 });
 

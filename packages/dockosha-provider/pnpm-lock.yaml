@@ -28,10 +28,10 @@ importers:
 packages:
 
   '@samarthmn/doc-yantra-office@0.0.22':
-    resolution: {integrity: sha512-D8SDtaU9GeTDo1RA5oplA08UNWpcp12zlpgF3WOzMDSwEh3su/IPY308JNp8uCaAomVstN5EmOT7AyjmES+SOg==, tarball: https://registry.npmjs.org/@samarthmn/doc-yantra-office/-/doc-yantra-office-0.0.22.tgz}
+    resolution: {integrity: sha512-bl1gJ7owLXh82LI42SlD2bsF4LpNwzb7Z8lOeQ5tx+RXKvGi0TXU8optEX3QR8PcyzkdlL+doUFTO33L2rMKMw==}
 
   '@samarthmn/doc-yantra@0.0.22':
-    resolution: {integrity: sha512-DRDje37Aakk/PiJ6YO9YcBjloKwJ9vNs2SquPjz27Zc7xlAvBpcpvEuvLRcczBf0zrSeEMyeQQtVlKSwqsuOLg==, tarball: https://registry.npmjs.org/@samarthmn/doc-yantra/-/doc-yantra-0.0.22.tgz}
+    resolution: {integrity: sha512-ugV9GwKndJda43uLINuHYLz3h0+C3hl2cUZfvKici2SH7y7fVpLgwVqJYMoTsLo3qWxAdu90WeOu4EPfK8z2Jg==}
 
   '@types/node@20.19.43':
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}

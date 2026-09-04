@@ -37,17 +37,17 @@ npm install --no-save /absolute/path/to/doc-yantra/packages/dockosha-provider
 
 The adapter releases with both engines and the optional font pack on the same
 immutable `0.0.x` version. Maintainers run the repository preparation gate,
-then use the owner-only public npm workflow after reviewing the audited
-tarballs:
+then push the reviewed version tag to start the GitHub Packages workflow:
 
 ```bash
 scripts/release.sh
+scripts/release.sh --publish
 ```
 
 The gate audits the committed `dist/` against its source fingerprint and packs
-all four candidates without changing Git or registry state. The owner-only
-workflow performs the separate public npm publish with provenance after checking
-that the immutable candidate version does not already exist.
+all four candidates without changing Git or registry state. The owner-only tag
+workflow publishes to GitHub Packages after checking every immutable version
+and tarball integrity.
 
 ## Font delivery
 

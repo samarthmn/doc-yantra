@@ -356,6 +356,7 @@
     "text-core/Cargo.toml",
     "text-core/src/lib.rs",
     "tests/font-cdn-tools.test.mjs",
+    "tests/github-packages-release.test.mjs",
     "tests/license-metadata.test.mjs",
     "wasm-worker/worker-client.cjs",
     "wasm-worker/worker-entry.cjs"

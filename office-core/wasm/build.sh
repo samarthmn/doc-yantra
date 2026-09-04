@@ -104,7 +104,7 @@ node -e '
   j.peerDependenciesMeta = { ...(j.peerDependenciesMeta || {}), "@samarthmn/doc-yantra-fonts": { optional: true } };
   j.main = "index.cjs";
   j.types = "index.d.ts";
-  j.publishConfig = { access: "public", registry: "https://registry.npmjs.org" };
+  j.publishConfig = { registry: "https://npm.pkg.github.com" };
   j.files = Array.from(new Set([...(j.files || []), "web", "index.cjs", "index.d.ts", "font-provider.cjs", "font-provider.d.ts", "fontsource-provider.cjs", "fontsource-provider.d.ts", "noto-fallback.cjs", "noto-fallback.d.ts", "worker.js", "worker.d.ts", "worker-client.cjs", "worker-entry.cjs", "worker-ops.cjs", "build-fingerprint.json", "LICENSE", "COMMERCIAL-LICENSING.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_RUST_LICENSES.txt"]));
   j.exports = {
     ".": {

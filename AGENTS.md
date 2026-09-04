@@ -99,9 +99,10 @@ audits, and the public source candidate without changing repository or registry
 state:
 ```bash
 scripts/release.sh          # validate the 0.0.22 candidate
+scripts/release.sh --publish # push its tag and start GitHub Packages release
 ```
-The separate owner-only publish workflow performs shipping after this gate;
-published versions are immutable.
+The owner-only tag workflow performs shipping after the same gate; published
+versions are immutable.
 
 ## Rules that are easy to get wrong
 
@@ -119,10 +120,10 @@ published versions are immutable.
   the canonical hashes, binaries, and licences. Core packages contain only the
   small manifest/provider metadata and must never grow a `fonts/` directory.
 - **Releasing** stays on the `0.0.x` line. `scripts/release.sh` is a
-  side-effect-free preparation gate that validates candidates and public npm
-  tarballs; it does not alter repository or registry state.
-- **Package identity is fixed.** Keep the four approved names and public npm
-  registry; see `CONSUMING.md` for the consumer setup.
+  side-effect-free preparation gate; `scripts/release.sh --publish` pushes the
+  reviewed version tag that starts the GitHub Packages workflow.
+- **Package identity is fixed.** Keep the four approved names on GitHub
+  Packages; see `CONSUMING.md` for the consumer setup.
 
 ## Behavioral contracts to preserve when editing
 

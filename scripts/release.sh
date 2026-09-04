@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Validate a lockstep DocYantra release candidate without changing Git state,
-# publishing bytes, or contacting a registry. Shipping is an owner-controlled
-# operation outside this preparation gate.
+# Validate a lockstep DocYantra release candidate. With --publish, push the
+# already-prepared version tag so GitHub Actions publishes the exact commit to
+# GitHub Packages and creates the matching GitHub release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,7 +41,39 @@ process.stdout.write(expected);
 NODE
 }
 
+publish_tag() {
+  if [[ "$(git branch --show-current)" != "main" ]]; then
+    echo "error: releases must be tagged from main" >&2
+    exit 1
+  fi
+  if [[ -n "$(git status --short)" ]]; then
+    echo "error: releases require a clean worktree and index" >&2
+    exit 1
+  fi
+  git fetch origin main --tags --quiet
+  if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+    echo "error: local main must exactly match origin/main before release" >&2
+    exit 1
+  fi
+  if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+    echo "error: tag ${VERSION} already exists" >&2
+    exit 1
+  fi
+
+  git tag "$VERSION"
+  if ! git push --atomic origin main "$VERSION"; then
+    git tag -d "$VERSION" >/dev/null
+    echo "error: release push failed; removed local tag ${VERSION}" >&2
+    exit 1
+  fi
+  echo "pushed ${VERSION}; GitHub Actions will publish the four packages to GitHub Packages"
+}
+
 main() {
+  if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--publish" ) ]]; then
+    echo "usage: scripts/release.sh [--publish]" >&2
+    exit 2
+  fi
   require_tool node
   require_tool npm
   require_tool cargo-about
@@ -50,7 +82,12 @@ main() {
   node scripts/package-audit.mjs
   node scripts/export-public-source.mjs --check-only
   ./scripts/clean-export-smoke.sh
-  echo "release preparation passed for ${VERSION}; no repository or registry state was changed"
+  echo "release preparation passed for ${VERSION}"
+  if [[ "${1:-}" == "--publish" ]]; then
+    publish_tag
+  else
+    echo "no repository or registry state was changed; use --publish to push the release tag"
+  fi
 }
 
 main "$@"

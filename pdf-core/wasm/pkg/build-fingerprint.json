@@ -1,8 +1,8 @@
 {
   "target": "pdf",
-  "sourceHash": "5756b8545e00cc403b8be5c317156a5b63899b924348ba2d98cb0332279c779d",
+  "sourceHash": "578fdeba7114c99b8a31a6f3cb8a9a0eb37ee4ef2fbe188a23e354137ded7138",
   "fileCount": 43,
-  "artifactHash": "2de12c98dc536d17491aeb3bf2a08e6b6f0985ba810ca9da5bd3c4464908149e",
+  "artifactHash": "692780494b0e5f3ac87701cfad136a15cb334534950fcad863ba89a5615e88ec",
   "artifactFileCount": 22,
   "artifacts": [
     {
@@ -47,8 +47,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "cf97666d4c21bafc691fdb73e286e997a43332743c4a2eacc2ebf38c2c6f82ef",
-      "byteLength": 1878
+      "sha256": "5196640629c44310b2967508f66fd9fb63c2b1d7d42493ed25f5c5d18101713b",
+      "byteLength": 1854
     },
     {
       "path": "pdf_core_wasm.d.ts",

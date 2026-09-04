@@ -1,6 +1,6 @@
 # Consuming DocYantra
 
-DocYantra publishes four packages to the public npm registry. The first-party
+DocYantra publishes four packages to GitHub Packages. The first-party
 source and wrapper code is licensed under AGPL-3.0-only in [`LICENSE`](LICENSE).
 Enterprise licensing is available only through a separate signed agreement;
 see [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md).
@@ -19,9 +19,15 @@ Pin all required packages to the same release candidate (currently `0.0.22`):
 }
 ```
 
-No private registry configuration or token is required. Fonts are optional and
-are never installed by default. For an offline deployment, add the separate
-font pack at the same version:
+Configure the `@samarthmn` scope in the consuming repository and authenticate
+with a GitHub token that can read packages:
+
+```ini
+@samarthmn:registry=https://npm.pkg.github.com
+```
+
+Fonts are optional and are never installed by default. For an offline
+deployment, add the separate font pack at the same version:
 
 ```json
 "@samarthmn/doc-yantra-fonts": "0.0.22"
@@ -69,14 +75,14 @@ Worker APIs isolate the engine and expose structured failures.
 ## Maintainer release preparation
 
 Versions remain lockstep on the `0.0.x` line and published versions are
-immutable. Release preparation is side-effect-free: it validates the candidate,
-builds local artifacts, audits tarball contents, and writes no Git commit, tag,
-push, or registry publication. Shipping is an explicit owner-only operation
-outside this repository workflow.
+immutable. The default release preparation is side-effect-free. Once the exact
+candidate commit is reviewed, `--publish` pushes its version tag; the tag starts
+the GitHub Packages and GitHub release workflow.
 
 ```bash
 node scripts/package-audit.mjs
-node scripts/export-public-source.mjs --out-dir ../tmp/doc-yantra-public
+node scripts/export-public-source.mjs --out-dir tmp/doc-yantra-public
+scripts/release.sh --publish
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md),

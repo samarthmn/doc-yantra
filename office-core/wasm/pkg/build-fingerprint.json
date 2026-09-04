@@ -1,8 +1,8 @@
 {
   "target": "office",
-  "sourceHash": "d81da040313a0901fd72641a07409ee1ea8b5e742c04a0e6ffa57f05d19051a5",
+  "sourceHash": "563b2d4c0d11a5ea52c4da93294acca96c450b360efdcc95ca22c4ba7883d5ae",
   "fileCount": 120,
-  "artifactHash": "e1f0f15646fa9b34162f257d1d70bf1b16fc08be4aee07fbe670414296dd8665",
+  "artifactHash": "f2348959a26852131ccacb6512a5a24cb5594f8df174349ae41d2468010e5d6a",
   "artifactFileCount": 32,
   "artifacts": [
     {
@@ -87,8 +87,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "aeec5c7cd0c4bb80d5f0ee1d735db3e70f3dc6dca9ba4ec36eaa09991d3c529b",
-      "byteLength": 2332
+      "sha256": "7b9724f93d41f2002145509d8e67b00e2ff703099b13e3575ce77c2a29a56e05",
+      "byteLength": 2308
     },
     {
       "path": "web/font-provider.d.ts",

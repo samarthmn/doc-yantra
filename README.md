@@ -12,7 +12,7 @@ This repo is DocKosha's **AGPL-3.0-only PDF engine** and its distributable
 | `packages/dockosha-provider/`        | The **`@samarthmn/dockosha-provider-docyantra`** TypeScript adapter. Its committed `dist/` and exact engine pins release in lockstep with both wasm engines.                                                                                                                                   |
 | `packages/doc-yantra-fonts/`         | The optional **`@samarthmn/doc-yantra-fonts`** offline pack. It owns the one canonical copy of all 17 hash-pinned distribution fonts and their licences; neither engine package contains font binaries.                                                                                        |
 | `.github/workflows/publish-wasm.yml` | PR/manual readiness checks: rebuilds and audits the four lockstep packages without publishing.                                                                                                                                                                                                 |
-| `.github/workflows/publish-npm.yml`  | Owner-triggered public npm publication after immutable version and tarball checks.                                                                                                                                                                                                             |
+| `.github/workflows/publish-npm.yml`  | Tag-triggered GitHub Packages publication and GitHub release creation after immutable version and tarball checks.                                                                                                                                                                               |
 
 The first-party source and wrapper code is licensed under the AGPL-3.0-only
 terms in [`LICENSE`](LICENSE). Enterprise licensing is available only through a
@@ -27,11 +27,15 @@ See
 
 ## Quick start (consume the package)
 
-Full guide: **[CONSUMING.md](CONSUMING.md)**. Consume the public npm registry
-version:
+Full guide: **[CONSUMING.md](CONSUMING.md)**. Configure the scoped GitHub
+Packages registry, then consume the exact release:
+
+```ini
+@samarthmn:registry=https://npm.pkg.github.com
+```
 
 ```jsonc
-// app package.json — public npm registry
+// app package.json — @samarthmn resolves from GitHub Packages
 "@samarthmn/doc-yantra": "0.0.22",
 "@samarthmn/doc-yantra-office": "0.0.22"
 ```
@@ -41,7 +45,7 @@ version:
 > consumer each time a new patch is published.
 
 For local engine iteration, build and pack the workspace packages into a
-disposable consumer project; keep application manifests on public registry
+disposable consumer project; keep application manifests on GitHub Packages
 versions.
 
 The default install is fontless. Unicode text operations resolve only the
@@ -137,8 +141,9 @@ source candidate without changing repository or registry state:
 
 ```bash
 scripts/release.sh            # validate the 0.0.22 candidate
+scripts/release.sh --publish  # push its tag and start GitHub Packages release
 ```
 
-Published versions are immutable. The owner-only npm workflow performs the
-public-registry reuse check and publishes only after all four audited tarballs
-are prepared; this checkout does not publish.
+Published versions are immutable. The owner-only workflow performs the GitHub
+Packages reuse check and publishes only after all four audited tarballs are
+prepared.

@@ -20,7 +20,7 @@ const CORE_UNPACKED_LIMIT = 15 * 1024 * 1024;
 const FONT_PACKED_LIMIT = 145 * 1024 * 1024;
 const FONT_EXTENSION = /\.(?:otc|otf|ttc|ttf|woff2?)$/iu;
 const FORBIDDEN_CORE_PATH = /(^|\/)(?:corpora|corpus|fidelity-corpus|fixtures|fonts|mock-files|src|target|tests?)(?:\/|$)/iu;
-const PUBLIC_REGISTRY = "https://registry.npmjs.org";
+const PACKAGE_REGISTRY = "https://npm.pkg.github.com";
 const ROOT_LICENSE = readFileSync(join(ROOT, "LICENSE"));
 const ROOT_COMMERCIAL_NOTICE = readFileSync(join(ROOT, "COMMERCIAL-LICENSING.md"));
 const ADOBE_NOTICE = readFileSync(join(ROOT, "pdf-core/assets/cmaps/LICENSE-adobe-cmap-resources.md"));
@@ -169,8 +169,10 @@ function auditRegistryUrls(text) {
       invariant(false, `adapter lockfile contains an invalid registry URL: ${candidate}`);
     }
     invariant(
-      parsed.protocol === "https:" && parsed.hostname === "registry.npmjs.org" && !parsed.username && !parsed.password && !parsed.port,
-      `adapter lockfile contains a non-public registry URL: ${candidate}`,
+      parsed.protocol === "https:" &&
+        ["npm.pkg.github.com", "registry.npmjs.org"].includes(parsed.hostname) &&
+        !parsed.username && !parsed.password && !parsed.port,
+      `adapter lockfile contains an unapproved registry URL: ${candidate}`,
     );
   }
 }
@@ -186,7 +188,7 @@ export function auditAdapterLockfile(
 ) {
   const text = readFileSync(lockPath, "utf8");
   invariant(/^lockfileVersion:\s*['"]?9\.0['"]?\s*$/mu.test(text), "adapter lockfile must use pnpm lockfile version 9.0");
-  invariant(!/npm\.pkg\.github\.com|(?:^|[\s"'])(?:file|link|workspace):|(?:\.\.|\.\/)(?:pdf-core|office-core|doc-yantra)/iu.test(text), "adapter lockfile contains a private, local, workspace, or sibling dependency source");
+  invariant(!/(?:^|[\s"'])(?:file|link|workspace):|(?:\.\.|\.\/)(?:pdf-core|office-core|doc-yantra)/iu.test(text), "adapter lockfile contains a local, workspace, or sibling dependency source");
   auditRegistryUrls(text);
   const required = ["@samarthmn/doc-yantra", "@samarthmn/doc-yantra-office"];
   const importerStart = text.indexOf("  .:\n", text.indexOf("importers:"));
@@ -203,8 +205,6 @@ export function auditAdapterLockfile(
     invariant(new RegExp(`^\\s+version: ${version}$`, "mu").test(block), `adapter lockfile ${name} resolution must be ${version}`);
     const packageKey = `  '${name}@${version}':`;
     invariant(text.includes(packageKey), `adapter lockfile package entry is missing ${name}@${version}`);
-    const bareName = name.slice(name.lastIndexOf("/") + 1);
-    const tarball = `https://registry.npmjs.org/${name}/-/${bareName}-${version}.tgz`;
     const packageEntry = text.match(new RegExp(
       `^\\s*'${escapeRegExp(name)}@${escapeRegExp(version)}':\\s*\\n\\s*resolution:\\s*\\{([^}\\n]*)\\}`,
       "mu",
@@ -214,10 +214,15 @@ export function auditAdapterLockfile(
       `adapter lockfile ${name} package resolution is missing`,
     );
     const resolution = packageEntry[1];
-    invariant(
-      resolution.includes(`tarball: ${tarball}`),
-      `adapter lockfile ${name} must resolve from the public npm registry with SHA-512 integrity`,
-    );
+    const tarball = resolution.match(/(?:^|,)\s*tarball:\s*([^,]+)(?:,|$)/u)?.[1]?.trim();
+    if (tarball !== undefined) {
+      const parsedTarball = new URL(tarball);
+      invariant(
+        parsedTarball.protocol === "https:" && parsedTarball.hostname === "npm.pkg.github.com" &&
+          !parsedTarball.username && !parsedTarball.password && !parsedTarball.port,
+        `adapter lockfile ${name} must resolve from GitHub Packages`,
+      );
+    }
     const integrity = resolution.match(/(?:^|,)\s*integrity:\s*(sha512-[A-Za-z0-9+/]{86}==)(?:,|$)/u)?.[1];
     invariant(integrity, `adapter lockfile ${name} must contain a valid SHA-512 integrity`);
     if (expectedIntegrities?.[name] !== undefined) {
@@ -235,7 +240,7 @@ function auditCorePackage(config, pack, version) {
   invariant(pack.name === config.name, `${config.path}: expected ${config.name}, found ${pack.name}`);
   invariant(pack.version === version, `${config.name}: version ${pack.version} does not match ${version}`);
   const manifest = readJson(join(ROOT, config.path, "package.json"));
-  invariant(manifest.publishConfig?.registry === PUBLIC_REGISTRY, `${config.name}: must publish to the public npm registry`);
+  invariant(manifest.publishConfig?.registry === PACKAGE_REGISTRY, `${config.name}: must publish to GitHub Packages`);
   invariant(manifest.license === "AGPL-3.0-only", `${config.name}: license metadata must be AGPL-3.0-only`);
   const packedPaths = new Set(pack.files.map(({ path }) => path));
   invariant(packedPaths.has("LICENSE"), `${config.name}: LICENSE is missing from tarball`);
@@ -291,7 +296,7 @@ function auditFontPackage(pack, version) {
   invariant(pack.name === FONT_PACKAGE.name, `font package name is ${pack.name}`);
   invariant(pack.version === version, `font package version ${pack.version} does not match ${version}`);
   const fontPackage = readJson(join(ROOT, FONT_PACKAGE.path, "package.json"));
-  invariant(fontPackage.publishConfig?.registry === PUBLIC_REGISTRY, `${FONT_PACKAGE.name}: must publish to the public npm registry`);
+  invariant(fontPackage.publishConfig?.registry === PACKAGE_REGISTRY, `${FONT_PACKAGE.name}: must publish to GitHub Packages`);
   invariant(fontPackage.license === "AGPL-3.0-only AND OFL-1.1", `${FONT_PACKAGE.name}: license metadata must disclose AGPL-3.0-only and OFL-1.1`);
   invariant(pack.size <= FONT_PACKED_LIMIT, `offline font pack is ${pack.size} bytes; limit is ${FONT_PACKED_LIMIT}`);
   const packageRoot = join(ROOT, FONT_PACKAGE.path);
