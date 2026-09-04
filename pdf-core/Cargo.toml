@@ -1,6 +1,6 @@
 [package]
 name = "pdf-core"
-version = "0.0.22"
+version = "0.0.23"
 edition = "2024"
 rust-version = "1.89"
 description = "AGPL-licensed DocYantra PDF engine: assembly, watermarking, generation, rasterization, extraction, redaction, forms"

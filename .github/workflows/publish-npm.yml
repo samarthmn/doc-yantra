@@ -73,20 +73,17 @@ jobs:
           node scripts/wasm-version.mjs verify pdf-core/wasm/Cargo.toml pdf-core/wasm/pkg
           node scripts/wasm-version.mjs verify office-core/wasm/Cargo.toml office-core/wasm/pkg
 
-      - name: Regenerate engines and require byte-identical packages
-        run: |
-          ./pdf-core/wasm/build.sh
-          ./office-core/wasm/build.sh
-          git diff --exit-code -- pdf-core/wasm/pkg office-core/wasm/pkg
-
-      - name: Regenerate adapter from the exact engine packages
+      # WASM output is sensitive to runner-level linker and Binaryen details.
+      # The reviewed artifacts are source-fingerprint and version verified
+      # above; publish those exact bytes instead of replacing them in CI.
+      - name: Regenerate adapter from the exact committed engine packages
         run: |
           mkdir -p tmp/local-packages
           (cd pdf-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
           (cd office-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
           VERSION="${GITHUB_REF#refs/tags/}"
           cd packages/dockosha-provider
-          npm install --ignore-scripts --no-save --package-lock=false \
+          npm install --ignore-scripts --no-save --package-lock=false --registry=https://registry.npmjs.org \
             "../../tmp/local-packages/samarthmn-doc-yantra-${VERSION}.tgz" \
             "../../tmp/local-packages/samarthmn-doc-yantra-office-${VERSION}.tgz"
           npm run build

@@ -1,8 +1,8 @@
 {
   "target": "office",
-  "sourceHash": "563b2d4c0d11a5ea52c4da93294acca96c450b360efdcc95ca22c4ba7883d5ae",
+  "sourceHash": "4a98056fb8889d22c989651891422af8001b25f886988a9eca23669283e6f451",
   "fileCount": 120,
-  "artifactHash": "f2348959a26852131ccacb6512a5a24cb5594f8df174349ae41d2468010e5d6a",
+  "artifactHash": "27d729cc70fc2b33dd302068a31fe2e4d0c053da37757c1688ae4dcab27648ae",
   "artifactFileCount": 32,
   "artifacts": [
     {
@@ -22,7 +22,7 @@
     },
     {
       "path": "THIRD_PARTY_RUST_LICENSES.txt",
-      "sha256": "4b779ef338f1ef28e24bba6ad0bf82f67ec61bbd2ccc65b3e48aefe8f14d03aa",
+      "sha256": "6423c1d47595b40d80751e9b97261fcd4fb8bc7de33ff6cfa9197efdce893aa7",
       "byteLength": 241907
     },
     {
@@ -77,8 +77,8 @@
     },
     {
       "path": "office_core_wasm_bg.wasm",
-      "sha256": "5eab24406daa9db4e4a5a367380bd2e7be19008856fc196eefcc533635771c4b",
-      "byteLength": 4607527
+      "sha256": "25ca77b1ea13f8c4cc4d8b0b40c9e5c8e64535ea75f5b8718a2d18eaebdadd41",
+      "byteLength": 4608020
     },
     {
       "path": "office_core_wasm_bg.wasm.d.ts",
@@ -87,7 +87,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "7b9724f93d41f2002145509d8e67b00e2ff703099b13e3575ce77c2a29a56e05",
+      "sha256": "be1bb75b3ff14150964192d61cf7347f837341cd57321d5620e50ce33dafe9e3",
       "byteLength": 2308
     },
     {

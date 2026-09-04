@@ -95,7 +95,7 @@ side-effect-free preparation gate; it validates lockstep manifests, package
 audits, and the public source candidate without changing repository or registry
 state:
 ```bash
-scripts/release.sh             # validate the 0.0.22 candidate
+scripts/release.sh             # validate the 0.0.23 candidate
 scripts/release.sh --publish   # push its tag and start GitHub Packages release
 ```
 Published versions are immutable. Build artifacts are regenerated explicitly by

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Builds the office-core WebAssembly package (both targets) and stamps the npm
-# metadata for the public npm registry. Mirrors pdf-core/wasm/build.sh. The output
+# metadata for GitHub Packages. Mirrors pdf-core/wasm/build.sh. The output
 # (pkg/) is committed so consumers and CI install without a Rust toolchain.
 #
 #   pkg/       Node/server build (CJS)

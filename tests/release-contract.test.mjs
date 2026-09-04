@@ -247,7 +247,8 @@ test("release gate is a side-effect-free public preparation check", () => {
   });
   const result = spawnSync("bash", [join(root, "scripts/release.sh")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /release preparation passed for 0\.0\.22/u);
+  const version = JSON.parse(readFileSync(join(root, "pdf-core", "wasm", "pkg", "package.json"), "utf8")).version;
+  assert.match(result.stdout, new RegExp(`release preparation passed for ${version.replaceAll(".", "\\.")}`, "u"));
   assert.equal(execFileSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8" }), beforeStatus);
   assert.equal(execFileSync("git", ["diff", "--cached", "--binary"], {
     cwd: root,

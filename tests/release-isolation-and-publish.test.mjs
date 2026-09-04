@@ -201,7 +201,9 @@ test("package audit rejects repeat packs whose tarball bytes differ", () => {
 test("adapter lock contract rejects public engine tarballs without SHA-512 SRI", () => {
   const scratch = join(root, "tmp", `adapter-lock-integrity-${process.pid}`);
   const lockPath = join(scratch, "pnpm-lock.yaml");
-  const version = "0.0.22";
+  const version = JSON.parse(
+    readFileSync(join(root, "packages", "dockosha-provider", "package.json"), "utf8"),
+  ).version;
   const enginePackages = [
     "@samarthmn/doc-yantra",
     "@samarthmn/doc-yantra-office",

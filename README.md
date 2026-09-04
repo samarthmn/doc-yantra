@@ -36,8 +36,8 @@ Packages registry, then consume the exact release:
 
 ```jsonc
 // app package.json — @samarthmn resolves from GitHub Packages
-"@samarthmn/doc-yantra": "0.0.22",
-"@samarthmn/doc-yantra-office": "0.0.22"
+"@samarthmn/doc-yantra": "0.0.23",
+"@samarthmn/doc-yantra-office": "0.0.23"
 ```
 
 > Releases stay on the **0.0.x** line. On `0.0.x`, a caret pins the exact patch
@@ -140,7 +140,7 @@ audits every `npm pack`, enforces core/font byte budgets, and checks the public
 source candidate without changing repository or registry state:
 
 ```bash
-scripts/release.sh            # validate the 0.0.22 candidate
+scripts/release.sh            # validate the 0.0.23 candidate
 scripts/release.sh --publish  # push its tag and start GitHub Packages release
 ```
 

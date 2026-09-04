@@ -30,7 +30,27 @@ test("a 0.0.x tag publishes through GitHub Packages and creates a GitHub release
   assert.match(workflow, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
   assert.match(workflow, /node scripts\/publish-npm\.mjs/u);
   assert.match(workflow, /gh release (?:create|upload)/u);
-  assert.doesNotMatch(workflow, /registry\.npmjs\.org|npm-production|NPM_TOKEN/u);
+  assert.match(
+    workflow,
+    /npm install --ignore-scripts --no-save --package-lock=false --registry=https:\/\/registry\.npmjs\.org/u,
+    "adapter build dependencies must not inherit the GitHub Packages publish registry",
+  );
+  assert.doesNotMatch(
+    workflow,
+    /\.\/(?:pdf|office)-core\/wasm\/build\.sh/u,
+    "the tag job must publish the reviewed artifacts instead of replacing them with runner-specific WASM",
+  );
+  assert.doesNotMatch(
+    workflow,
+    /registry-url:\s*https:\/\/registry\.npmjs\.org|npm publish[^\n]*registry\.npmjs\.org|npm-production|NPM_TOKEN/u,
+  );
+});
+
+test("continuous readiness checks validate committed WASM without cross-runner byte comparisons", () => {
+  const workflow = readFileSync(join(root, ".github/workflows/publish-wasm.yml"), "utf8");
+  assert.match(workflow, /source-fingerprint\.mjs pdf --verify/u);
+  assert.match(workflow, /source-fingerprint\.mjs office --verify/u);
+  assert.doesNotMatch(workflow, /\.\/(?:pdf|office)-core\/wasm\/build\.sh/u);
 });
 
 test("the release script can safely push the prepared version tag", () => {

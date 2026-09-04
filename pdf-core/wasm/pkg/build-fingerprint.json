@@ -1,8 +1,8 @@
 {
   "target": "pdf",
-  "sourceHash": "578fdeba7114c99b8a31a6f3cb8a9a0eb37ee4ef2fbe188a23e354137ded7138",
+  "sourceHash": "8c73450cda1b531f367390cbaf8bdd334dae9055663d1b2173b2b8b14caa9c21",
   "fileCount": 43,
-  "artifactHash": "692780494b0e5f3ac87701cfad136a15cb334534950fcad863ba89a5615e88ec",
+  "artifactHash": "96c17937e03292f71404006454f468858b12022894acc2dfc6fe9a273cf6e89e",
   "artifactFileCount": 22,
   "artifacts": [
     {
@@ -27,7 +27,7 @@
     },
     {
       "path": "THIRD_PARTY_RUST_LICENSES.txt",
-      "sha256": "b48e019d2f4344d86c0917b9f5cadb13b12a8dd4705f99e16d0a27169d682c6e",
+      "sha256": "28c46bc73b4f9b96cb507ee98937c1ada69e11be5dff09ca799bee3d35f9bfc5",
       "byteLength": 267416
     },
     {
@@ -47,7 +47,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "5196640629c44310b2967508f66fd9fb63c2b1d7d42493ed25f5c5d18101713b",
+      "sha256": "bdefd7be63d751e4ea2eecc276d7ff6d5f9308213e9ba2ce84c2173e79ac26ea",
       "byteLength": 1854
     },
     {
@@ -62,7 +62,7 @@
     },
     {
       "path": "pdf_core_wasm_bg.wasm",
-      "sha256": "554e97529b6b5d2c20c35a5300ba2fc65d75b093883067c9efd3e9c03ddaf6be",
+      "sha256": "a105c405c41591f988db30344cf4063c27dc7595f049a48cab0b29d772634dd4",
       "byteLength": 5992980
     },
     {

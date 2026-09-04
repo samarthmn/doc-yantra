@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Builds the pdf-core WebAssembly package (both targets) and stamps the npm
-# metadata needed to publish it to the public npm registry. The output (pkg/) is
+# metadata needed to publish it to GitHub Packages. The output (pkg/) is
 # committed to the repo so consumers and CI can install without a Rust
 # toolchain.
 #

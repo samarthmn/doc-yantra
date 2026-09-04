@@ -222,13 +222,17 @@ test("release workflows gate the exact publish commit and exercise the clean pub
   assert.match(publisher, /push:\s*\n\s+tags:\s*\n\s+- ["']0\.0\.\*["']/u);
   assert.match(publisher, /registry-url:\s*https:\/\/npm\.pkg\.github\.com/u);
   assert.match(publisher, /github\.actor\s*==\s*github\.repository_owner/u);
-  assert.match(publisher, /Regenerate engines and require byte-identical packages/u);
+  assert.match(publisher, /Verify locked notices and committed artifacts/u);
+  assert.doesNotMatch(publisher, /\.\/(?:pdf|office)-core\/wasm\/build\.sh/u);
   assert.match(publisher, /git diff --exit-code/u);
   assert.match(publisher, /scripts\/clean-export-smoke\.sh/u);
   assert.match(publisher, /scripts\/verify-font-cdn\.mjs/u);
   assert.match(publisher, /packages:\s*write/u);
   assert.match(publisher, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
-  assert.doesNotMatch(publisher, /registry\.npmjs\.org|npm-production|NPM_TOKEN/u);
+  assert.doesNotMatch(
+    publisher,
+    /registry-url:\s*https:\/\/registry\.npmjs\.org|npm publish[^\n]*registry\.npmjs\.org|npm-production|NPM_TOKEN/u,
+  );
 });
 
 test("exporter never recursively deletes an existing destination", () => {

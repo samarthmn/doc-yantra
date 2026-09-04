@@ -1,6 +1,6 @@
 {
   "name": "@samarthmn/dockosha-provider-docyantra",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "providerId": "docyantra",
   "description": "AGPL-licensed DocYantra document-processing provider for DocKosha",
   "repository": {
@@ -33,12 +33,12 @@
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@samarthmn/doc-yantra": "0.0.22",
-    "@samarthmn/doc-yantra-office": "0.0.22",
+    "@samarthmn/doc-yantra": "0.0.23",
+    "@samarthmn/doc-yantra-office": "0.0.23",
     "zod": "^4.1.1"
   },
   "peerDependencies": {
-    "@samarthmn/doc-yantra-fonts": "0.0.22"
+    "@samarthmn/doc-yantra-fonts": "0.0.23"
   },
   "peerDependenciesMeta": {
     "@samarthmn/doc-yantra-fonts": {

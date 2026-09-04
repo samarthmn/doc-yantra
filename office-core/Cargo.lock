@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "office-core"
-version = "0.0.22"
+version = "0.0.23"
 dependencies = [
  "clap",
  "image",
