@@ -24,6 +24,8 @@ test("all DocYantra packages publish only to GitHub Packages", () => {
 
 test("a 0.0.x tag publishes through GitHub Packages and creates a GitHub release", () => {
   const workflow = readFileSync(join(root, ".github/workflows/publish-npm.yml"), "utf8");
+  const timeoutMinutes = Number(workflow.match(/timeout-minutes:\s*(\d+)/u)?.[1]);
+  assert.ok(timeoutMinutes >= 60, `release job timeout must cover cold Rust builds, found ${timeoutMinutes} minutes`);
   assert.match(workflow, /push:\s*\n\s+tags:\s*\n\s+- ["']0\.0\.\*["']/u);
   assert.match(workflow, /registry-url:\s*https:\/\/npm\.pkg\.github\.com/u);
   assert.match(workflow, /packages:\s*write/u);
