@@ -1,7 +1,7 @@
 {
   "name": "@samarthmn/doc-yantra-fonts",
   "description": "Optional offline font pack for the DocYantra PDF and Office WebAssembly engines",
-  "version": "0.0.25",
+  "version": "0.0.26",
   "files": [
     "fonts",
     "index.cjs",

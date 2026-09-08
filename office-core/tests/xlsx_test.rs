@@ -1194,3 +1194,235 @@ fn cell_vertical_alignment_defaults_bottom_and_honors_top() {
     };
     assert!(baseline('B') > baseline('T') + 25.0);
 }
+
+fn legacy_note_xlsx(visibility: &str, object_type: &str, comments: &str) -> Vec<u8> {
+    let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Keep cell</t></is></c></row></sheetData><pageSetup cellComments="asDisplayed"/><legacyDrawing r:id="vml"/></worksheet>"#;
+    let base = minimal_xlsx(sheet, None);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(base)).unwrap();
+    let mut owned = Vec::new();
+    use std::io::Read;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).unwrap();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        owned.push((entry.name().to_string(), data));
+    }
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="vml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vml1.vml"/><Relationship Id="comments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/></Relationships>"#;
+    let visible_flag = if visibility == "visible" {
+        "<x:Visible/>"
+    } else {
+        ""
+    };
+    let vml = format!(
+        r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:o="urn:schemas-microsoft-com:office:office"><v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"/><v:shape type="#_x0000_t202" style="position:absolute;margin-left:70pt;margin-top:10pt;width:180pt;height:60pt;visibility:{visibility}" fillcolor="#ffffe1"><v:textbox/><x:ClientData ObjectType="{object_type}">{visible_flag}<x:Row>0</x:Row><x:Column>0</x:Column><x:Anchor>1, 0, 0, 10, 4, 0, 4, 10</x:Anchor></x:ClientData></v:shape></xml>"##
+    );
+    owned.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        rels.as_bytes().to_vec(),
+    ));
+    owned.push(("xl/drawings/vml1.vml".into(), vml.into_bytes()));
+    owned.push(("xl/comments1.xml".into(), comments.as_bytes().to_vec()));
+    zip_package(
+        &owned
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn legacy_notes_preserve_visible_text_and_suppress_hidden_text() {
+    let comments = r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="A1" authorId="0"><text><t>Visible note</t></text></comment></commentList></comments>"#;
+    for visibility in ["visible", "hidden"] {
+        let bytes = legacy_note_xlsx(visibility, "Note", comments);
+        let prof = profile(&bytes, OfficeFormat::Xlsx).unwrap();
+        assert!(prof.supported, "{:?}", prof.reasons);
+        let doc = XlsxDoc::open(&bytes, &opts()).unwrap();
+        let (laid, _) = render_xlsx(&doc).unwrap();
+        let text = laid.pages.iter().map(page_text).collect::<String>();
+        assert!(text.contains("Keep cell"));
+        assert_eq!(text.contains("Visible note"), visibility == "visible");
+        assert!(convert(&bytes, OfficeFormat::Xlsx, &opts()).is_ok());
+    }
+}
+
+#[test]
+fn legacy_controls_and_missing_comments_fail_closed() {
+    for (object, comments) in [("Button", "<comments/>"), ("Note", "<comments/>")] {
+        let bytes = legacy_note_xlsx("visible", object, comments);
+        assert!(
+            !profile(&bytes, OfficeFormat::Xlsx)
+                .map(|p| p.supported)
+                .unwrap_or(false)
+        );
+        assert!(convert(&bytes, OfficeFormat::Xlsx, &opts()).is_err());
+    }
+}
+
+fn mutate_note_part(bytes: &[u8], name: &str, change: impl Fn(&str) -> String) -> Vec<u8> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut owned = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).unwrap();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        if entry.name() == name {
+            data = change(std::str::from_utf8(&data).unwrap()).into_bytes();
+        }
+        owned.push((entry.name().to_string(), data));
+    }
+    zip_package(
+        &owned
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn legacy_notes_reject_unknown_style_malformed_external_and_mixed_content() {
+    let comments = r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><commentList><comment ref="A1"><text><t>Note</t></text></comment></commentList></comments>"#;
+    let original = legacy_note_xlsx("visible", "Note", comments);
+    let cases = [
+        mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+            s.replace("1, 0, 0, 10, 4, 0, 4, 10", "1, 0, 0, 10, 1, 0, 4, 10")
+        }),
+        mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+            s.replace("1, 0, 0, 10, 4, 0, 4, 10", "1, 100, 0, 10, 1, 0, 4, 10")
+        }),
+        mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+            s.replace("position:absolute", "rotation:45;position:absolute")
+        }),
+        mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+            s.replace("1, 0, 0, 10, 4, 0, 4, 10", "bad")
+        }),
+        mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+            s.replace("</xml>", "<v:shape type=\"button\"/></xml>")
+        }),
+        mutate_note_part(&original, "xl/worksheets/_rels/sheet1.xml.rels", |s| {
+            s.replace("Id=\"vml\"", "Id=\"vml\" TargetMode=\"External\"")
+        }),
+        mutate_note_part(&original, "xl/worksheets/_rels/sheet1.xml.rels", |s| {
+            s.replace("Id=\"vml\"", "Id=\"missing\"")
+        }),
+        mutate_note_part(&original, "xl/worksheets/sheet1.xml", |s| {
+            s.replace("<legacyDrawing", "<oleObjects/><legacyDrawing")
+        }),
+    ];
+    for bytes in cases {
+        assert!(
+            !profile(&bytes, OfficeFormat::Xlsx)
+                .map(|p| p.supported)
+                .unwrap_or(false)
+        );
+        assert!(convert(&bytes, OfficeFormat::Xlsx, &opts()).is_err());
+    }
+}
+
+#[test]
+fn legacy_notes_print_options_and_unicode_text_agree_with_profile() {
+    let comments = r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><commentList><comment ref="A1"><text><t>Résumé café 中文</t></text></comment></commentList></comments>"#;
+    let original = legacy_note_xlsx("visible", "Note", comments);
+    for (bytes, printed) in [
+        (original.clone(), true),
+        (
+            mutate_note_part(&original, "xl/worksheets/sheet1.xml", |s| {
+                s.replace("asDisplayed", "none")
+            }),
+            false,
+        ),
+        (
+            mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+                s.replace("<x:Row>", "<x:PrintObject>False</x:PrintObject><x:Row>")
+            }),
+            false,
+        ),
+    ] {
+        let options = unicode_opts();
+        assert!(
+            profile_with_options(&bytes, OfficeFormat::Xlsx, &options)
+                .unwrap()
+                .supported
+        );
+        let doc = XlsxDoc::open(&bytes, &options).unwrap();
+        let (laid, _) = render_xlsx(&doc).unwrap();
+        let text = laid.pages.iter().map(page_text).collect::<String>();
+        assert_eq!(text.contains("Résumé café 中文"), printed);
+        assert!(convert(&bytes, OfficeFormat::Xlsx, &options).is_ok());
+    }
+}
+
+#[test]
+fn legacy_notes_match_multiple_non_diagonal_cell_references() {
+    let comments = r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><commentList><comment ref="A1"><text><t>First note</t></text></comment><comment ref="B3"><text><t>Second note</t></text></comment></commentList></comments>"#;
+    let original = legacy_note_xlsx("visible", "Note", comments);
+    let bytes = mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+        let start = s.find("<v:shape type").unwrap();
+        let end = s.find("</v:shape>").unwrap() + "</v:shape>".len();
+        let second = s[start..end]
+            .replace("<x:Row>0", "<x:Row>2")
+            .replace("<x:Column>0", "<x:Column>1")
+            .replace("1, 0, 0, 10, 4, 0, 4, 10", "1, 0, 5, 10, 4, 0, 9, 10");
+        s.replace("</xml>", &format!("{second}</xml>"))
+    });
+    assert!(profile(&bytes, OfficeFormat::Xlsx).unwrap().supported);
+    let doc = XlsxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_xlsx(&doc).unwrap();
+    let text = laid.pages.iter().map(page_text).collect::<String>();
+    assert!(text.contains("First note") && text.contains("Second note"));
+    assert!(convert(&bytes, OfficeFormat::Xlsx, &opts()).is_ok());
+}
+
+#[test]
+fn legacy_note_preserves_authored_box_and_supported_fill_and_border() {
+    let comments = r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><commentList><comment ref="A1"><text><t>Note</t></text></comment></commentList></comments>"#;
+    let bytes = legacy_note_xlsx("visible", "Note", comments);
+    let doc = XlsxDoc::open(&bytes, &opts()).unwrap();
+    let (laid, _) = render_xlsx(&doc).unwrap();
+    assert!(laid.pages.iter().flat_map(|p| &p.items).any(|p| matches!(&p.item,
+        Item::Rect {w_pt,h_pt,fill:Some(fill),stroke:Some(stroke)} if *w_pt==180.0 && *h_pt==60.0 && fill.r==255 && fill.g==255 && fill.b==225 && stroke.width_pt==1.0)));
+}
+
+#[test]
+fn legacy_note_requires_exactly_one_canonical_shape_definition() {
+    let comments = r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><commentList><comment ref="A1"><text><t>Note</t></text></comment></commentList></comments>"#;
+    let original = legacy_note_xlsx("visible", "Note", comments);
+    let canonical = r#"<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"/>"#;
+    for replacement in [
+        "".to_string(),
+        canonical.repeat(2),
+        canonical.replace(" coordsize=\"21600,21600\"", ""),
+    ] {
+        let bytes = mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+            s.replace(canonical, &replacement)
+        });
+        assert!(
+            !profile(&bytes, OfficeFormat::Xlsx)
+                .map(|p| p.supported)
+                .unwrap_or(false)
+        );
+        assert!(convert(&bytes, OfficeFormat::Xlsx, &opts()).is_err());
+    }
+}
+
+#[test]
+fn legacy_note_client_visibility_must_agree_with_css() {
+    let comments = r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><commentList><comment ref="A1"><text><t>Note</t></text></comment></commentList></comments>"#;
+    let original = legacy_note_xlsx("visible", "Note", comments);
+    for flag in [
+        "",
+        "<x:Visible>False</x:Visible>",
+        "<x:Visible>invalid</x:Visible>",
+    ] {
+        let bytes = mutate_note_part(&original, "xl/drawings/vml1.vml", |s| {
+            s.replace("<x:Visible/>", flag)
+        });
+        assert!(
+            !profile(&bytes, OfficeFormat::Xlsx)
+                .map(|p| p.supported)
+                .unwrap_or(false)
+        );
+        assert!(convert(&bytes, OfficeFormat::Xlsx, &opts()).is_err());
+    }
+}

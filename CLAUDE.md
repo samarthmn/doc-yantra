@@ -97,7 +97,7 @@ Releases stay on `0.0.x` — **only the patch increments**. Use the script as a
 side-effect-free preparation gate; it validates lockstep manifests, package
 audits, and package smoke checks without changing repository or registry state:
 ```bash
-scripts/release.sh             # validate the 0.0.25 candidate
+scripts/release.sh             # validate the 0.0.26 candidate
 scripts/release.sh --publish   # push its tag and start GitHub Packages release
 ```
 Published versions are immutable. Build artifacts are regenerated explicitly by

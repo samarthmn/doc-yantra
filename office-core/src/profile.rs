@@ -253,6 +253,15 @@ fn profile_xlsx(bytes: &[u8], opts: &crate::ConvertOptions) -> Result<DocProfile
         for reason in &sheet.drawing_reasons {
             profile.add_reason_deduped(reason.code, reason.detail.clone());
         }
+        for drawing in &sheet.drawings {
+            if let crate::xlsx::paginate::XlsxDrawing::Note { text, .. } = drawing {
+                scripts.merge(scan_scripts(text));
+                record_coverage(&mut coverage, "Tahoma", 400, false, text);
+                if !fonts_used.iter().any(|f| f == "Tahoma") {
+                    fonts_used.push("Tahoma".into());
+                }
+            }
+        }
         for cell in &sheet.sheet.cells {
             let style = doc.styles.cell(cell.style_idx);
             for detail in &style.unsupported {

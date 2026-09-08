@@ -18,3 +18,5 @@ import "./error-envelope.test.mjs";
 import "./worker-types.test.mjs";
 import "./package-readiness.test.mjs";
 import "./release-isolation-and-publish.test.mjs";
+
+import "./production-document-regressions.test.mjs";

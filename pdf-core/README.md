@@ -89,18 +89,19 @@ asset through a trusted channel; the fetch script refuses unverified downloads.
   `crate::pdfium::lock()`, a process-wide mutex whose handle lifetime-bounds
   every document borrowed from it. Zone 1 modules are lock-free and fully
   parallel; Zone 2 operations serialize per process.
-- **Redaction granularity is object-level:** a text object partially covered
-  by a rect is removed entirely (strictly more aggressive than PyMuPDF's
-  character-level — the safe direction for redaction). The full bounds of
-  everything removed are covered with black boxes, and
-  `RedactOutput::warnings` reports any removal that meaningfully exceeds the
-  requested rect so the UI can inform the user. Images/vector art are
-  covered, not removed (matches `PDF_REDACT_IMAGE_NONE`).
-- **Pure redaction fails closed:** content streams are decoded strictly;
-  Type3 fonts, non-Identity Type0 CMaps, unresolved geometry, malformed inline
-  images, and encrypted input return `Unsupported`. Intersecting Form
-  invocations are removed in full, annotations are deleted, orphaned streams
-  are pruned, and saved output is reloaded and re-analyzed before return.
+- **Pure redaction rewrites intersecting glyphs:** supported text runs retain
+  neighboring glyphs and their advances, including text inside recursively
+  processed Form XObjects. Embedded, static TrueType CID fonts with Identity-H
+  and an explicit Identity CIDToGIDMap use their glyph bounds; other supported
+  fonts retain conservative metrics. No heuristic shrinking is applied.
+  Non-text content can require whole-object removal. `RedactOutput::warnings`
+  reports `over_redaction` with an object kind when removal exceeds the selection.
+- **Pure redaction fails closed:** unresolved content, geometry, fonts, or
+  malformed streams return `Unsupported`. Intersecting image/vector content and
+  annotations are removed, orphaned streams are pruned, and the saved output is
+  reloaded and re-analyzed before return. Type3 and non-Identity CMaps have bounded
+  validated support; unsupported variants still fail closed. The native legacy
+  pdfium redactor is a separate cross-validation implementation.
 - **Redaction leak workaround:** the bundled pdfium segfaults destroying
   removed text objects, so their tiny handles are deliberately leaked
   (`mem::forget`, ~1.2KB per removed object, process-lifetime, bounded).

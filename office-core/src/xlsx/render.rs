@@ -501,6 +501,7 @@ fn render_drawings(
         let anchor = match drawing {
             XlsxDrawing::Picture { anchor, .. }
             | XlsxDrawing::Shape { anchor, .. }
+            | XlsxDrawing::Note { anchor, .. }
             | XlsxDrawing::Chart { anchor, .. } => *anchor,
         };
         let Some((x, y, width, height)) = drawing_page_rect(
@@ -570,6 +571,92 @@ fn render_drawings(
                         },
                         page,
                     );
+                }
+            }
+            XlsxDrawing::Note { text, fill, .. } => {
+                page.items.push(Positioned {
+                    x_pt: x,
+                    y_pt: y,
+                    item: Item::Rect {
+                        w_pt: width,
+                        h_pt: height,
+                        fill: Some(Rgba::opaque(*fill)),
+                        stroke: Some(Stroke {
+                            width_pt: 1.0,
+                            color: Rgba::opaque(Rgb::new(0, 0, 0)),
+                            dash: None,
+                        }),
+                    },
+                });
+                let face = matching::resolve(&doc.fonts, "Tahoma", 400, false)
+                    .face
+                    .ok_or_else(|| {
+                        OfficeError::unsupported(
+                            UnsupportedCode::MissingGlyph,
+                            "legacy Note font unavailable",
+                        )
+                    })?;
+                let (face_ids, faces) = coverage_faces(doc, face, 400, false);
+                let size = 9.0;
+                // VML default textbox inset: .1in,.05in,.1in,.05in.
+                let lines = wrap_lines(text, &faces, size, (width - 14.4).max(1.0))?;
+                let parsed = doc
+                    .fonts
+                    .face(face)
+                    .and_then(|f| f.parsed())
+                    .ok_or_else(|| {
+                        OfficeError::unsupported(
+                            UnsupportedCode::MissingGlyph,
+                            "legacy Note font invalid",
+                        )
+                    })?;
+                let metrics = FaceMetrics::new(parsed);
+                if metrics.line_height_pt(size) * lines.len() as f64 + 7.2 > height {
+                    return Err(OfficeError::unsupported(
+                        UnsupportedCode::UnknownElement,
+                        "legacy Note text exceeds its authored box",
+                    ));
+                }
+                for (index, line) in lines.iter().enumerate() {
+                    let shaped = shape::require_glyphs(shape::shape_with_fallback(
+                        line, &faces, size, 0.0, false,
+                    ))?;
+                    if shaped.width_pt > width - 14.4 {
+                        return Err(OfficeError::unsupported(
+                            UnsupportedCode::UnknownElement,
+                            "legacy Note line exceeds authored width",
+                        ));
+                    }
+                    let mapped = crate::text::semantic::map_shaped_run(line, &shaped);
+                    let mut semantic = Some(mapped.semantic);
+                    let mut cursor = x + 7.2;
+                    let baseline = y
+                        + 3.6
+                        + metrics.ascent_pt(size)
+                        + index as f64 * metrics.line_height_pt(size);
+                    for (glyph, visible) in shaped.glyphs.iter().zip(mapped.visible) {
+                        let glyph_face = *face_ids.get(glyph.face_index).ok_or_else(|| {
+                            OfficeError::unsupported(
+                                UnsupportedCode::MissingGlyph,
+                                "legacy Note fallback unavailable",
+                            )
+                        })?;
+                        let mut glyphs = vec![visible];
+                        if let Some(extra) = semantic.take() {
+                            glyphs.extend(extra);
+                        }
+                        push_cell_text_run(
+                            page,
+                            cursor,
+                            baseline,
+                            glyph_face,
+                            size,
+                            Rgba::opaque(Rgb::new(0, 0, 0)),
+                            false,
+                            glyphs,
+                        );
+                        cursor += glyph.advance_pt;
+                    }
                 }
             }
             XlsxDrawing::Chart { chart, .. } => {
@@ -708,6 +795,7 @@ fn drawing_last_marker(drawing: &XlsxDrawing) -> Option<(u32, u32)> {
     match drawing {
         XlsxDrawing::Picture { anchor, .. }
         | XlsxDrawing::Shape { anchor, .. }
+        | XlsxDrawing::Note { anchor, .. }
         | XlsxDrawing::Chart { anchor, .. } => match anchor {
             DrawingAnchor::TwoCell { to, .. } => Some((to.col, to.row)),
             DrawingAnchor::OneCell { from, .. } => Some((from.col, from.row)),
@@ -1645,8 +1733,7 @@ fn render_cell_text(
                 face,
                 size,
                 text_color,
-                style.bold
-                    && doc.fonts.face(face).is_some_and(|font| font.weight < 600),
+                style.bold && doc.fonts.face(face).is_some_and(|font| font.weight < 600),
                 run_glyphs,
             );
         }

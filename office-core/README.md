@@ -174,3 +174,21 @@ rights and provenance intake described in the repository's top-level
 - **PDF/A-2b** output — for archival requirements.
 - **Complex-script shaping** via `harfrust` — Arabic/Indic/Thai + bidi reorder.
 - **Charts** — own vector renderer rather than routing to the service.
+
+
+### Legacy spreadsheet Notes
+
+`legacyDrawing` is resolved separately from OLE objects and controls. A bounded
+legacy Note envelope supports plain comment text, canonical rectangular VML Note
+shapes, internal VML/comments relationships, cell anchors with pixel offsets,
+point dimensions, yellow or white fill, a black 1pt border, and default Tahoma 9pt
+text with wrapping. Textbox margins use the VML defaults (7.2pt horizontal and
+3.6pt vertical); see [Microsoft's inset specification](https://learn.microsoft.com/en-us/windows/win32/vml/msdn-online-vml-inset-attribute).
+
+Only visible, printable Notes appear when `pageSetup cellComments="asDisplayed"`.
+Hidden Notes and `PrintObject=False` remain absent, and the default `none` print
+mode omits Notes. `atEnd` printing, styled/rich comment runs, custom shapes,
+decorations, unsupported styles, external/missing relationships, mismatched
+comment anchors, overflowing text, and page-crossing Notes fail closed. Profile
+and conversion share this validation and the same layout check. This does not
+provide general VML, ActiveX, OLE, or threaded-comment support.

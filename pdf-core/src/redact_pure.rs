@@ -312,6 +312,7 @@ struct FontMetrics {
     ascent: f64,
     descent: f64,
     glyph_boxes: Option<Box<[Option<[f64; 4]>; 256]>>,
+    cid_glyph_boxes: BTreeMap<u16, [f64; 4]>,
 }
 
 impl FontMetrics {
@@ -461,7 +462,12 @@ impl FontMetrics {
                         width,
                         is_space,
                         vertical,
-                        glyph_box: [0.0, self.descent, width, self.ascent],
+                        glyph_box: self.cid_glyph_boxes.get(&cid).copied().unwrap_or([
+                            0.0,
+                            self.descent,
+                            width,
+                            self.ascent,
+                        ]),
                     })?;
                     offset += consumed;
                 }
@@ -3745,6 +3751,7 @@ fn parse_type3_font(
         ascent: f64::from(extents.top),
         descent: f64::from(extents.bottom),
         glyph_boxes: Some(glyph_boxes),
+        cid_glyph_boxes: BTreeMap::new(),
     })
 }
 
@@ -4065,6 +4072,7 @@ fn parse_simple_font(
         ascent,
         descent,
         glyph_boxes: None,
+        cid_glyph_boxes: BTreeMap::new(),
     })
 }
 
@@ -4236,6 +4244,12 @@ fn parse_cid_font(document: &Document, dict: &Dictionary, page_index: u32) -> Re
             .map_err(|_| unsupported(page_index, "CID /W2 is not an array"))?;
         parse_cid_vertical_widths(document, array, &mut vertical_widths, page_index)?;
     }
+    let cid_glyph_boxes =
+        if descendant_subtype == b"CIDFontType2" && matches!(encoding, CidCodeMap::IdentityH) {
+            cid_true_type_boxes(document, descendant).unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
     Ok(FontMetrics {
         widths: FontWidths::Cid {
             widths,
@@ -4247,7 +4261,58 @@ fn parse_cid_font(document: &Document, dict: &Dictionary, page_index: u32) -> Re
         ascent,
         descent,
         glyph_boxes: None,
+        cid_glyph_boxes,
     })
+}
+
+// Tighten only a verified embedded TrueType outline with explicit identity CID
+// mapping. PDF widths still drive advances; unsupported programs keep the
+// conservative metrics used by the existing fail-closed redactor.
+fn cid_true_type_boxes(
+    document: &Document,
+    descendant: &Dictionary,
+) -> Option<BTreeMap<u16, [f64; 4]>> {
+    if deref(document, descendant.get(b"CIDToGIDMap").ok()?)
+        .ok()?
+        .as_name()
+        .ok()?
+        != b"Identity"
+    {
+        return None;
+    }
+    let descriptor = deref(document, descendant.get(b"FontDescriptor").ok()?)
+        .ok()?
+        .as_dict()
+        .ok()?;
+    let stream = deref(document, descriptor.get(b"FontFile2").ok()?)
+        .ok()?
+        .as_stream()
+        .ok()?;
+    let bytes = if stream.dict.get(b"Filter").is_ok() {
+        stream.decompressed_content().ok()?
+    } else {
+        stream.content.clone()
+    };
+    let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
+    if face.is_variable() || face.tables().glyf.is_none() {
+        return None;
+    }
+    let scale = 1000.0 / f64::from(face.units_per_em());
+    let mut boxes = BTreeMap::new();
+    for gid in 0..face.number_of_glyphs() {
+        if let Some(rect) = face.glyph_bounding_box(ttf_parser::GlyphId(gid)) {
+            boxes.insert(
+                gid,
+                [
+                    f64::from(rect.x_min) * scale,
+                    f64::from(rect.y_min) * scale,
+                    f64::from(rect.x_max) * scale,
+                    f64::from(rect.y_max) * scale,
+                ],
+            );
+        }
+    }
+    Some(boxes)
 }
 
 #[derive(Debug, Clone)]
@@ -6911,6 +6976,176 @@ fn rewrite_glyph_bytes_as_tj(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::dictionary;
+
+    #[test]
+    fn embedded_cid_true_type_uses_outline_bounds_without_changing_advance() {
+        let bytes =
+            include_bytes!("../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf");
+        let face = ttf_parser::Face::parse(bytes, 0).unwrap();
+        let glyph = face.glyph_index('i').unwrap();
+        let rect = face.glyph_bounding_box(glyph).unwrap();
+        let mut document = Document::with_version("1.7");
+        let program = document.add_object(Stream::new(Dictionary::new(), bytes.to_vec()));
+        let descriptor = document.add_object(lopdf::dictionary! {
+            "FontFile2" => program, "Ascent" => 1000, "Descent" => -300,
+            "FontBBox" => vec![0.into(), (-300).into(), 1200.into(), 1000.into()],
+        });
+        let descendant = document.add_object(lopdf::dictionary! {
+            "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor,
+            "CIDToGIDMap" => "Identity", "DW" => 1000,
+        });
+        let font = lopdf::dictionary! {
+            "Subtype" => "Type0", "Encoding" => "Identity-H",
+            "DescendantFonts" => vec![descendant.into()],
+        };
+        let metrics = parse_cid_font(&document, &font, 0).unwrap();
+        metrics
+            .for_each_code(&glyph.0.to_be_bytes(), 0, |code| {
+                let scale = 1000.0 / f64::from(face.units_per_em());
+                assert_eq!(code.width, 1000.0, "PDF advance must remain unchanged");
+                assert_eq!(
+                    code.glyph_box,
+                    [
+                        f64::from(rect.x_min) * scale,
+                        f64::from(rect.y_min) * scale,
+                        f64::from(rect.x_max) * scale,
+                        f64::from(rect.y_max) * scale
+                    ]
+                );
+                Ok(())
+            })
+            .unwrap();
+        // Vertical mapping has not been validated for the tighter envelope.
+        let mut vertical = font.clone();
+        vertical.set("Encoding", "Identity-V");
+        parse_cid_font(&document, &vertical, 0)
+            .unwrap()
+            .for_each_code(&glyph.0.to_be_bytes(), 0, |code| {
+                assert_eq!(code.glyph_box, [0.0, -300.0, 1000.0, 1000.0]);
+                Ok(())
+            })
+            .unwrap();
+        // Missing/invalid font programs never justify shrinking conservative bounds.
+        let mut invalid_document = document.clone();
+        invalid_document.objects.insert(
+            program,
+            Object::Stream(Stream::new(Dictionary::new(), b"invalid font".to_vec())),
+        );
+        parse_cid_font(&invalid_document, &font, 0)
+            .unwrap()
+            .for_each_code(&glyph.0.to_be_bytes(), 0, |code| {
+                assert_eq!(code.glyph_box, [0.0, -300.0, 1000.0, 1000.0]);
+                Ok(())
+            })
+            .unwrap();
+        // The neighbor's advance box overlaps the selection; its ink does not.
+        // Both glyphs deliberately share the embedded font resource.
+        let secret = face.glyph_index('m').unwrap().0.to_be_bytes();
+        let retained = glyph.0.to_be_bytes();
+        let font_id = document.add_object(font);
+        let pages_id = document.new_object_id();
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 20.into()]),
+                Operation::new(
+                    "Tm",
+                    vec![
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        1.into(),
+                        50.into(),
+                        100.into(),
+                    ],
+                ),
+                Operation::new("Tj", vec![Object::string_literal(retained.to_vec())]),
+                Operation::new(
+                    "Tm",
+                    vec![
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        1.into(),
+                        60.into(),
+                        100.into(),
+                    ],
+                ),
+                Operation::new("Tj", vec![Object::string_literal(secret.to_vec())]),
+                Operation::new("ET", vec![]),
+            ],
+        }
+        .encode()
+        .unwrap();
+        let stream = document.add_object(Stream::new(Dictionary::new(), content));
+        let page = document.add_object(dictionary! { "Type"=>"Page", "Parent"=>pages_id,
+            "MediaBox"=>vec![0.into(),0.into(),200.into(),200.into()], "Contents"=>stream,
+            "Resources"=>dictionary! {"Font"=>dictionary! {"F1"=>font_id}},
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(
+                dictionary! {"Type"=>"Pages", "Count"=>1, "Kids"=>vec![page.into()]},
+            ),
+        );
+        let catalog = document.add_object(dictionary! {"Type"=>"Catalog", "Pages"=>pages_id});
+        document.trailer.set("Root", catalog);
+        let mut input = Vec::new();
+        document.save_to(&mut input).unwrap();
+        let result = redact_pure(
+            &input,
+            &[RedactArea {
+                page_index: 0,
+                left: 30.5,
+                top: 43.0,
+                width: 2.0,
+                height: 8.0,
+            }],
+        )
+        .unwrap();
+        let saved = Document::load_mem(&result.pdf).unwrap();
+        let page = *saved.get_pages().get(&1).unwrap();
+        let operations = Content::decode(&saved.get_page_content(page).unwrap())
+            .unwrap()
+            .operations;
+        let mut strings = Vec::new();
+        for op in &operations {
+            for operand in &op.operands {
+                if let Object::String(bytes, _) = operand {
+                    strings.push(bytes.clone());
+                }
+                if let Object::Array(parts) = operand {
+                    for p in parts {
+                        if let Object::String(bytes, _) = p {
+                            strings.push(bytes.clone());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            strings.iter().any(|s| s.windows(2).any(|p| p == retained)),
+            "neighbor glyph bytes removed"
+        );
+        assert!(
+            !strings.iter().any(|s| s.windows(2).any(|p| p == secret)),
+            "selected glyph bytes survived"
+        );
+        assert!(
+            operations.iter().any(|op| op.operator == "Tm"
+                && op.operands
+                    == vec![
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        1.into(),
+                        50.into(),
+                        100.into()
+                    ]),
+            "neighbor transform changed"
+        );
+    }
 
     #[test]
     fn empty_glyph_removal_rewrite_is_an_algebraic_noop() {

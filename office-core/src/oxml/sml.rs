@@ -596,6 +596,10 @@ pub struct Worksheet {
     pub dim: (u32, u32),
     /// Relationship id of a DrawingML part, when present.
     pub drawing_rel_id: Option<String>,
+    /// Relationship to a validated legacy Note drawing.
+    pub legacy_drawing_rel_id: Option<String>,
+    /// Print visible notes in place (asDisplayed).
+    pub print_comments: bool,
     /// Merged cell ranges.
     pub merges: Vec<MergeRange>,
     /// Conditional-formatting rules evaluated against cached values.
@@ -898,6 +902,14 @@ impl Worksheet {
         ws.drawing_rel_id = child(root, S, "drawing")
             .and_then(|drawing| attr(drawing, super::R, "id"))
             .map(str::to_string);
+        ws.legacy_drawing_rel_id = child(root, S, "legacyDrawing")
+            .and_then(|node| attr(node, super::R, "id"))
+            .map(str::to_string);
+        if child(root, S, "legacyDrawing").is_some() && ws.legacy_drawing_rel_id.is_none() {
+            return Err(OfficeError::Invalid(
+                "legacyDrawing has no relationship id".into(),
+            ));
+        }
         ws.print_grid_lines = child(root, S, "printOptions").is_some_and(|options| {
             matches!(attr(options, S, "gridLines"), Some("1") | Some("true"))
         });
@@ -919,6 +931,14 @@ impl Worksheet {
             ws.page_margins.footer = inch("footer")?.unwrap_or(ws.page_margins.footer);
         }
         if let Some(setup) = child(root, S, "pageSetup") {
+            match attr(setup, S, "cellComments") {
+                Some("asDisplayed") => ws.print_comments = true,
+                None | Some("none") => {}
+                _ => ws.visible_unsupported.push(WorksheetUnsupported {
+                    code: UnsupportedCode::UnknownElement,
+                    detail: "unsupported comment print layout".into(),
+                }),
+            }
             ws.page_setup.present = true;
             ws.page_setup.paper_size =
                 parse_i64(attr(setup, S, "paperSize")).unwrap_or(1).max(0) as u32;
@@ -969,9 +989,7 @@ impl Worksheet {
         ws.col_breaks = parse_breaks(child(root, S, "colBreaks"));
         for node in children(root) {
             let (code, detail) = match node.tag_name().name() {
-                "oleObjects" | "controls" | "legacyDrawing" => {
-                    (UnsupportedCode::OleObject, node.tag_name().name())
-                }
+                "oleObjects" | "controls" => (UnsupportedCode::OleObject, node.tag_name().name()),
                 "hyperlinks" => (UnsupportedCode::Hyperlink, "worksheet hyperlinks"),
                 _ => continue,
             };

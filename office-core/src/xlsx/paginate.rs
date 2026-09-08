@@ -48,6 +48,11 @@ pub(crate) enum DrawingAnchor {
 
 #[derive(Debug, Clone)]
 pub(crate) enum XlsxDrawing {
+    Note {
+        anchor: DrawingAnchor,
+        text: String,
+        fill: crate::oxml::Rgb,
+    },
     Picture {
         anchor: DrawingAnchor,
         image_id: ImageId,
@@ -194,7 +199,7 @@ impl XlsxDoc {
             })
             .map_err(|error| error.context(format_args!("sheet {}", sr.name)))?;
             apply_print_names(&mut sheet, &workbook, &sr.name, sheet_index)?;
-            let (drawings, drawing_reasons) = resolve_drawings(
+            let (mut drawings, mut drawing_reasons) = resolve_drawings(
                 &pkg,
                 part,
                 &sheet,
@@ -202,6 +207,13 @@ impl XlsxDoc {
                 &mut image_cache,
                 &mut image_budget,
             )?;
+            match super::legacy_notes::resolve(&pkg, part, &sheet) {
+                Ok(notes) => drawings.extend(notes),
+                Err(OfficeError::Unsupported { code, detail }) => {
+                    drawing_reasons.push(DrawingReason { code, detail })
+                }
+                Err(error) => return Err(error),
+            }
             sheets.push(ResolvedSheet {
                 name: sr.name.clone(),
                 sheet,

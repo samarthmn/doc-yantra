@@ -100,7 +100,7 @@ Releases stay on `0.0.x` — **only the patch increments**. Use the script as a
 side-effect-free preparation gate; it validates lockstep manifests, package
 audits, and package smoke checks without changing repository or registry state:
 ```bash
-scripts/release.sh          # validate the 0.0.25 candidate
+scripts/release.sh          # validate the 0.0.26 candidate
 scripts/release.sh --publish # push its tag and start GitHub Packages release
 ```
 The release script runs package-integrity and smoke checks before pushing a
@@ -135,11 +135,12 @@ published versions are immutable.
   Zone 1 stays lock-free and parallel.
 - **Redaction fails closed.** `redact_pure()` and legacy `redact()` return
   `Unsupported` rather than ever
-  emitting output where secret text could survive. It removes text objects
-  (unextractable, not just covered), remove Form XObject content, delete
-  intersecting annotations, and **re-verifies the saved output**. Object-level
-  granularity is intentional (more aggressive than character-level = safe direction).
-  Don't loosen these guarantees.
+  emitting output where secret text could survive. Pure redaction rewrites
+  intersecting glyphs, preserves neighboring advances, recursively processes
+  supported Form content, removes intersecting non-text objects/annotations,
+  and **re-verifies the saved output**. Conservative whole-object removal remains
+  supported with structured `over_redaction` warnings when precision is unproven.
+  Never shrink bounds heuristically or release bytes containing selected content.
 - **wasm panic/trap contract.** At the wasm boundary, `Err → JsError` is
   recoverable (bad input, oversized rejection); a Rust `panic!`/OOM is an
   **uncatchable trap** that poisons the instance. Zone 1 exports reject oversized
