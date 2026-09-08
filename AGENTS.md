@@ -4,13 +4,16 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this repo is
 
-`doc-yantra` is DocKosha's AGPL-3.0-only **PDF engine** (`pdf-core/`, Rust) plus its
+`doc-yantra` is DocKosha's **PDF engine** (`pdf-core/`, Rust) plus its
 distributable **npm package** `@samarthmn/doc-yantra` (`pdf-core/wasm/`, the Zone-1
 engine compiled to WebAssembly). Consumers install the package and run PDF ops
 in-process — no Rust toolchain, no network hop.
 
 The wasm packages are the supported conversion path; operations the engines
 cannot prove fail closed with an `unsupported:*` error.
+
+Repository visibility is owner-controlled. There is no planned open-source launch
+or public source export; do not introduce release gates or work based on one.
 
 ## Zone 1 vs Zone 2 — the core architectural split
 
@@ -95,14 +98,14 @@ font files and embedded SFNT programs.
 
 Releases stay on `0.0.x` — **only the patch increments**. Use the script as a
 side-effect-free preparation gate; it validates lockstep manifests, package
-audits, and the public source candidate without changing repository or registry
-state:
+audits, and package smoke checks without changing repository or registry state:
 ```bash
 scripts/release.sh          # validate the 0.0.25 candidate
 scripts/release.sh --publish # push its tag and start GitHub Packages release
 ```
-The owner-only tag workflow performs shipping after the same gate; published
-versions are immutable.
+The release script runs package-integrity and smoke checks before pushing a
+release tag. Full test suites remain available in PR/manual checks;
+published versions are immutable.
 
 ## Rules that are easy to get wrong
 
@@ -144,8 +147,10 @@ versions are immutable.
   linear memory. See `CONSUMING.md` § "Panic / trap contract".
 - **Fonts: standard-14 (WinAnsi/CP1252) plus runtime-registered Unicode faces.**
   Non-WinAnsi text renders through `register_font()`-supplied faces as embedded
-  CID subsets; complex-script/RTL text and uncovered glyphs fail closed with
-  `unsupported:*` (no HTTP fallback exists).
+  CID subsets. The packaged PDF Arabic-watermark regression exercises shaping
+  with the supplied Arabic face; do not generalize it to every complex script
+  or to Office layout. Unsupported shaping/layout and uncovered glyphs must
+  still fail closed with `unsupported:*` (no HTTP processing fallback exists).
 
 ## Cargo features
 
@@ -158,6 +163,6 @@ use `--no-default-features --features wasm`**, which drops Zone 2 and rayon.
 
 `README.md` (repo overview + release flow), `pdf-core/README.md` (engine scope,
 speed table, design notes & known limitations), and `CONSUMING.md` (install flow
-for consumers + full panic/trap contract). The public candidate exposes only
-self-contained checks under `public-tests/`; fixture-dependent regression and
-owner-golden checks remain private. Requires Rust ≥ 1.89 and Node ≥ 18.
+for consumers + full panic/trap contract). Self-contained checks live under
+`smoke-tests/`; fixture-dependent regression and owner-golden checks run in the
+working checkout. Requires Rust ≥ 1.89 and Node ≥ 18.

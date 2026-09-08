@@ -42,7 +42,7 @@ test("all first-party Cargo packages declare AGPL-3.0-only metadata", () => {
   }
 });
 
-test("all public npm packages carry AGPL metadata and the commercial notice", () => {
+test("all npm packages carry AGPL metadata and the commercial notice", () => {
   const approvedLicense = readFileSync(join(root, "LICENSE"));
   const approvedCommercialNotice = readFileSync(join(root, "COMMERCIAL-LICENSING.md"));
 

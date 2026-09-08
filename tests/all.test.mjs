@@ -16,5 +16,5 @@ import "./merge-watermark-parity.test.mjs";
 import "./parity-red.test.mjs";
 import "./error-envelope.test.mjs";
 import "./worker-types.test.mjs";
-import "./public-readiness.test.mjs";
+import "./package-readiness.test.mjs";
 import "./release-isolation-and-publish.test.mjs";

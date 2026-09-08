@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { auditBinaryProvenance, auditPublicSource, auditSecretText, exportPublicSource, validateProvenanceData } from "../scripts/export-public-source.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const node = process.execPath;
@@ -38,7 +37,7 @@ test("all four package LICENSE files are byte-identical to the approved root lic
   }
 });
 
-test("all public packages declare their applicable licenses and carry the commercial licensing notice", () => {
+test("all packages declare their applicable licenses and carry the commercial licensing notice", () => {
   for (const relative of [
     "pdf-core/wasm/pkg",
     "office-core/wasm/pkg",
@@ -98,86 +97,6 @@ test("generated fingerprints include copied legal and adapter README sources", (
   }
 });
 
-test("public source exporter rejects common secret content and unsafe destinations", () => {
-  const scratch = join(root, "tmp", `public-export-${process.pid}`);
-  const source = join(scratch, "source");
-  mkdirSync(join(source, "scripts"), { recursive: true });
-  writeFileSync(join(source, "LICENSE"), readFileSync(join(root, "LICENSE")));
-  writeFileSync(join(source, "THIRD_PARTY_NOTICES.md"), "notices\n");
-  writeFileSync(join(source, "FIXTURE_PROVENANCE.json"), readFileSync(join(root, "FIXTURE_PROVENANCE.json")));
-  writeFileSync(join(source, "FIXTURE_PROVENANCE.md"), "mock-files fidelity-corpus real-world-test-files\n");
-  writeFileSync(join(source, "scripts", "ok.mjs"), "export {}\n");
-  try {
-    for (const secret of [
-      "-----BEGIN PRIVATE KEY-----",
-      "npm_config_//registry.npmjs.org/:_authToken=secret",
-      "AWS_SECRET_ACCESS_KEY=secret",
-      "STRIPE_SECRET_KEY=sk_live_secret",
-      "password=secret",
-      "https://user:secret@example.test/path",
-    ]) {
-      writeFileSync(join(source, "scripts", "ok.mjs"), `${secret}\n`);
-      assert.throws(() => auditPublicSource(source), /secret|credential|private|token|password|AWS|Stripe/i, secret);
-    }
-    rmSync(join(source, "scripts", "ok.mjs"));
-    symlinkSync("../LICENSE", join(source, "scripts", "link.mjs"));
-    assert.throws(() => auditPublicSource(source), /symlink/i);
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
-test("secret audit allows explicit placeholders but provenance schema fails closed", () => {
-  for (const placeholder of ["YOUR_TOKEN", "REPLACE_ME", "<token>", "example"]) {
-    assert.doesNotThrow(() => auditSecretText("fixture.txt", `API_TOKEN=${placeholder}`));
-  }
-  assert.throws(() => auditSecretText("fixture.txt", "API_TOKEN=real-secret-value"), /secret|credential/i);
-  assert.throws(
-    () => auditSecretText("fixture.txt", "NPM_TOKEN=${{ secrets.NPM_TOKEN }}\nNPM_TOKEN=real-secret-value"),
-    /secret|credential/i,
-    "a placeholder must not hide a later credential",
-  );
-  for (const token of [
-    `ghp_${"A".repeat(36)}`,
-    `github_pat_${"A".repeat(82)}`,
-    `npm_${"A".repeat(36)}`,
-    `AIza${"A".repeat(35)}`,
-  ]) {
-    assert.throws(() => auditSecretText("fixture.txt", token), /secret|credential/i, token.slice(0, 12));
-  }
-  const provenance = JSON.parse(readFileSync(join(root, "FIXTURE_PROVENANCE.json"), "utf8"));
-  assert.doesNotThrow(() => validateProvenanceData(provenance));
-  assert.throws(() => validateProvenanceData({ ...provenance, retainedFixtures: [{ path: "x", status: "approved" }] }), /provenance|incomplete|hash/i);
-});
-
-test("unapproved public fixture binaries require hash-verified provenance", () => {
-  const scratch = join(root, "tmp", `binary-provenance-${process.pid}`);
-  const relative = "public-tests/example.pdf";
-  const bytes = Buffer.from("fixture bytes");
-  mkdirSync(join(scratch, "public-tests"), { recursive: true });
-  writeFileSync(join(scratch, relative), bytes);
-  try {
-    assert.throws(
-      () => auditBinaryProvenance(scratch, [relative], { retainedFixtures: [] }),
-      /provenance/i,
-    );
-    assert.throws(
-      () => auditBinaryProvenance(scratch, [relative], {
-        retainedFixtures: [{ path: relative, sha256: "0".repeat(64) }],
-      }),
-      /hash/i,
-    );
-    assert.doesNotThrow(() => auditBinaryProvenance(scratch, [relative], {
-      retainedFixtures: [{
-        path: relative,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-      }],
-    }));
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
 test("generated WASM packages contain no absolute builder paths", () => {
   const forbidden = /(?:\/home\/[^/]+\/|\/Users\/[^/]+\/|[A-Za-z]:\\Users\\|\/__w\/[^/]+\/)/u;
   for (const relative of [
@@ -204,92 +123,6 @@ test("Rust dependency notices are generated from locked WASM graphs and packaged
     assert.match(text, /MIT License/u);
     assert.match(text, /Apache License/u);
     assert.match(readFileSync(join(root, build), "utf8"), /THIRD_PARTY_RUST_LICENSES\.txt/u);
-  }
-});
-
-test("release workflows gate the exact publish commit and exercise the clean public export", () => {
-  const readiness = readFileSync(join(root, ".github/workflows/publish-wasm.yml"), "utf8");
-  const publisher = readFileSync(join(root, ".github/workflows/publish-npm.yml"), "utf8");
-  assert.doesNotMatch(readiness, /^\s+paths:\s*$/mu, "all release-input changes must trigger readiness");
-  assert.match(readiness, /tests\/all\.test\.mjs/u);
-  assert.match(readiness, /scripts\/clean-export-smoke\.sh/u);
-  const auditJob = readiness.slice(
-    readiness.indexOf("audit-and-core-tests:"),
-    readiness.indexOf("package-build:"),
-  );
-  assert.match(auditJob, /cargo install --locked --features cli cargo-about@0\.9\.2/u);
-  assert.match(auditJob, /scripts\/generate-rust-license-notices\.sh --check/u);
-  assert.match(publisher, /push:\s*\n\s+tags:\s*\n\s+- ["']0\.0\.\*["']/u);
-  assert.match(publisher, /registry-url:\s*https:\/\/npm\.pkg\.github\.com/u);
-  assert.match(publisher, /github\.actor\s*==\s*github\.repository_owner/u);
-  assert.match(publisher, /Verify locked notices and committed artifacts/u);
-  assert.doesNotMatch(publisher, /\.\/(?:pdf|office)-core\/wasm\/build\.sh/u);
-  assert.match(publisher, /git diff --exit-code/u);
-  assert.match(publisher, /scripts\/clean-export-smoke\.sh/u);
-  assert.match(publisher, /scripts\/verify-font-cdn\.mjs/u);
-  assert.match(publisher, /packages:\s*write/u);
-  assert.match(publisher, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
-  assert.doesNotMatch(
-    publisher,
-    /registry-url:\s*https:\/\/registry\.npmjs\.org|npm publish[^\n]*registry\.npmjs\.org|npm-production|NPM_TOKEN/u,
-  );
-});
-
-test("exporter never recursively deletes an existing destination", () => {
-  const destination = join(root, "tmp", `existing-export-${process.pid}`);
-  mkdirSync(destination, { recursive: true });
-  writeFileSync(join(destination, "sentinel.txt"), "preserve me\n");
-  try {
-    assert.throws(() => exportPublicSource(root, destination), /already exists|delete/i);
-    assert.equal(readFileSync(join(destination, "sentinel.txt"), "utf8"), "preserve me\n");
-  } finally {
-    rmSync(destination, { recursive: true, force: true });
-  }
-});
-
-test("exporter rejects a symlink destination before writing through it", () => {
-  const destination = join(root, "tmp", `symlink-export-${process.pid}`);
-  symlinkSync(root, destination);
-  try {
-    assert.throws(() => exportPublicSource(root, destination), /symlink/i);
-  } finally {
-    rmSync(destination, { force: true });
-  }
-});
-
-test("exporter rejects a symlinked destination ancestor", () => {
-  const scratch = join(root, "tmp", `symlink-parent-${process.pid}`);
-  const outside = join(scratch, "outside");
-  const linkedParent = join(scratch, "linked-parent");
-  const destination = join(linkedParent, "nested", "candidate");
-  mkdirSync(outside, { recursive: true });
-  symlinkSync(outside, linkedParent);
-  try {
-    assert.throws(() => exportPublicSource(root, destination), /symlink/i);
-    assert.equal(existsSync(join(outside, "README.md")), false, "export must not traverse the linked parent");
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
-test("public source audit rejects an unexpected nested reader-facing file", () => {
-  const unexpected = join(root, "pdf-core", "internal-notes.md");
-  writeFileSync(unexpected, "internal note\n");
-  try {
-    assert.throws(() => auditPublicSource(root), /unexpected public path|manifest/i);
-  } finally {
-    rmSync(unexpected, { force: true });
-  }
-});
-
-test("public source audit rejects a missing exact path manifest", () => {
-  const manifest = join(root, "scripts/public-source-manifest.json");
-  const original = readFileSync(manifest);
-  try {
-    rmSync(manifest);
-    assert.throws(() => auditPublicSource(root), /path manifest|manifest/i);
-  } finally {
-    writeFileSync(manifest, original);
   }
 });
 

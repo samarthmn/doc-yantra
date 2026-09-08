@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { exportPublicSource, publicSourceFiles } from "../scripts/export-public-source.mjs";
 import { assertDeterministicPack, auditAdapterLockfile, tarballSri } from "../scripts/package-audit.mjs";
 import { publishPackages } from "../scripts/publish-npm.mjs";
 
@@ -27,7 +25,7 @@ function packedResult(args, filename = "package.tgz", contents = "packed tarball
 test("office-core is a one-package locked workspace while fidelity owns a separate lockfile", () => {
   const office = readFileSync(join(root, "office-core", "Cargo.toml"), "utf8");
   const workspace = office.slice(office.indexOf("[workspace]"));
-  assert.doesNotMatch(workspace, /^members\s*=/mu, "the public office workspace must not resolve fidelity");
+  assert.doesNotMatch(workspace, /^members\s*=/mu, "the office workspace must not resolve fidelity");
   assert.equal(existsSync(join(root, "office-core", "fidelity", "Cargo.lock")), true);
   assert.match(readFileSync(join(root, "office-core", "fidelity", "Cargo.toml"), "utf8"), /^\[workspace\]$/mu);
 });
@@ -42,45 +40,6 @@ test("private fidelity fetches one fixed PDFium build with a platform checksum g
   assert.match(fetch, /tr '\[:upper:\]' '\[:lower:\]'/u, "uppercase checksum input must work with macOS shasum output");
   const workflow = readFileSync(join(root, ".github", "workflows", "fidelity.yml"), "utf8");
   assert.doesNotMatch(workflow, /^\s*PDFIUM_BUILD:/mu);
-});
-
-test("public export retains PDFium license notices but excludes downloaded PDFium artifacts", () => {
-  const expectedNotices = [
-    "pdf-core/pdfium/LICENSE",
-    ...readdirSync(join(root, "pdf-core", "pdfium", "licenses"))
-      .sort()
-      .map((name) => `pdf-core/pdfium/licenses/${name}`),
-  ];
-  const publicFiles = new Set(publicSourceFiles(root));
-  const trackedFiles = new Set(
-    execFileSync("git", ["ls-files", "--", "pdf-core/pdfium"], { cwd: root, encoding: "utf8" })
-      .trim()
-      .split("\n")
-      .filter(Boolean),
-  );
-  for (const notice of expectedNotices) {
-    assert.equal(publicFiles.has(notice), true, `missing public PDFium notice: ${notice}`);
-    assert.equal(trackedFiles.has(notice), true, `PDFium notice is not committed: ${notice}`);
-  }
-  assert.equal(publicFiles.has("pdf-core/pdfium/lib/libpdfium.so"), false);
-  assert.equal(publicFiles.has("pdf-core/pdfium/include/fpdfview.h"), false);
-  assert.match(
-    readFileSync(join(root, "THIRD_PARTY_NOTICES.md"), "utf8"),
-    /\[`pdf-core\/pdfium\/LICENSE`\]\(pdf-core\/pdfium\/LICENSE\)/u,
-  );
-});
-
-test("public export omits the private fidelity harness and its workflow", () => {
-  const scratch = join(root, "tmp", `docyantra-public-export-${process.pid}`);
-  const destination = join(scratch, "candidate");
-  mkdirSync(scratch, { recursive: true });
-  try {
-    exportPublicSource(root, destination);
-    assert.equal(existsSync(join(destination, "office-core", "fidelity")), false);
-    assert.equal(existsSync(join(destination, ".github", "workflows", "fidelity.yml")), false);
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
 });
 
 test("publisher only releases tarballs absent from the registry and verifies their integrity", async () => {
@@ -206,7 +165,7 @@ test("package audit rejects repeat packs whose tarball bytes differ", () => {
   }
 });
 
-test("adapter lock contract rejects public engine tarballs without SHA-512 SRI", () => {
+test("adapter lock contract rejects engine tarballs without SHA-512 SRI", () => {
   const scratch = join(root, "tmp", `adapter-lock-integrity-${process.pid}`);
   const lockPath = join(scratch, "pnpm-lock.yaml");
   const version = JSON.parse(

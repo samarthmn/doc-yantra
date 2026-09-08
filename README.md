@@ -1,6 +1,6 @@
 # doc-yantra — DocKosha's native PDF engine (Rust + WebAssembly)
 
-This repo is DocKosha's **AGPL-3.0-only PDF engine** and its distributable
+This repo is DocKosha's **PDF engine** and its distributable
 **npm package**. It contains:
 
 | Path                                 | What it is                                                                                                                                                                                                                                                                                     |
@@ -14,11 +14,14 @@ This repo is DocKosha's **AGPL-3.0-only PDF engine** and its distributable
 | `.github/workflows/publish-wasm.yml` | PR/manual readiness checks: rebuilds and audits the four lockstep packages without publishing.                                                                                                                                                                                                 |
 | `.github/workflows/publish-npm.yml`  | Tag-triggered GitHub Packages publication and GitHub release creation after immutable version and tarball checks.                                                                                                                                                                               |
 
+There is no planned open-source launch or public source export. Repository
+visibility is owner-controlled.
+
 The first-party source and wrapper code is licensed under the AGPL-3.0-only
 terms in [`LICENSE`](LICENSE). Enterprise licensing is available only through a
 separate signed agreement; see [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md).
 See
-[`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md),
+[`SECURITY.md`](SECURITY.md),
 [`SUPPORT.md`](SUPPORT.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 > **History note:** the DocYantra HTTP service (NestJS + Gotenberg) has been
@@ -123,21 +126,19 @@ done
 `uv sync` restores Python dependencies only; it does not recreate Cargo's Rust
 build artifacts.
 
-## Public verification surface
+## Verification
 
-The exported candidate contains only self-contained checks in `public-tests/`.
-Run them from its root with `node --test public-tests/*.test.mjs`, then follow
-the PDF and Office build/test commands in `public-tests/README.md`. Owner-only
-golden-document validation is a separate scheduled/manual gate and requires
-the provenance-approved intake described in `FIXTURE_PROVENANCE.md`; it is not
-part of the public candidate.
+Run the self-contained package checks with `node --test smoke-tests/*.test.mjs`.
+See `smoke-tests/README.md` for Rust checks and run `node --test tests/all.test.mjs`
+for the package regression suite. Owner-supplied golden-document validation is
+a separate scheduled/manual gate; see `FIXTURE_PROVENANCE.md` for intake details.
 
 ## Releasing
 
 Releases stay on the **0.0.x** line — only the patch increments. The release
 script is a side-effect-free preparation gate: it validates lockstep manifests,
-audits every `npm pack`, enforces core/font byte budgets, and checks the public
-source candidate without changing repository or registry state:
+audits every `npm pack`, enforces core/font byte budgets, and runs package smoke
+checks without changing repository or registry state:
 
 ```bash
 scripts/release.sh            # validate the 0.0.25 candidate
@@ -147,3 +148,6 @@ scripts/release.sh --publish  # push its tag and start GitHub Packages release
 Published versions are immutable. The owner-only workflow performs the GitHub
 Packages reuse check and publishes only after all four audited tarballs are
 prepared.
+
+The release script runs package-integrity and smoke checks before publishing
+the release tag. Full test suites run in the PR/manual readiness workflow.

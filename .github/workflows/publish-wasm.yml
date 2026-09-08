@@ -1,4 +1,4 @@
-name: DocYantra public package readiness
+name: DocYantra package readiness
 
 on:
   pull_request:
@@ -27,19 +27,17 @@ jobs:
         run: cargo install --locked --features cli cargo-about@0.9.2
       - name: Verify locked Rust dependency notices
         run: scripts/generate-rust-license-notices.sh --check
-      - name: Audit public source and package manifests
-        run: node scripts/export-public-source.mjs --check-only
       - name: Audit packed packages
         run: node scripts/package-audit.mjs
-      - name: Run exported Node checks
+      - name: Run Node regression checks
         run: node --test tests/all.test.mjs
-      - name: Verify a clean public export
-        run: scripts/clean-export-smoke.sh
+      - name: Run package smoke checks
+        run: node --test smoke-tests/*.test.mjs
       - name: Test PDF engine
         run: cargo test --manifest-path pdf-core/Cargo.toml --no-default-features --features wasm
       - name: Test Office engine
         run: cargo test --manifest-path office-core/Cargo.toml
-      - name: Verify locked public Office library workspace
+      - name: Verify locked Office library workspace
         run: |
           cargo metadata --manifest-path office-core/Cargo.toml --locked --no-deps --format-version 1
           cargo check --manifest-path office-core/Cargo.toml --locked --lib --no-default-features --features wasm

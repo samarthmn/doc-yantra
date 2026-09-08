@@ -28,7 +28,7 @@ importers:
 packages:
 
   '@samarthmn/doc-yantra-office@0.0.25':
-    resolution: {integrity: sha512-SkrUi5VEFuIkrqd1U3PMUuLtqPxGa0g23J8qdX1aqa9Jm3ISDnFgpduczNgpxcoMH9+Dv2vYJzqJ7IkMdlGAsA==}
+    resolution: {integrity: sha512-JXwJZT72nuvfQXnmXIfe48IJgd8CD7i5OZc2MyU+UHznJxCl5Fk7SKImdSpzIVQx1UpbHOs7LXBbyqHFXZhCQg==}
 
   '@samarthmn/doc-yantra@0.0.25':
     resolution: {integrity: sha512-ogZgTMfKnEXwwZtyDn2P88RfTx8nWt7MF4jbZhfghfOmHeIq1ZLv3WmlLmPFyZQvjxvPoN4woRC8lqHjp51ifg==}

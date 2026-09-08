@@ -26,6 +26,26 @@ with a GitHub token that can read packages:
 @samarthmn:registry=https://npm.pkg.github.com
 ```
 
+For pnpm 11 consumers, also declare the scoped registry in
+`pnpm-workspace.yaml` (merge this into an existing file):
+
+```yaml
+registries:
+  default: https://registry.npmjs.org/
+  "@samarthmn": https://npm.pkg.github.com/
+```
+
+Keep authentication in user-level npm configuration or the CI environment,
+never in either committed configuration file. GitHub Actions consumers need
+`packages: read`, registry authentication, and repository read access to all
+four packages. DocKosha explicitly installs the matching font package even
+though the engine packages declare it as an optional peer.
+
+When migrating an older lockfile, replace stale DocYantra entries containing
+npmjs tarball URLs with registry-resolved entries; do not hand-edit their
+integrity values or disable supply-chain checks. Validate the result with a
+fresh `pnpm install --frozen-lockfile`.
+
 Fonts are optional and are never installed by default. For an offline
 deployment, add the separate font pack at the same version:
 
@@ -41,9 +61,8 @@ font provider.
 
 Build and pack the four candidates locally, then install the resulting sibling
 tarballs in a disposable consumer project. Do not add sibling, `file:`, or
-`link:` dependencies to a committed application manifest. The public source
-candidate exporter and package audit are fail-closed and should pass before a
-candidate is shared.
+`link:` dependencies to a committed application manifest. Package audits and
+smoke checks should pass before a candidate is shared.
 
 ## API overview
 
@@ -81,10 +100,10 @@ the GitHub Packages and GitHub release workflow.
 
 ```bash
 node scripts/package-audit.mjs
-node scripts/export-public-source.mjs --out-dir tmp/doc-yantra-public
+node --test smoke-tests/*.test.mjs
 scripts/release.sh --publish
 ```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md),
+See [`SECURITY.md`](SECURITY.md),
 [`SUPPORT.md`](SUPPORT.md), [`FIXTURE_PROVENANCE.md`](FIXTURE_PROVENANCE.md),
 and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

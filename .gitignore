@@ -3,7 +3,7 @@ target/
 **/*.rs.bk
 
 # pdfium binaries and headers are fetched per-platform. Legal notices are
-# committed because the public source export promises to retain them.
+# committed for dependency attribution.
 pdf-core/pdfium/*
 !pdf-core/pdfium/LICENSE
 !pdf-core/pdfium/licenses/
@@ -18,7 +18,7 @@ tests/node_modules/
 # Per-task scratch artifacts (never committed).
 /tmp/
 
-# Local agent/editor state and caches (never public source).
+# Local agent/editor state and caches (never committed).
 .claude/
 .superpowers/
 .cache/

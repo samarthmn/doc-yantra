@@ -94,11 +94,6 @@ jobs:
       - name: Audit the exact release payload
         run: |
           node scripts/package-audit.mjs
-          node scripts/export-public-source.mjs --check-only
-          scripts/clean-export-smoke.sh
-          node --test tests/all.test.mjs
-          cargo test --manifest-path pdf-core/Cargo.toml --no-default-features --features wasm
-          cargo test --manifest-path office-core/Cargo.toml
           node scripts/verify-font-cdn.mjs
 
       - name: Build and verify named consumer release assets

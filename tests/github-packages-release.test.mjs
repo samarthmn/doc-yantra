@@ -31,6 +31,7 @@ test("a 0.0.x tag publishes through GitHub Packages and creates a GitHub release
   assert.match(workflow, /packages:\s*write/u);
   assert.match(workflow, /NODE_AUTH_TOKEN:\s*\$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
   assert.match(workflow, /node scripts\/publish-npm\.mjs/u);
+  assert.doesNotMatch(workflow, /node --test|cargo test/u, "test suites run outside publishing");
   assert.match(workflow, /gh release (?:create|upload)/u);
   assert.match(
     workflow,

@@ -194,7 +194,7 @@ test("source fingerprint guard verifies committed packages and rejects a forged 
   }
 });
 
-test("public readiness workflow pins its execution surface and runs audits", () => {
+test("package readiness workflow pins its execution surface and runs audits", () => {
   const workflow = readFileSync(join(root, ".github/workflows/publish-wasm.yml"), "utf8");
   assert.match(workflow, /runs-on:\s*ubuntu-24\.04/u);
 
@@ -207,7 +207,7 @@ test("public readiness workflow pins its execution surface and runs audits", () 
   }
 
   for (const command of [
-    "node scripts/export-public-source.mjs --check-only",
+    "node --test smoke-tests/*.test.mjs",
     "node scripts/package-audit.mjs",
     "scripts/generate-rust-license-notices.sh --check",
     "node --test tests/all.test.mjs",
@@ -225,20 +225,20 @@ test("public readiness workflow pins its execution surface and runs audits", () 
   assert.match(workflow, /workflow_dispatch/u);
 });
 
-test("public self-contained check guide matches the exported test surface", () => {
-  const guide = readFileSync(join(root, "public-tests", "README.md"), "utf8");
+test("self-contained check guide matches the package test surface", () => {
+  const guide = readFileSync(join(root, "smoke-tests", "README.md"), "utf8");
   for (const command of [
-    "node --test public-tests/*.test.mjs tests/font-cdn-tools.test.mjs tests/license-metadata.test.mjs",
+    "node --test smoke-tests/*.test.mjs tests/font-cdn-tools.test.mjs tests/license-metadata.test.mjs",
     "cargo test --manifest-path pdf-core/Cargo.toml --lib --no-default-features --features wasm",
     "cargo metadata --manifest-path office-core/Cargo.toml --locked --no-deps --format-version 1",
     "cargo check --manifest-path office-core/Cargo.toml --locked --lib --no-default-features --features wasm",
   ]) {
-    assert.ok(guide.includes(command), `public guide is missing: ${command}`);
+    assert.ok(guide.includes(command), `package guide is missing: ${command}`);
   }
   assert.doesNotMatch(guide, /office-core\/public-check/u);
 });
 
-test("release gate is a side-effect-free public preparation check", () => {
+test("release gate is a side-effect-free package preparation check", () => {
   const beforeStatus = execFileSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8" });
   const beforeIndex = execFileSync("git", ["diff", "--cached", "--binary"], {
     cwd: root,

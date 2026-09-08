@@ -131,11 +131,11 @@ discarded.
 
 ## Verification
 
-The public candidate provides self-contained checks in `public-tests/`; run
-those checks before sharing a package. Owner-supplied golden-document
+Self-contained package checks live in `smoke-tests/`; run those checks before
+sharing a package. Owner-supplied golden-document
 comparison is a separate scheduled/manual gate and requires the approved
 rights and provenance intake described in the repository's top-level
-`FIXTURE_PROVENANCE.md`. No public package depends on that owner-only gate.
+`FIXTURE_PROVENANCE.md`. Package smoke checks do not depend on that owner-only gate.
 
 ## Design notes
 

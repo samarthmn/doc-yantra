@@ -80,8 +80,7 @@ main() {
   VERSION="$(check_versions)"
   ./scripts/generate-rust-license-notices.sh --check
   node scripts/package-audit.mjs
-  node scripts/export-public-source.mjs --check-only
-  ./scripts/clean-export-smoke.sh
+  node --test smoke-tests/*.test.mjs
   echo "release preparation passed for ${VERSION}"
   if [[ "${1:-}" == "--publish" ]]; then
     publish_tag

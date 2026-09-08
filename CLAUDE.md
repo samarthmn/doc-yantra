@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-`doc-yantra` is DocKosha's AGPL-3.0-only **PDF engine** (`pdf-core/`, Rust) plus its
+`doc-yantra` is DocKosha's **PDF engine** (`pdf-core/`, Rust) plus its
 distributable **npm package** `@samarthmn/doc-yantra` (`pdf-core/wasm/`, the Zone-1
 engine compiled to WebAssembly). Consumers install the package and run PDF ops
 in-process — no Rust toolchain, no network hop.
@@ -14,6 +14,9 @@ Chromium/pdfium) that once served heavy conversions and fallbacks has been
 **retired and deleted** from the DocKosha app repo. The wasm packages are the
 only conversion path; operations the engines cannot prove fail closed with an
 `unsupported:*` error instead of falling back anywhere.
+
+Repository visibility is owner-controlled. There is no planned open-source launch
+or public source export; do not introduce release gates or work based on one.
 
 ## Zone 1 vs Zone 2 — the core architectural split
 
@@ -92,8 +95,7 @@ Rebuild the wasm package after any Rust change (`cd pdf-core/wasm`):
 
 Releases stay on `0.0.x` — **only the patch increments**. Use the script as a
 side-effect-free preparation gate; it validates lockstep manifests, package
-audits, and the public source candidate without changing repository or registry
-state:
+audits, and package smoke checks without changing repository or registry state:
 ```bash
 scripts/release.sh             # validate the 0.0.25 candidate
 scripts/release.sh --publish   # push its tag and start GitHub Packages release
@@ -152,6 +154,6 @@ use `--no-default-features --features wasm`**, which drops Zone 2 and rayon.
 
 `README.md` (repo overview + release flow), `pdf-core/README.md` (engine scope,
 speed table, design notes & known limitations), and `CONSUMING.md` (install flow
-for consumers + full panic/trap contract). Public candidates expose only
-self-contained checks; fixture-dependent and owner-golden checks remain private.
+for consumers + full panic/trap contract). Self-contained checks live under
+`smoke-tests/`; fixture-dependent and owner-golden checks run in the working checkout.
 Requires Rust ≥ 1.89 and Node ≥ 18.
