@@ -33,6 +33,6 @@ pub use reporting::{
 };
 pub use requests::{
     FontClassing, FontRequest, FontSlot, FontSubstitutionClass, classify_font_metadata,
-    classify_font_request,
+    classify_font_request, slot_for_character,
 };
 pub use subset::{SubsetFont, subset_for_pdf};

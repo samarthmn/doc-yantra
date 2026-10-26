@@ -27,6 +27,7 @@ use crate::text::shape;
 use crate::{OfficeError, Result, UnsupportedCode};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) type NoteSequence = HashMap<(NoteKind, i64), u32>;
 
@@ -1749,17 +1750,20 @@ fn apply_east_asian_auto_space(doc: &WordDoc, para: &Paragraph, atoms: &mut [Ato
             }
         }
         if let Some(left_index) = previous {
-            let (Atom::Glyph {
-                ch: left_ch,
-                is_space: left_space,
-                style: left_style,
-                ..
-            }, Atom::Glyph {
-                ch: right_ch,
-                is_space: right_space,
-                style: right_style,
-                ..
-            }) = (&atoms[left_index], &atoms[index])
+            let (
+                Atom::Glyph {
+                    ch: left_ch,
+                    is_space: left_space,
+                    style: left_style,
+                    ..
+                },
+                Atom::Glyph {
+                    ch: right_ch,
+                    is_space: right_space,
+                    style: right_style,
+                    ..
+                },
+            ) = (&atoms[left_index], &atoms[index])
             else {
                 unreachable!("previous/current indices always name glyph atoms")
             };
@@ -2102,19 +2106,96 @@ fn flatten_run(
     let halfwidth_ascii = matching::halfwidth_ascii_legacy_family(&requested_family);
     for content in &run.content {
         match content {
-            RunContent::Text(t) => shape_text(
-                &doc.fonts,
-                &fallback_ids,
-                t,
-                size,
-                char_spacing,
-                kern,
-                allow_direct_text,
-                base_direction,
-                halfwidth_ascii,
-                &style,
-                atoms,
-            )?,
+            RunContent::Text(t) => {
+                let scripts = crate::text::script::scan_scripts(t);
+                if allow_direct_text
+                    && !scripts.complex_script
+                    && !scripts.rtl
+                    && t.chars()
+                        .any(|ch| crate::fonts::slot_for_character(ch) != FontSlot::Ascii)
+                {
+                    // Word selects the face from each character's script slot,
+                    // not from the run's ASCII face. Group adjacent grapheme
+                    // clusters by the slot's resolved family so
+                    // `w:eastAsia="SimSun"` applies to Han text while a Latin
+                    // fragment keeps its Latin face; keeping whole clusters
+                    // preserves combining marks and emoji ZWJ / variation
+                    // sequences. Slots that share a family (usually ASCII and
+                    // hAnsi: smart quotes, dashes, accents) stay in one shaping
+                    // call so kerning and ligatures are not cut at the boundary.
+                    let mut shapings: BTreeMap<FontSlot, SlotShaping> = BTreeMap::new();
+                    let mut groups: Vec<(FontSlot, usize, String)> = Vec::new();
+                    for (offset, grapheme) in t.grapheme_indices(true) {
+                        let slot = grapheme
+                            .chars()
+                            .next()
+                            .map(crate::fonts::slot_for_character)
+                            .unwrap_or(FontSlot::Ascii);
+                        if !shapings.contains_key(&slot) {
+                            let shaping = if slot == FontSlot::Ascii {
+                                SlotShaping {
+                                    family: requested_family.clone(),
+                                    style: Rc::clone(&style),
+                                    fallbacks: fallback_ids.clone(),
+                                }
+                            } else {
+                                shaping_for_slot(
+                                    doc,
+                                    warnings,
+                                    &eff,
+                                    face,
+                                    &style,
+                                    &fallback_ids,
+                                    slot,
+                                )
+                            };
+                            shapings.insert(slot, shaping);
+                        }
+                        match groups.last_mut() {
+                            Some((last_slot, _, text))
+                                if shapings[last_slot].family == shapings[&slot].family =>
+                            {
+                                text.push_str(grapheme)
+                            }
+                            _ => groups.push((slot, offset, grapheme.to_string())),
+                        }
+                    }
+                    for (slot, offset, text) in groups {
+                        let shaping = &shapings[&slot];
+                        let group_halfwidth =
+                            matching::halfwidth_ascii_legacy_family(&shaping.family);
+                        shape_text(
+                            &doc.fonts,
+                            &shaping.fallbacks,
+                            &text,
+                            size,
+                            char_spacing,
+                            kern,
+                            allow_direct_text,
+                            base_direction,
+                            group_halfwidth,
+                            &shaping.style,
+                            offset,
+                            atoms,
+                        )?;
+                    }
+                } else {
+                    shape_text(
+                        &doc.fonts,
+                        &fallback_ids,
+                        t,
+                        size,
+                        char_spacing,
+                        kern,
+                        allow_direct_text,
+                        base_direction,
+                        halfwidth_ascii,
+                        &style,
+                        0,
+                        atoms,
+                    )?;
+                }
+            }
             RunContent::Tab => atoms.push(tab_atom(
                 &doc.fonts,
                 &fallback_ids,
@@ -2140,6 +2221,7 @@ fn flatten_run(
                         base_direction,
                         halfwidth_ascii,
                         &style,
+                        0,
                         atoms,
                     )?;
                 }
@@ -2350,6 +2432,7 @@ fn flatten_run(
                     base_direction,
                     halfwidth_ascii,
                     &Rc::new(note_style),
+                    0,
                     atoms,
                 )?;
             }
@@ -2650,6 +2733,7 @@ fn shape_text(
     base_direction: text_core::Direction,
     halfwidth_ascii: bool,
     style: &Rc<RunStyle>,
+    source_offset: usize,
     atoms: &mut Vec<Atom>,
 ) -> Result<()> {
     let faces: Vec<_> = face_ids.iter().filter_map(|id| fonts.face(*id)).collect();
@@ -2691,7 +2775,7 @@ fn shape_text(
             .or_default()
             .push(AtomSemanticCluster {
                 group_id,
-                source_order: cluster.source_offset,
+                source_order: source_offset + cluster.source_offset,
                 style: Rc::clone(&semantic_style),
                 base_direction,
                 cluster: SemanticCluster {
@@ -2758,6 +2842,7 @@ fn tab_atom(
             base_direction,
             halfwidth_ascii,
             style,
+            0,
             &mut shaped,
         )?;
         if let Some(Atom::Glyph {
@@ -2793,15 +2878,57 @@ fn italic(props: &RunProps) -> bool {
     props.italic == Some(true)
 }
 
+/// The face, style and fallback chain selected for one OOXML script slot.
+struct SlotShaping {
+    family: String,
+    style: Rc<RunStyle>,
+    fallbacks: Vec<FaceId>,
+}
+
+fn shaping_for_slot(
+    doc: &WordDoc,
+    warnings: &mut Vec<Warning>,
+    eff: &RunProps,
+    primary_face: FaceId,
+    primary_style: &Rc<RunStyle>,
+    primary_fallbacks: &[FaceId],
+    slot: FontSlot,
+) -> SlotShaping {
+    let family = matching::wml_run_family(&eff.fonts, slot, &doc.theme);
+    let resolved = matching::resolve(&doc.fonts, &family, weight(eff), italic(eff));
+    for warning in resolved.warnings {
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
+    }
+    let face = resolved.face.unwrap_or(primary_face);
+    if face == primary_face {
+        SlotShaping {
+            family,
+            style: Rc::clone(primary_style),
+            fallbacks: primary_fallbacks.to_vec(),
+        }
+    } else {
+        SlotShaping {
+            family,
+            style: fallback_style(&doc.fonts, face, primary_style),
+            fallbacks: matching::coverage_fallbacks(&doc.fonts, face, weight(eff), italic(eff)),
+        }
+    }
+}
+
 fn fallback_style(fonts: &FontDb, face: FaceId, base: &RunStyle) -> Rc<RunStyle> {
     // A coverage fallback supplies ink, not line geometry: Word never falls
     // back (it has the real fonts), so the primary face keeps governing the
-    // line box. Pan-CJK faces are the exception — East Asian text reaching
+    // line box. East Asian faces are the exception — East Asian text reaching
     // them is a whole-script substitution and takes the legacy CJK line
     // convention (`useFELayout` growth), not the Latin primary's metrics.
     let metrics = fonts
         .face(face)
-        .filter(|font| matching::pan_cjk_face(&font.family_name))
+        .filter(|font| {
+            matching::pan_cjk_face(&font.family_name)
+                || matching::legacy_cjk_class(&font.family_name).is_some()
+        })
         .and_then(|font| font.line_metrics());
     Rc::new(RunStyle {
         face,

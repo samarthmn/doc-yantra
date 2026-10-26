@@ -28,6 +28,46 @@ impl FontSlot {
     }
 }
 
+/// Word's OOXML font slot for one character's script.
+///
+/// Preflight coverage collection and layout share this classifier so
+/// `profile()` and `convert()` resolve the same face for the same character.
+/// Word uses the ASCII slot for ASCII, the East Asian slot for Han/kana/
+/// Hangul/CJK punctuation/fullwidth forms, and the complex-script slot for
+/// scripts that need shaping or bidi.
+pub fn slot_for_character(character: char) -> FontSlot {
+    let codepoint = character as u32;
+    if character.is_ascii() {
+        FontSlot::Ascii
+    } else if matches!(
+        codepoint,
+        0x1100..=0x11FF
+            | 0x2E80..=0x2FFF
+            | 0x3000..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7FF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFFEF
+            | 0x20000..=0x3134F
+    ) {
+        FontSlot::EastAsia
+    } else if matches!(
+        codepoint,
+        0x0590..=0x08FF
+            | 0x0900..=0x0EFF
+            | 0x1000..=0x109F
+            | 0x1780..=0x17FF
+            | 0xFB1D..=0xFEFF
+    ) {
+        FontSlot::Cs
+    } else {
+        FontSlot::HAnsi
+    }
+}
+
 /// One deduplicated family/style request sent to a host font provider.
 ///
 /// This is metadata only: document text and exact per-document character
@@ -160,6 +200,23 @@ fn parse_panose(value: &str) -> Option<[u8; 10]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_classifier_matches_word_script_slots() {
+        assert_eq!(slot_for_character('A'), FontSlot::Ascii);
+        assert_eq!(slot_for_character('é'), FontSlot::HAnsi);
+        assert_eq!(slot_for_character('汉'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('あ'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('한'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('。'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('ｱ'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('ㄱ'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('㈱'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('㎡'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('﹐'), FontSlot::EastAsia);
+        assert_eq!(slot_for_character('“'), FontSlot::HAnsi);
+        assert_eq!(slot_for_character('ש'), FontSlot::Cs);
+    }
 
     #[test]
     fn classifies_font_table_signals_without_family_name_guessing() {

@@ -409,3 +409,55 @@ cases in one campaign. Local constant edits are provably net-negative.
 - Verified state: 24 docx cases = 19 core + 5 extended, 0 core failures,
   5/5 extended; pptx 2/2, xlsx 3/3; office-core 601 tests, fidelity 101,
   node package 156, adapter 6 — all green; office wasm pkg rebuilt in sync.
+
+## 2026-10-26 — Word metric selection and per-script font slots
+
+**REA evidence.** WWLIB.DLL imports GDI32 `GetTextMetricsW`,
+`GetOutlineTextMetricsW`, `GetFontData`, `GetKerningPairsW`,
+`GetCharABCWidthsW`, and `GetGlyphIndicesW`. Live Frida instrumentation shows
+Word reading legacy CJK faces at design scale (SimSun 220/36 + 36 leading,
+MingLiU 820/204, MS Mincho 220/36, Calibri 1950/550). Word COM/PDF truths at
+96 DPI give SimSun/MS Gothic 12 pt: 15.75 pt single, 18 pt at 1.15 lines,
+23.25 pt at 1.5 lines.
+
+**Fix 1 — metric source (`complex`).** `FaceMetrics::new` added the hhea line
+gap to the OS/2 Windows box. Calibri's Windows box (1950 + 550 = 2500) already
+contains its hhea gap (1536 − (−512) + 452 = 2500); the sum produced 2952
+units (1.441 em). Word uses 2500 (1.2207 em) with a 1950 (0.9521 em) baseline.
+The engine now uses `max(win box, hhea box)` and adds only the surplus above
+the Windows box. `complex` went from 7 pages (gate failure) to 6/6 pages and
+SSIM 0.968285; its first-line baseline moved from 5.76 pt low to Word's
+position. Regression-locked by
+`a_win_box_that_already_contains_the_hhea_gap_is_not_double_counted`.
+
+**Fix 2 — per-script font slots (`chinese`).** Layout always resolved the
+ASCII slot, so `w:eastAsia="SimSun"` and theme `majorEastAsia` were ignored
+and CJK text fell through to coverage fallback faces (Noto Serif JP).
+`slot_for_character` is now shared by profile coverage and layout; text is
+split at grapheme boundaries into Ascii/HAnsi/EastAsia/Cs groups, and each
+group resolves its own face. Complex/RTL runs keep whole-run shaping. Chinese
+body text now uses SimSun 12 pt at 23.251 pt pitch vs the truth's 23.25;
+page 1 SSIM is 0.9542 and page 4 is 0.9918. With the truth PDF's MingLiU
+subset provisioned locally (test-only; production stays fontless/on-demand),
+the Chinese font gate passes and the case scores 0.858972 / 8 pages. Its only
+failure is page-2 geometry (91.49% borders unmatched), the equation/table
+flow below.
+
+**Reverted probes (measured, net-negative).**
+- Final 96-DPI pitch quantization: japanese 0.834024, korean 0.827802.
+  Per-line rounding overshoots 11/13/14/16 pt and desyncs objects/pagination.
+- Japanese 1.2917 em band: japanese 0.816310. Plain text improves but the
+  inline-image Word lock (68.77 pt) and page flow regress.
+- Equation piecemeal: n-ary limits at 0.73 lifted Chinese page 2 to 0.873323
+  and MATH delimiter variants produced the correct 11 pt glyphs, but the
+  n-ary box grew 36.620 → 40.366 pt, shifting following tables (Japanese
+  page 3 borders 100% unmatched, Korean 0.643082). Reverted. A correct n-ary
+  box needs Word's `upperLimitGapMin`/`lowerLimitGapMin`/baseline-rise
+  placement and MATH fraction/delimiter ink extents, not stacked text boxes.
+
+**Verified state.** office-core 216 unit tests and all integration suites
+green. Fidelity: japanese 0.865350 pass, korean 0.900444 pass, complex
+0.968285 pass, chinese 0.858972 SSIM with page-2 geometry fail. The remaining
+CJK residuals are the joint line model (heading spacing/size bands) and the
+equation box model; both need the dedicated MATH/gap campaign rather than
+local constant edits.

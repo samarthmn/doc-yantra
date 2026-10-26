@@ -67,10 +67,17 @@ fn legacy_size_split(class: LegacyCjkClass, size_pt: f64) -> Option<(f64, f64)> 
 
 impl<'a> FaceMetrics<'a> {
     /// Builds metrics from a parsed face. **Prefers OS/2 `usWinAscent`/
-    /// `usWinDescent`** (what Word uses for the em box), falling back to hhea,
-    /// and retains the hhea line gap in either case. Fonts whose reported gap
-    /// would make the line box smaller than Word's classic 2355/2048-em
-    /// minimum receive only the missing compatibility leading.
+    /// `usWinDescent`** (what Word uses for the em box), falling back to hhea.
+    ///
+    /// Word uses the **larger** of the OS/2 Windows box and the hhea box, not
+    /// their sum. Calibri is the decisive case: its Windows box is
+    /// 1950 + 550 = 2500 units while its hhea box is
+    /// 1536 + 512 + 452 = 2500 units, so the hhea gap is already contained in
+    /// the Windows box. Adding the gap again produced 2952 units (1.441 em),
+    /// which pushed Word-matched documents one page long. Only the *surplus*
+    /// of the hhea box over the Windows box is added above the baseline.
+    /// Fonts whose resulting box is smaller than Word's classic
+    /// 2355/2048-em minimum receive only the missing compatibility leading.
     pub fn new(face: ttf_parser::Face<'a>) -> FaceMetrics<'a> {
         let units_per_em = face.units_per_em() as f64;
         let (ascent, descent) = match face.tables().os2 {
@@ -81,8 +88,13 @@ impl<'a> FaceMetrics<'a> {
             }
             None => (face.ascender() as f64, (face.descender() as f64).abs()),
         };
-        let line_gap =
-            f64::from(face.line_gap()).max(WORD_MIN_LINE_BOX_EM * units_per_em - ascent - descent);
+        let win_total = ascent + descent;
+        let hhea_total = f64::from(face.ascender())
+            + f64::from(face.descender()).abs()
+            + f64::from(face.line_gap());
+        let line_gap = (hhea_total - win_total)
+            .max(WORD_MIN_LINE_BOX_EM * units_per_em - win_total)
+            .max(0.0);
         FaceMetrics {
             face,
             units_per_em: units_per_em.max(1.0),
@@ -164,7 +176,13 @@ impl<'a> FaceMetrics<'a> {
         self.scale(self.ascent + self.line_gap, size_pt)
     }
 
-    /// Natural line height in points: `(ascent + descent + gap) / upem * size`.
+    /// Natural line height in points.
+    ///
+    /// For classic East Asian faces Word uses the measured per-size split as
+    /// the **line total**, not as a baseline share over a flat 1.3 em box.
+    /// The Word PDF truths are fractional (for example 23.25 pt at 12 pt with
+    /// 1.5 lines), so the split totals reproduce them directly; a blanket
+    /// 1.3 em or display-pixel quantization would drift at 11/13/14/16 pt.
     pub fn line_height_pt(&self, size_pt: f64) -> f64 {
         if let Some((asc, desc)) = self
             .legacy_class
@@ -292,9 +310,31 @@ fn pair_value(pair: PairAdjustment, left: GlyphId, right: GlyphId) -> Option<i32
 
 #[cfg(test)]
 mod tests {
-    use super::FaceMetrics;
+    use super::{FaceMetrics, LegacyCjkClass};
     use crate::layout::paragraph::apply_line_spacing;
     use crate::oxml::wml::LineSpacing;
+
+    fn with_hhea_metrics(sfnt: &[u8], ascent: i16, descent: i16, line_gap: i16) -> Vec<u8> {
+        let mut patched = sfnt.to_vec();
+        let table_count = usize::from(u16::from_be_bytes([patched[4], patched[5]]));
+        for index in 0..table_count {
+            let record = 12 + index * 16;
+            if patched.get(record..record + 4) != Some(b"hhea") {
+                continue;
+            }
+            let offset = u32::from_be_bytes([
+                patched[record + 8],
+                patched[record + 9],
+                patched[record + 10],
+                patched[record + 11],
+            ]) as usize;
+            patched[offset + 4..offset + 6].copy_from_slice(&ascent.to_be_bytes());
+            patched[offset + 6..offset + 8].copy_from_slice(&descent.to_be_bytes());
+            patched[offset + 8..offset + 10].copy_from_slice(&line_gap.to_be_bytes());
+            return patched;
+        }
+        panic!("fixture must contain hhea");
+    }
 
     fn with_zero_hhea_line_gap(sfnt: &[u8]) -> Vec<u8> {
         let mut patched = sfnt.to_vec();
@@ -314,6 +354,58 @@ mod tests {
             return patched;
         }
         panic!("fixture must contain hhea");
+    }
+
+    #[test]
+    fn legacy_cjk_faces_use_word_measured_size_band_totals() {
+        // SimSun's 11-12 pt band sums to 1.2917 em, the Word PDF truth
+        // (23.25 pt at 12 pt with 1.5 lines).
+        let sc =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/NotoSerifCJKsc-Regular.otf");
+        let face = ttf_parser::Face::parse(sc, 0).expect("packaged Noto Serif CJK SC");
+        let metrics = FaceMetrics::new(face)
+            .with_legacy_class(LegacyCjkClass::Sc)
+            .with_line_metrics_em(1.009375, 0.290625, 0.0);
+        assert!((metrics.line_height_pt(12.0) * 1.5 - 23.25).abs() < 0.001);
+        assert!((metrics.line_box_ascent_pt(12.0) - 1.00583 * 12.0).abs() < 1e-9);
+
+        // Japanese 11-12 pt keeps the class's flat 1.3 em base; the measured
+        // per-size split exists only for the 13 pt+ bands.
+        let jp =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/NotoSerifCJKjp-Regular.otf");
+        let face = ttf_parser::Face::parse(jp, 0).expect("packaged Noto Serif CJK JP");
+        let metrics = FaceMetrics::new(face)
+            .with_legacy_class(LegacyCjkClass::Jp)
+            .with_line_metrics_em(1.009375, 0.290625, 0.0);
+        assert!((metrics.line_height_pt(12.0) - 15.6).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(12.0) - 12.1125).abs() < 1e-9);
+
+        let tc =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/NotoSerifCJKtc-Regular.otf");
+        let face = ttf_parser::Face::parse(tc, 0).expect("packaged Noto Serif CJK TC");
+        let metrics = FaceMetrics::new(face)
+            .with_legacy_class(LegacyCjkClass::Tc)
+            .with_line_metrics_em(1.1006, 0.215, 0.0);
+        assert!((metrics.line_height_pt(14.0) - 1.3156 * 14.0).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(14.0) - 1.1006 * 14.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_win_box_that_already_contains_the_hhea_gap_is_not_double_counted() {
+        // Calibri/Carlito: OS/2 win box 1950 + 550 = 2500 units; hhea box
+        // 1536 + 512 + 452 = 2500 units. Word uses 1.2207 em, not 1.4414 em.
+        let bytes = with_hhea_metrics(
+            include_bytes!("../../fonts/carlito/Carlito-Regular.ttf"),
+            1536,
+            -512,
+            452,
+        );
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("patched Carlito face");
+        let metrics = FaceMetrics::new(face);
+        let size_pt = 11.0;
+
+        assert!((metrics.line_height_pt(size_pt) - 2500.0 / 2048.0 * size_pt).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(size_pt) - 1950.0 / 2048.0 * size_pt).abs() < 1e-9);
     }
 
     #[test]

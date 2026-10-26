@@ -1360,31 +1360,8 @@ fn record_coverage_with_slots(
 fn inferred_slots(text: &str) -> BTreeSet<FontSlot> {
     text.chars()
         .filter(|character| !character.is_control())
-        .map(slot_for_character)
+        .map(crate::fonts::slot_for_character)
         .collect()
-}
-
-fn slot_for_character(character: char) -> FontSlot {
-    let codepoint = character as u32;
-    if character.is_ascii() {
-        FontSlot::Ascii
-    } else if matches!(
-        codepoint,
-        0x4E00..=0x9FFF | 0x3040..=0x30FF | 0xAC00..=0xD7AF | 0x3000..=0x303F
-    ) {
-        FontSlot::EastAsia
-    } else if matches!(
-        codepoint,
-        0x0590..=0x08FF
-            | 0x0900..=0x0EFF
-            | 0x1000..=0x109F
-            | 0x1780..=0x17FF
-            | 0xFB1D..=0xFEFF
-    ) {
-        FontSlot::Cs
-    } else {
-        FontSlot::HAnsi
-    }
 }
 
 fn numbering_request_text(pattern: &str) -> String {
@@ -2282,7 +2259,7 @@ impl<'a> Collector<'a> {
         let mut groups: std::collections::BTreeMap<(String, FontSlot), String> =
             std::collections::BTreeMap::new();
         for character in text.chars().filter(|character| !character.is_control()) {
-            let slot = slot_for_character(character);
+            let slot = crate::fonts::slot_for_character(character);
             let family = matching::wml_run_family(&effective.fonts, slot, self.theme);
             groups.entry((family, slot)).or_default().push(character);
         }
