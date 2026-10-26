@@ -1,0 +1,10 @@
+title = "Table with gridSpan and vMerge"
+tier = "core"
+ssim_threshold = 0.94
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft Word 2021"
+ground_truth_exported_at = "2026-07-09"
+input_sha256 = "cd4aff185a025e73b36f0b939a840d66a2fcc5c0135f76c189d6060b269c9f1f"
+golden_sha256 = "be9a3f38e351454a77a68fc99e674dce703ec3906bd027d73f452535a6a4b9f9"
+notes = "Synthetic fixture; ground-truth.pdf metadata records Microsoft Word 2021, exported 2026-07-09."

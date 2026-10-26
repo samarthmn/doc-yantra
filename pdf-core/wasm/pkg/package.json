@@ -1,0 +1,69 @@
+{
+  "name": "@samarthmn/doc-yantra",
+  "description": "DocKosha pdf-core Zone 1 compiled to WebAssembly for in-app use (Node/Vercel + browser)",
+  "version": "0.0.27",
+  "license": "AGPL-3.0-only",
+  "files": [
+    "pdf_core_wasm_bg.wasm",
+    "pdf_core_wasm.js",
+    "pdf_core_wasm.d.ts",
+    "web",
+    "worker.js",
+    "worker.d.ts",
+    "worker-client.cjs",
+    "worker-entry.cjs",
+    "worker-ops.cjs",
+    "font-provider.cjs",
+    "font-provider.d.ts",
+    "font-manifest.json",
+    "build-fingerprint.json",
+    "LICENSE",
+    "COMMERCIAL-LICENSING.md",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_RUST_LICENSES.txt",
+    "NOTICE-ADOBE-CMAP.md"
+  ],
+  "main": "pdf_core_wasm.js",
+  "types": "pdf_core_wasm.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samarthmn/doc-yantra.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "peerDependencies": {
+    "@samarthmn/doc-yantra-fonts": "0.0.27"
+  },
+  "peerDependenciesMeta": {
+    "@samarthmn/doc-yantra-fonts": {
+      "optional": true
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./pdf_core_wasm.d.ts",
+      "require": "./pdf_core_wasm.js",
+      "default": "./pdf_core_wasm.js"
+    },
+    "./web": {
+      "types": "./web/pdf_core_wasm.d.ts",
+      "import": "./web/pdf_core_wasm.js",
+      "default": "./web/pdf_core_wasm.js"
+    },
+    "./pdf_core_wasm_bg.wasm": "./pdf_core_wasm_bg.wasm",
+    "./web/pdf_core_wasm_bg.wasm": "./pdf_core_wasm_bg.wasm",
+    "./font-provider": {
+      "types": "./font-provider.d.ts",
+      "require": "./font-provider.cjs",
+      "default": "./font-provider.cjs"
+    },
+    "./font-manifest.json": "./font-manifest.json",
+    "./worker": {
+      "types": "./worker.d.ts",
+      "require": "./worker.js",
+      "default": "./worker.js"
+    },
+    "./package.json": "./package.json"
+  }
+}

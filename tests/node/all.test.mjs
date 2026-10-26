@@ -1,0 +1,22 @@
+import "./package-features.test.mjs";
+import "./office.test.mjs";
+import "./office-coverage.test.mjs";
+import "./release-contract.test.mjs";
+import "./doc-yantra-font-provider.test.mjs";
+import "./font-cdn-tools.test.mjs";
+import "./github-packages-release.test.mjs";
+import "./license-metadata.test.mjs";
+import "./redact-package.test.mjs";
+import "./worker-pdf.test.mjs";
+import "./worker-office.test.mjs";
+import "./worker-client-contract.test.mjs";
+import "./golden-comparison.test.mjs";
+import "./hostile-inputs.test.mjs";
+import "./merge-watermark-parity.test.mjs";
+import "./parity-red.test.mjs";
+import "./error-envelope.test.mjs";
+import "./worker-types.test.mjs";
+import "./package-readiness.test.mjs";
+import "./release-isolation-and-publish.test.mjs";
+
+import "./production-document-regressions.test.mjs";

@@ -1,0 +1,12 @@
+title = "Complex DOCX image wrapping and table layout"
+tier = "core"
+ssim_threshold = 0.90
+geometry_median_pt = 5.1
+geometry_p95_pt = 10.2
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft Word LTSC"
+ground_truth_exported_at = "2026-07-13"
+input_sha256 = "8c2a8c4725e77bbfb4ddc7925674dc221611a39b876dbd7ea2efc829e70b8530"
+golden_sha256 = "e808b449e27436d74f81d5d5df9f9fe4daa4cc28e426ec1619bbe3fcfb55255c"
+notes = "Customer regression fixture exported directly from Microsoft Word LTSC."

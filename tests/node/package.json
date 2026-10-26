@@ -1,0 +1,8 @@
+{
+  "type": "module",
+  "main": "all.test.mjs",
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.2",
+    "pdfjs-dist": "3.11.174"
+  }
+}

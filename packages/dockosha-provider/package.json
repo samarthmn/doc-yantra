@@ -1,0 +1,56 @@
+{
+  "name": "@samarthmn/dockosha-provider-docyantra",
+  "version": "0.0.27",
+  "providerId": "docyantra",
+  "description": "AGPL-licensed DocYantra document-processing provider for DocKosha",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samarthmn/doc-yantra.git"
+  },
+  "license": "AGPL-3.0-only",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json",
+    "./build-fingerprint.json": "./build-fingerprint.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "COMMERCIAL-LICENSING.md",
+    "THIRD_PARTY_NOTICES.md",
+    "build-fingerprint.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@samarthmn/doc-yantra": "0.0.27",
+    "@samarthmn/doc-yantra-office": "0.0.27",
+    "zod": "^4.1.1"
+  },
+  "peerDependencies": {
+    "@samarthmn/doc-yantra-fonts": "0.0.27"
+  },
+  "peerDependenciesMeta": {
+    "@samarthmn/doc-yantra-fonts": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "https://npm.pkg.github.com"
+  }
+}

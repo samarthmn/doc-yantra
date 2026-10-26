@@ -1,0 +1,10 @@
+title = "Fixed-layout table with borders"
+tier = "core"
+ssim_threshold = 0.95
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft Word 2021"
+ground_truth_exported_at = "2026-07-09"
+input_sha256 = "ab292446aad859de175e52447d3e761a66660df34b9f5c3ab452e0ea0d35cbdf"
+golden_sha256 = "d74c801aa714a33dc69fee18a11249f2813a5f24b1a09dcde51c45d8466b2513"
+notes = "Synthetic fixture; ground-truth.pdf metadata records Microsoft Word 2021, exported 2026-07-09."

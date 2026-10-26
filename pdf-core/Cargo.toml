@@ -1,0 +1,120 @@
+[package]
+name = "pdf-core"
+version = "0.0.27"
+edition = "2024"
+rust-version = "1.89"
+description = "AGPL-licensed DocYantra PDF engine: assembly, watermarking, generation, rasterization, extraction, redaction, forms"
+license = "AGPL-3.0-only"
+publish = false
+# Integration tests live in the repository-wide tests/ folder.
+autotests = false
+
+[lib]
+name = "pdf_core"
+
+[[bin]]
+name = "pdfcore"
+path = "src/bin/pdfcore.rs"
+required-features = ["cli", "pdfium"]
+
+[features]
+default = ["pdfium", "cli", "parallel"]
+# Zone 2 (pdfium-backed): raster, extract, legacy redaction cross-checks, forms. Native-only.
+pdfium = ["dep:pdfium-render"]
+# The pdfcore CLI binary.
+cli = ["dep:clap"]
+# Parallel content parsing in lopdf (thread pools panic on wasm — native only).
+parallel = ["lopdf/rayon"]
+# wasm32 builds: routes lopdf's getrandom to the JS crypto backend.
+wasm = ["lopdf/wasm_js"]
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"], optional = true }
+csv = "1.4.0"
+image = { version = "0.25.9", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
+lopdf = { version = "0.42.0", default-features = false }
+pdf-writer = "0.15.0"
+pdfium-render = { version = "0.9.2", optional = true }
+pulldown-cmark = "0.13.4"
+subsetter = "0.2"
+thiserror = "2.0.18"
+ttf-parser = "0.25"
+text-core = { path = "../text-core" }
+
+[dev-dependencies]
+serial_test = "3.5.0"
+
+# pdfium raster work is unusably slow at opt-level 0; keep tests usable
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[[test]]
+name = "assembly_test"
+path = "../tests/pdf-core/assembly_test.rs"
+
+[[test]]
+name = "extract_test"
+path = "../tests/pdf-core/extract_test.rs"
+
+[[test]]
+name = "forms_test"
+path = "../tests/pdf-core/forms_test.rs"
+
+[[test]]
+name = "generate_test"
+path = "../tests/pdf-core/generate_test.rs"
+
+[[test]]
+name = "golden_comparison_test"
+path = "../tests/pdf-core/golden_comparison_test.rs"
+
+[[test]]
+name = "markdown_pagination_test"
+path = "../tests/pdf-core/markdown_pagination_test.rs"
+
+[[test]]
+name = "meta_test"
+path = "../tests/pdf-core/meta_test.rs"
+
+[[test]]
+name = "mockfiles_pipeline_test"
+path = "../tests/pdf-core/mockfiles_pipeline_test.rs"
+
+[[test]]
+name = "no_subset_font_test"
+path = "../tests/pdf-core/no_subset_font_test.rs"
+
+[[test]]
+name = "owner_locked_test"
+path = "../tests/pdf-core/owner_locked_test.rs"
+
+[[test]]
+name = "parity_red_test"
+path = "../tests/pdf-core/parity_red_test.rs"
+
+[[test]]
+name = "raster_test"
+path = "../tests/pdf-core/raster_test.rs"
+
+[[test]]
+name = "redact_pure_test"
+path = "../tests/pdf-core/redact_pure_test.rs"
+
+[[test]]
+name = "redact_test"
+path = "../tests/pdf-core/redact_test.rs"
+
+[[test]]
+name = "unicode_font_test"
+path = "../tests/pdf-core/unicode_font_test.rs"
+
+[[test]]
+name = "watermark_test"
+path = "../tests/pdf-core/watermark_test.rs"

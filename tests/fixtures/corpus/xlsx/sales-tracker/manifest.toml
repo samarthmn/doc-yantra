@@ -1,0 +1,11 @@
+title = "Sales tracker macro workbook (real-world synthetic)"
+tier = "core"
+ssim_threshold = 0.90
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft Excel for the web"
+ground_truth_exported_at = "2026-07-26"
+provenance = "web-export-unattested"
+input_sha256 = "86046570d27d86967e6a9142f449e20efa1e772421b9cbbf9f1fe4f2eee02436"
+golden_sha256 = "921d274446e038ee7a5db0d41596882897153791f6ccf7a3d2e53a169c87a65f"
+notes = "Real-world synthetic fixture exported 2026-07-26 by the maintainer. Office-for-the-web export: the PDF carries no producer metadata (web export, unattested); hashes pin the exact bytes. Workbook sources declare the landscape Letter pageSetup the export used. Calibrated 2026-07-26: baseline weighted SSIM 0.6646; threshold 0.90 is the gating core bar (user directive 2026-07-26)."

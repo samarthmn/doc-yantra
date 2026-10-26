@@ -1,0 +1,54 @@
+[package]
+name = "fidelity"
+version = "0.0.0"
+edition = "2024"
+publish = false
+# Integration tests live in the repository-wide tests/ folder.
+autotests = false
+
+# Native-only harness workspace. Keeping this separate prevents its
+# pdfium/corpus dependencies from entering office-core's public lockfile.
+[workspace]
+
+# Dev-only fidelity harness: converts corpus cases with office-core, rasterizes
+# both our output and the Word ground truth via pdf-core's pdfium, and scores
+# similarity (SSIM). Never published, never wasm.
+
+[features]
+default = ["layout-trace"]
+layout-trace = ["office-core/fidelity-diagnostics"]
+
+[dependencies]
+office-core = { path = ".." }
+pdf-core = { path = "../../pdf-core", default-features = false, features = ["pdfium"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+fast_image_resize = { version = "6", default-features = false, features = ["std"] }
+jpeg-encoder = "0.7"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+lopdf = { version = "0.42.0", default-features = false }
+ttf-parser = "0.25"
+skrifa = "0.42.1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+flate2 = "1"
+tar = "0.4"
+
+[[test]]
+name = "gdocs_conformance_test"
+path = "../../tests/fidelity/gdocs_conformance_test.rs"
+
+[[test]]
+name = "legacy_golden_parity_test"
+path = "../../tests/fidelity/legacy_golden_parity_test.rs"
+
+[[test]]
+name = "legacy_markdown_csv_parity_test"
+path = "../../tests/fidelity/legacy_markdown_csv_parity_test.rs"
+
+[[test]]
+name = "parity_red_test"
+path = "../../tests/fidelity/parity_red_test.rs"

@@ -1,0 +1,484 @@
+//! Per-face metrics: Word-compatible line height (OS/2 Windows ascent/descent
+//! plus compatibility leading), glyph lookup, advances, and kerning (legacy
+//! `kern` table + GPOS pair adjustment).
+
+pub use ttf_parser::GlyphId;
+use ttf_parser::gpos::{PairAdjustment, PositioningSubtable};
+
+/// Minimum line box used by Word for the classic 2048-upem Latin metrics:
+/// 1825 Win ascent + 443 Win descent + 87 compatibility leading.
+const WORD_MIN_LINE_BOX_EM: f64 = 2_355.0 / 2_048.0;
+
+/// Metrics for one parsed face. Cheap to construct; wraps a `ttf_parser::Face`.
+pub struct FaceMetrics<'a> {
+    face: ttf_parser::Face<'a>,
+    units_per_em: f64,
+    /// Ascent in font units (positive, up from baseline).
+    ascent: f64,
+    /// Descent in font units (positive magnitude, down from baseline).
+    descent: f64,
+    /// Line gap or Word compatibility leading in font units.
+    line_gap: f64,
+    /// Legacy East Asian class whose per-size line box splits Word measures
+    /// from the classic Windows fonts' bitmap-strike metrics (extracted from
+    /// the ground-truth PDF text matrices; see `size_split`).
+    legacy_class: Option<LegacyCjkClass>,
+}
+
+/// The classic Windows East Asian font classes with size-dependent line
+/// metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyCjkClass {
+    /// SimSun lineage (and its substitutes).
+    Sc,
+    /// MingLiU lineage.
+    Tc,
+    /// MS Gothic / MS Mincho lineage.
+    Jp,
+    /// Batang lineage.
+    Kr,
+}
+
+/// Measured `(ascent_em, descent_em)` line-box split for a legacy class at a
+/// size band, from exact Word PDF baselines (2026-07-18). `None` keeps the
+/// class's flat legacy constants.
+fn legacy_size_split(class: LegacyCjkClass, size_pt: f64) -> Option<(f64, f64)> {
+    use LegacyCjkClass::*;
+    let band = if size_pt < 11.75 {
+        0
+    } else if size_pt < 13.0 {
+        1
+    } else if size_pt < 15.0 {
+        2
+    } else {
+        3
+    };
+    // Equivalents of the calibrated jp/sc grid shifts (best measured state);
+    // refine per class with A/B-verified exact-baseline values only.
+    match (class, band) {
+        (Sc, 0 | 1) => Some((1.00583, 0.28587)),
+        (Sc, 2) => Some((1.005, 0.3283)),
+        (Sc, 3) => Some((1.020, 0.2821)),
+        (Jp, 2 | 3) => Some((1.029375, 0.270625)),
+        // MingLiU at 12 pt keeps its 1.0 em ascent-plus-leading above the
+        // baseline and grows below it, like SimSun's band: the `chinese`
+        // truth's MingLiU body lines measure 24.27 pt at 1.5 lines.
+        (Tc, 1) => Some((1.0, 0.34833)),
+        (Kr, 0) => Some((0.9609, 0.339075)),
+        _ => None,
+    }
+}
+
+impl<'a> FaceMetrics<'a> {
+    /// Builds metrics from a parsed face. **Prefers OS/2 `usWinAscent`/
+    /// `usWinDescent`** (what Word uses for the em box), falling back to hhea.
+    ///
+    /// Word uses the **larger** of the OS/2 Windows box and the hhea box, not
+    /// their sum. Calibri is the decisive case: its Windows box is
+    /// 1950 + 550 = 2500 units while its hhea box is
+    /// 1536 + 512 + 452 = 2500 units, so the hhea gap is already contained in
+    /// the Windows box. Adding the gap again produced 2952 units (1.441 em),
+    /// which pushed Word-matched documents one page long. Only the *surplus*
+    /// of the hhea box over the Windows box is added above the baseline.
+    /// Fonts whose resulting box is smaller than Word's classic
+    /// 2355/2048-em minimum receive only the missing compatibility leading.
+    pub fn new(face: ttf_parser::Face<'a>) -> FaceMetrics<'a> {
+        let units_per_em = face.units_per_em() as f64;
+        let (ascent, descent) = match face.tables().os2 {
+            Some(os2) => {
+                let asc = os2.windows_ascender() as f64;
+                let desc = (os2.windows_descender() as f64).abs();
+                (asc, desc)
+            }
+            None => (face.ascender() as f64, (face.descender() as f64).abs()),
+        };
+        let win_total = ascent + descent;
+        let hhea_total = f64::from(face.ascender())
+            + f64::from(face.descender()).abs()
+            + f64::from(face.line_gap());
+        let line_gap = (hhea_total - win_total)
+            .max(WORD_MIN_LINE_BOX_EM * units_per_em - win_total)
+            .max(0.0);
+        FaceMetrics {
+            face,
+            units_per_em: units_per_em.max(1.0),
+            ascent,
+            descent,
+            line_gap,
+            legacy_class: None,
+        }
+    }
+
+    /// Tags the face with a legacy East Asian class (see `legacy_size_split`).
+    pub fn with_legacy_class(mut self, class: LegacyCjkClass) -> Self {
+        self.legacy_class = Some(class);
+        self
+    }
+
+    /// The underlying parsed face.
+    pub fn face(&self) -> &ttf_parser::Face<'a> {
+        &self.face
+    }
+
+    /// Replaces the line-box metrics with explicit em-unit values, keeping
+    /// every glyph metric. Used to present metric-compatible line heights
+    /// for substituted faces whose own metrics would reflow the document.
+    pub fn with_line_metrics_em(mut self, ascent: f64, descent: f64, line_gap: f64) -> Self {
+        self.ascent = ascent * self.units_per_em;
+        self.descent = descent * self.units_per_em;
+        self.line_gap = line_gap * self.units_per_em;
+        self
+    }
+
+    /// Re-splits the face's own line gap evenly around the em box, matching
+    /// how Word centers the classic Windows East Asian faces (SimSun,
+    /// MS Gothic, Batang, MingLiU…): the baseline sits at
+    /// `winAscent + lineGap/2` from the line top instead of below the whole
+    /// gap. Total line height is unchanged.
+    pub fn with_centered_line_gap(mut self) -> Self {
+        let half = self.line_gap / 2.0;
+        self.descent += half;
+        self.line_gap = half;
+        self
+    }
+
+    /// Font design units per em.
+    pub fn units_per_em(&self) -> f64 {
+        self.units_per_em
+    }
+
+    fn scale(&self, units: f64, size_pt: f64) -> f64 {
+        units / self.units_per_em * size_pt
+    }
+
+    /// Ascent in points at `size_pt`.
+    pub fn ascent_pt(&self, size_pt: f64) -> f64 {
+        self.scale(self.ascent, size_pt)
+    }
+
+    /// Descent (positive magnitude) in points at `size_pt`.
+    pub fn descent_pt(&self, size_pt: f64) -> f64 {
+        self.scale(self.descent, size_pt)
+    }
+
+    /// Line gap in points at `size_pt`.
+    pub fn line_gap_pt(&self, size_pt: f64) -> f64 {
+        self.scale(self.line_gap, size_pt)
+    }
+
+    /// Baseline offset inside a Word line box. Word places the hhea line gap
+    /// above the glyph ascent rather than leaving it below the descent
+    /// (A/B-verified against the Ubuntu and Arial ground-truth pages; the
+    /// gap-below reading regresses both).
+    pub fn line_box_ascent_pt(&self, size_pt: f64) -> f64 {
+        if let Some((asc, _)) = self
+            .legacy_class
+            .and_then(|class| legacy_size_split(class, size_pt))
+        {
+            return asc * size_pt;
+        }
+        self.scale(self.ascent + self.line_gap, size_pt)
+    }
+
+    /// Natural line height in points.
+    ///
+    /// For classic East Asian faces Word uses the measured per-size split as
+    /// the **line total**, not as a baseline share over a flat 1.3 em box.
+    /// The Word PDF truths are fractional (for example 23.25 pt at 12 pt with
+    /// 1.5 lines), so the split totals reproduce them directly; a blanket
+    /// 1.3 em or display-pixel quantization would drift at 11/13/14/16 pt.
+    pub fn line_height_pt(&self, size_pt: f64) -> f64 {
+        if let Some((asc, desc)) = self
+            .legacy_class
+            .and_then(|class| legacy_size_split(class, size_pt))
+        {
+            return (asc + desc) * size_pt;
+        }
+        self.scale(self.ascent + self.descent + self.line_gap, size_pt)
+    }
+
+    /// OS/2 subscript baseline offset in points at the unscaled base size.
+    pub fn subscript_y_offset_pt(&self, size_pt: f64) -> Option<f64> {
+        self.face
+            .subscript_metrics()
+            .map(|metrics| self.scale(f64::from(metrics.y_offset), size_pt))
+    }
+
+    /// OS/2 superscript baseline offset in points at the unscaled base size.
+    pub fn superscript_y_offset_pt(&self, size_pt: f64) -> Option<f64> {
+        self.face
+            .superscript_metrics()
+            .map(|metrics| self.scale(f64::from(metrics.y_offset), size_pt))
+    }
+
+    /// Maps a character to a glyph id via cmap (formats 4 + 12 handled by ttf-parser).
+    pub fn glyph_id(&self, ch: char) -> Option<GlyphId> {
+        self.face.glyph_index(ch)
+    }
+
+    /// Horizontal advance of a glyph in points at `size_pt`.
+    pub fn advance_pt(&self, gid: GlyphId, size_pt: f64) -> f64 {
+        let adv = self.face.glyph_hor_advance(gid).unwrap_or(0) as f64;
+        self.scale(adv, size_pt)
+    }
+
+    /// Advance of a glyph in 1000-unit em space (for PDF `/W` arrays).
+    pub fn advance_1000(&self, gid: GlyphId) -> u16 {
+        let adv = self.face.glyph_hor_advance(gid).unwrap_or(0) as f64;
+        (adv / self.units_per_em * 1000.0).round() as u16
+    }
+
+    /// Underline (position, thickness) in points at `size_pt` (position is
+    /// negative below the baseline). Falls back to a synthetic metric.
+    pub fn underline_pt(&self, size_pt: f64) -> (f64, f64) {
+        match self.face.underline_metrics() {
+            Some(m) => (
+                self.scale(m.position as f64, size_pt),
+                self.scale(m.thickness as f64, size_pt),
+            ),
+            None => (-0.1 * size_pt, 0.05 * size_pt),
+        }
+    }
+
+    /// Kerning adjustment between `left` and `right` in points at `size_pt`
+    /// (legacy `kern` table first, then GPOS pair adjustment).
+    pub fn kern_pt(&self, left: GlyphId, right: GlyphId, size_pt: f64) -> f64 {
+        self.scale(self.kern_units(left, right) as f64, size_pt)
+    }
+
+    /// Kerning in font units (0 when neither table adjusts the pair).
+    pub fn kern_units(&self, left: GlyphId, right: GlyphId) -> i32 {
+        if let Some(kern) = self.face.tables().kern {
+            for subtable in kern.subtables {
+                if subtable.horizontal
+                    && !subtable.variable
+                    && let Some(v) = subtable.glyphs_kerning(left, right)
+                {
+                    return v as i32;
+                }
+            }
+        }
+        if let Some(gpos) = self.face.tables().gpos
+            && let Some(v) = gpos_pair_kern(gpos, left, right)
+        {
+            return v;
+        }
+        0
+    }
+}
+
+/// Finds a GPOS pair-adjustment x-advance for `(left, right)`, scanning all
+/// lookups' Pair subtables (Format 1 and 2). Returns the first match.
+fn gpos_pair_kern(
+    gpos: ttf_parser::opentype_layout::LayoutTable,
+    left: GlyphId,
+    right: GlyphId,
+) -> Option<i32> {
+    let lookups = gpos.lookups;
+    for i in 0..lookups.len() {
+        let Some(lookup) = lookups.get(i) else {
+            continue;
+        };
+        for subtable in lookup.subtables.into_iter::<PositioningSubtable>() {
+            if let PositioningSubtable::Pair(pair) = subtable
+                && let Some(adj) = pair_value(pair, left, right)
+            {
+                return Some(adj);
+            }
+        }
+    }
+    None
+}
+
+fn pair_value(pair: PairAdjustment, left: GlyphId, right: GlyphId) -> Option<i32> {
+    match pair {
+        PairAdjustment::Format1 { coverage, sets } => {
+            let idx = coverage.get(left)?;
+            let set = sets.get(idx)?;
+            let (first, _second) = set.get(right)?;
+            Some(first.x_advance as i32)
+        }
+        PairAdjustment::Format2 {
+            coverage,
+            classes,
+            matrix,
+        } => {
+            coverage.get(left)?; // left must be covered
+            let c1 = classes.0.get(left);
+            let c2 = classes.1.get(right);
+            let (first, _second) = matrix.get((c1, c2))?;
+            Some(first.x_advance as i32)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FaceMetrics, LegacyCjkClass};
+    use crate::layout::paragraph::apply_line_spacing;
+    use crate::oxml::wml::LineSpacing;
+
+    fn with_hhea_metrics(sfnt: &[u8], ascent: i16, descent: i16, line_gap: i16) -> Vec<u8> {
+        let mut patched = sfnt.to_vec();
+        let table_count = usize::from(u16::from_be_bytes([patched[4], patched[5]]));
+        for index in 0..table_count {
+            let record = 12 + index * 16;
+            if patched.get(record..record + 4) != Some(b"hhea") {
+                continue;
+            }
+            let offset = u32::from_be_bytes([
+                patched[record + 8],
+                patched[record + 9],
+                patched[record + 10],
+                patched[record + 11],
+            ]) as usize;
+            patched[offset + 4..offset + 6].copy_from_slice(&ascent.to_be_bytes());
+            patched[offset + 6..offset + 8].copy_from_slice(&descent.to_be_bytes());
+            patched[offset + 8..offset + 10].copy_from_slice(&line_gap.to_be_bytes());
+            return patched;
+        }
+        panic!("fixture must contain hhea");
+    }
+
+    fn with_zero_hhea_line_gap(sfnt: &[u8]) -> Vec<u8> {
+        let mut patched = sfnt.to_vec();
+        let table_count = usize::from(u16::from_be_bytes([patched[4], patched[5]]));
+        for index in 0..table_count {
+            let record = 12 + index * 16;
+            if patched.get(record..record + 4) != Some(b"hhea") {
+                continue;
+            }
+            let offset = u32::from_be_bytes([
+                patched[record + 8],
+                patched[record + 9],
+                patched[record + 10],
+                patched[record + 11],
+            ]) as usize;
+            patched[offset + 8..offset + 10].copy_from_slice(&0_i16.to_be_bytes());
+            return patched;
+        }
+        panic!("fixture must contain hhea");
+    }
+
+    #[test]
+    fn legacy_cjk_faces_use_word_measured_size_band_totals() {
+        // SimSun's 11-12 pt band sums to 1.2917 em, the Word PDF truth
+        // (23.25 pt at 12 pt with 1.5 lines).
+        let sc =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/NotoSerifCJKsc-Regular.otf");
+        let face = ttf_parser::Face::parse(sc, 0).expect("packaged Noto Serif CJK SC");
+        let metrics = FaceMetrics::new(face)
+            .with_legacy_class(LegacyCjkClass::Sc)
+            .with_line_metrics_em(1.009375, 0.290625, 0.0);
+        assert!((metrics.line_height_pt(12.0) * 1.5 - 23.25).abs() < 0.001);
+        assert!((metrics.line_box_ascent_pt(12.0) - 1.00583 * 12.0).abs() < 1e-9);
+
+        // Japanese 11-12 pt keeps the class's flat 1.3 em base; the measured
+        // per-size split exists only for the 13 pt+ bands.
+        let jp =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/NotoSerifCJKjp-Regular.otf");
+        let face = ttf_parser::Face::parse(jp, 0).expect("packaged Noto Serif CJK JP");
+        let metrics = FaceMetrics::new(face)
+            .with_legacy_class(LegacyCjkClass::Jp)
+            .with_line_metrics_em(1.009375, 0.290625, 0.0);
+        assert!((metrics.line_height_pt(12.0) - 15.6).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(12.0) - 12.1125).abs() < 1e-9);
+
+        let tc =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/NotoSerifCJKtc-Regular.otf");
+        let face = ttf_parser::Face::parse(tc, 0).expect("packaged Noto Serif CJK TC");
+        let metrics = FaceMetrics::new(face)
+            .with_legacy_class(LegacyCjkClass::Tc)
+            .with_line_metrics_em(1.1006, 0.215, 0.0);
+        assert!((metrics.line_height_pt(14.0) - 1.3156 * 14.0).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(14.0) - 1.1006 * 14.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mingliu_class_grows_below_the_baseline_at_twelve_points() {
+        // Word's `chinese` truth: a 12 pt, 1.5-line body line carrying
+        // MingLiU runs beside SimSun sits 1.02 pt taller below the baseline
+        // than a SimSun-only line (24.27 pt vs 23.25 pt), while its baseline
+        // offset is unchanged. MingLiU keeps its 1.0 em ascent-plus-leading
+        // above the baseline and takes the East Asian growth below it.
+        let tc =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/NotoSerifCJKtc-Regular.otf");
+        let face = ttf_parser::Face::parse(tc, 0).expect("packaged Noto Serif CJK TC");
+        let metrics = FaceMetrics::new(face)
+            .with_legacy_class(LegacyCjkClass::Tc)
+            .with_line_metrics_em(1.1006, 0.215, 0.0);
+        assert!((metrics.line_box_ascent_pt(12.0) - 12.0).abs() < 1e-9);
+        assert!((metrics.line_height_pt(12.0) * 1.5 - 24.27).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_win_box_that_already_contains_the_hhea_gap_is_not_double_counted() {
+        // Calibri/Carlito: OS/2 win box 1950 + 550 = 2500 units; hhea box
+        // 1536 + 512 + 452 = 2500 units. Word uses 1.2207 em, not 1.4414 em.
+        let bytes = with_hhea_metrics(
+            include_bytes!("../../fonts/carlito/Carlito-Regular.ttf"),
+            1536,
+            -512,
+            452,
+        );
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("patched Carlito face");
+        let metrics = FaceMetrics::new(face);
+        let size_pt = 11.0;
+
+        assert!((metrics.line_height_pt(size_pt) - 2500.0 / 2048.0 * size_pt).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(size_pt) - 1950.0 / 2048.0 * size_pt).abs() < 1e-9);
+    }
+
+    #[test]
+    fn word_line_box_keeps_115_percent_minimum_when_hhea_gap_is_zero() {
+        let bytes = with_zero_hhea_line_gap(include_bytes!(
+            "../../fonts/liberation/LiberationSerif-Regular.ttf"
+        ));
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("patched Liberation Serif face");
+        assert_eq!(face.line_gap(), 0, "fixture must exercise a zero hhea gap");
+        let metrics = FaceMetrics::new(face);
+        let size_pt = 11.0;
+
+        // Word's Times New Roman PDF line box is 2355/2048 em: at 11pt its
+        // natural height is 12.64892578125pt and its baseline is 10.26953125pt
+        // below the line top, even when the supplied face reports hhea gap 0.
+        assert!((metrics.line_height_pt(size_pt) - 12.648_925_781_25).abs() < 1e-9);
+        assert!((metrics.line_box_ascent_pt(size_pt) - 10.269_531_25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn liberation_sans_natural_and_auto_line_heights_include_hhea_line_gap() {
+        let bytes =
+            include_bytes!("../../../packages/doc-yantra-fonts/fonts/LiberationSans-Regular.ttf");
+        let face = ttf_parser::Face::parse(bytes, 0).expect("bundled Liberation Sans face");
+        let os2 = face.tables().os2.expect("Liberation Sans OS/2 table");
+        assert!(face.line_gap() > 0, "fixture must exercise a real hhea gap");
+
+        let size_pt = 12.0;
+        let expected_natural = (f64::from(os2.windows_ascender())
+            + f64::from(os2.windows_descender()).abs()
+            + f64::from(face.line_gap()))
+            / f64::from(face.units_per_em())
+            * size_pt;
+        let line_gap = face.line_gap();
+        let units_per_em = face.units_per_em();
+        let metrics = FaceMetrics::new(face);
+
+        assert!(
+            (metrics.line_height_pt(size_pt) - expected_natural).abs() < 1e-9,
+            "actual={} expected={} asc={} desc={} gap={} upem={}",
+            metrics.line_height_pt(size_pt),
+            expected_natural,
+            os2.windows_ascender(),
+            os2.windows_descender(),
+            line_gap,
+            units_per_em,
+        );
+        assert!(
+            (apply_line_spacing(Some(LineSpacing::Auto(276.0 / 240.0)), expected_natural)
+                - 1.15 * expected_natural)
+                .abs()
+                < 1e-9
+        );
+    }
+}
