@@ -15,7 +15,7 @@ This repo is DocKosha's **PDF engine** and its distributable
 | `.github/workflows/publish-npm.yml`  | Tag-triggered GitHub Packages publication and GitHub release creation after immutable version and tarball checks.                                                                                                                                                                               |
 | `tests/`                             | Every test suite and fixture: `node/` (package regression suite), `smoke/` (self-contained package checks), `pdf-core/`, `office-core/`, `text-core/` and `fidelity/` (Rust integration tests), and `fixtures/` (shared documents and the fidelity corpus). See [`tests/README.md`](tests/README.md). |
 
-The first-party source and wrapper code is licensed under the AGPL-3.0-only
+The first-party source and wrapper code is licensed under the AGPL-3.0-or-later
 terms in [`LICENSE`](LICENSE). Enterprise licensing is available only through a
 separate signed agreement; see [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md).
 See
@@ -37,8 +37,8 @@ Packages registry, then consume the exact release:
 
 ```jsonc
 // app package.json — @samarthmn resolves from GitHub Packages
-"@samarthmn/doc-yantra": "0.0.27",
-"@samarthmn/doc-yantra-office": "0.0.27"
+"@samarthmn/doc-yantra": "0.0.28",
+"@samarthmn/doc-yantra-office": "0.0.28"
 ```
 
 > Releases stay on the **0.0.x** line. On `0.0.x`, a caret pins the exact patch
@@ -139,7 +139,7 @@ audits every `npm pack`, enforces core/font byte budgets, and runs package smoke
 checks without changing repository or registry state:
 
 ```bash
-scripts/release.sh            # validate the 0.0.27 candidate
+scripts/release.sh            # validate the 0.0.28 candidate
 scripts/release.sh --publish  # push its tag and start GitHub Packages release
 ```
 

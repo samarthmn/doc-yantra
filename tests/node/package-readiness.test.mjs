@@ -46,8 +46,8 @@ test("all packages declare their applicable licenses and carry the commercial li
   ]) {
     const manifest = JSON.parse(readFileSync(join(root, relative, "package.json"), "utf8"));
     const expectedLicense = relative === "packages/doc-yantra-fonts"
-      ? "AGPL-3.0-only AND OFL-1.1"
-      : "AGPL-3.0-only";
+      ? "AGPL-3.0-or-later AND OFL-1.1"
+      : "AGPL-3.0-or-later";
     assert.equal(manifest.license, expectedLicense, `${relative}: package metadata`);
     assert.deepEqual(
       readFileSync(join(root, relative, "COMMERCIAL-LICENSING.md")),

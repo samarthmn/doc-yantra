@@ -1,7 +1,7 @@
 # Third-party notices
 
 DocYantra first-party source and wrapper code is distributed under the
-AGPL-3.0-only license in [`LICENSE`](LICENSE). This notice does not change the
+AGPL-3.0-or-later license in [`LICENSE`](LICENSE). This notice does not change the
 terms of any third-party component.
 
 The following bundled or redistributed materials retain their upstream terms:
