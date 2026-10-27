@@ -1,7 +1,7 @@
 # Trademarks
 
 DocKosha and DocYantra are trademarks or service marks of their respective
-owners. The AGPL-3.0-only license does not grant trademark rights. You may
+owners. The AGPL-3.0-or-later license does not grant trademark rights. You may
 refer to the project and package names accurately, but do not imply endorsement
 or use the marks as your product name.
 

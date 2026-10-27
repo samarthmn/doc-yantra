@@ -1,10 +1,10 @@
 [package]
 name = "office-core"
-version = "0.0.27"            # keep in lockstep with pdf-core's current version line
+version = "0.0.28"            # keep in lockstep with pdf-core's current version line
 edition = "2024"
 rust-version = "1.89"
 description = "AGPL-licensed DocYantra Office-to-PDF engine: DOCX/PPTX/XLSX layout and PDF emission, pure Rust"
-license = "AGPL-3.0-only"
+license = "AGPL-3.0-or-later"
 publish = false
 # Integration tests live in the repository-wide tests/ folder.
 autotests = false

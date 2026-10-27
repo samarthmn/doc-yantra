@@ -1,9 +1,9 @@
 # pdf-core — DocKosha's native PDF engine
 
-AGPL-3.0-only Rust engine for every PDF-native operation DocKosha performs.
+AGPL-3.0-or-later Rust engine for every PDF-native operation DocKosha performs.
 Replaces the pdf-lib (Node) + PyMuPDF (Python, AGPL) paths inside DocYantra
 with one in-process, memory-safe library — no subprocess spawns, no
-cross-language hops. First-party code is under AGPL-3.0-only;
+cross-language hops. First-party code is under AGPL-3.0-or-later;
 upstream dependencies retain their own notices (lopdf/pdf-writer: MIT/Apache-2.0;
 pdfium: BSD — the AGPL PyMuPDF dependency is gone).
 
