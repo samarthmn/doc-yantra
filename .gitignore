@@ -1,0 +1,37 @@
+# Rust
+target/
+**/*.rs.bk
+
+# pdfium binaries and headers are fetched per-platform. Legal notices are
+# committed for dependency attribution.
+pdf-core/pdfium/*
+!pdf-core/pdfium/LICENSE
+!pdf-core/pdfium/licenses/
+!pdf-core/pdfium/licenses/**
+
+# OS
+.DS_Store
+
+# Test-only npm deps for the PDF.js paint regression (tests/node/package.json).
+tests/node/node_modules/
+
+# Per-task scratch artifacts (never committed).
+/tmp/
+
+# Local agent instructions, agent/editor state and caches (never committed).
+/AGENTS.md
+/CLAUDE.md
+.claude/
+.superpowers/
+.cache/
+cache/
+caches/
+**/.cache/
+**/cache/
+**/caches/
+
+# Hash-verified live font cache for the dev-only Office fidelity harness.
+/office-core/fidelity/fonts-cache/
+
+# The wasm-pack build output (pdf-core/wasm/pkg) IS committed intentionally,
+# so consumers and CI can install without a Rust toolchain. Do not ignore it.

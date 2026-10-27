@@ -1,0 +1,5 @@
+/target
+/pdfium/*
+!/pdfium/LICENSE
+!/pdfium/licenses/
+!/pdfium/licenses/*

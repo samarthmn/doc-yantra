@@ -1,0 +1,141 @@
+[package]
+name = "office-core"
+version = "0.0.27"            # keep in lockstep with pdf-core's current version line
+edition = "2024"
+rust-version = "1.89"
+description = "AGPL-licensed DocYantra Office-to-PDF engine: DOCX/PPTX/XLSX layout and PDF emission, pure Rust"
+license = "AGPL-3.0-only"
+publish = false
+# Integration tests live in the repository-wide tests/ folder.
+autotests = false
+
+[lib]
+name = "office_core"
+
+[[bin]]
+name = "officecore"
+path = "src/bin/officecore.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "bundled-fonts"]
+cli = ["dep:clap"]
+# Embeds native fixture fonts plus shared faces from packages/doc-yantra-fonts.
+# This remains for hermetic native tests/fidelity only.
+# Production wasm disables default features and receives fonts from the host.
+bundled-fonts = []
+# wasm32 builds: JS crypto for any randomness pulled in transitively.
+wasm = []
+# Native/wasm-safe serializable line traces for the fidelity harness.
+fidelity-diagnostics = []
+
+[dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+roxmltree = "0.20"
+ttf-parser = "0.25"
+subsetter = "0.2"
+unicode-linebreak = "0.1"
+unicode-bidi = "0.3"
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+text-core = { path = "../text-core" }
+pdf-writer = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# `benchmark` is an empty upstream feature that exposes the audited integer FDCT.
+jpeg-encoder = { version = "=0.7.0", default-features = false, features = ["benchmark"] }
+miniz_oxide = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+
+[dev-dependencies]
+serial_test = "3"
+
+# The fidelity harness has its own workspace and lockfile. Public Office checks
+# must not resolve its pdfium/corpus-only dependency graph.
+[workspace]
+# The wasm crate is built standalone by wasm/build.sh (wasm-pack), not as a
+# workspace member.
+exclude = ["wasm"]
+
+[[test]]
+name = "cff_pdfjs_compat_test"
+path = "../tests/office-core/cff_pdfjs_compat_test.rs"
+
+[[test]]
+name = "cjk_autospace_bold_test"
+path = "../tests/office-core/cjk_autospace_bold_test.rs"
+
+[[test]]
+name = "docx_image_export_test"
+path = "../tests/office-core/docx_image_export_test.rs"
+
+[[test]]
+name = "docx_layout_test"
+path = "../tests/office-core/docx_layout_test.rs"
+
+[[test]]
+name = "docx_sections_test"
+path = "../tests/office-core/docx_sections_test.rs"
+
+[[test]]
+name = "docx_table_style_test"
+path = "../tests/office-core/docx_table_style_test.rs"
+
+[[test]]
+name = "docx_extended_test"
+path = "../tests/office-core/docx_extended_test.rs"
+
+[[test]]
+name = "envelope_parity_test"
+path = "../tests/office-core/envelope_parity_test.rs"
+
+[[test]]
+name = "fidelity_diagnostics_test"
+path = "../tests/office-core/fidelity_diagnostics_test.rs"
+
+[[test]]
+name = "font_resolution_test"
+path = "../tests/office-core/font_resolution_test.rs"
+
+[[test]]
+name = "gdocs_fixtures_test"
+path = "../tests/office-core/gdocs_fixtures_test.rs"
+
+[[test]]
+name = "numbering_empty_paragraph_test"
+path = "../tests/office-core/numbering_empty_paragraph_test.rs"
+
+[[test]]
+name = "numbering_fallback_test"
+path = "../tests/office-core/numbering_fallback_test.rs"
+
+[[test]]
+name = "numbering_style_override_test"
+path = "../tests/office-core/numbering_style_override_test.rs"
+
+[[test]]
+name = "opc_test"
+path = "../tests/office-core/opc_test.rs"
+
+[[test]]
+name = "pdf_font_embedding_test"
+path = "../tests/office-core/pdf_font_embedding_test.rs"
+
+[[test]]
+name = "pptx_test"
+path = "../tests/office-core/pptx_test.rs"
+
+[[test]]
+name = "public_compat_test"
+path = "../tests/office-core/public_compat_test.rs"
+
+[[test]]
+name = "wml_test"
+path = "../tests/office-core/wml_test.rs"
+
+[[test]]
+name = "xlsx_test"
+path = "../tests/office-core/xlsx_test.rs"

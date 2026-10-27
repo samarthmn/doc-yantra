@@ -1,0 +1,19 @@
+[package]
+name = "text-core"
+version = "0.0.10"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+publish = false
+# Integration tests live in the repository-wide tests/ folder.
+autotests = false
+
+[dependencies]
+harfrust = "0.12"
+ttf-parser = "0.25"
+unicode-bidi = "0.3"
+unicode-script = "0.5"
+
+[[test]]
+name = "shaping"
+path = "../tests/text-core/shaping.rs"

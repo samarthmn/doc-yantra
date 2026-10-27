@@ -1,0 +1,88 @@
+name: DocYantra package readiness
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-and-core-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.5.1
+      - name: Set up pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal --target wasm32-unknown-unknown
+      - name: Install pinned Rust license inventory tool
+        run: cargo install --locked --features cli cargo-about@0.9.2
+      - name: Verify locked Rust dependency notices
+        run: scripts/generate-rust-license-notices.sh --check
+      - name: Audit packed packages
+        run: node scripts/package-audit.mjs
+      - name: Run Node regression checks
+        run: node --test tests/node/all.test.mjs
+      - name: Run package smoke checks
+        run: node --test tests/smoke/*.test.mjs
+      - name: Test PDF engine
+        run: cargo test --manifest-path pdf-core/Cargo.toml --no-default-features --features wasm
+      - name: Test Office engine
+        run: cargo test --manifest-path office-core/Cargo.toml
+      - name: Verify locked Office library workspace
+        run: |
+          cargo metadata --manifest-path office-core/Cargo.toml --locked --no-deps --format-version 1
+          cargo check --manifest-path office-core/Cargo.toml --locked --lib --no-default-features --features wasm
+
+  package-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+      - name: Install pinned npm
+        run: npm install --global npm@11.5.1
+      - name: Set up pinned Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal --target wasm32-unknown-unknown
+      - name: Install pinned Rust license inventory tool
+        run: cargo install --locked --features cli cargo-about@0.9.2
+      - name: Verify locked Rust dependency notices
+        run: scripts/generate-rust-license-notices.sh --check
+      - name: Verify committed generated package fingerprints
+        run: |
+          node scripts/source-fingerprint.mjs pdf --verify pdf-core/wasm/pkg/build-fingerprint.json
+          node scripts/source-fingerprint.mjs office --verify office-core/wasm/pkg/build-fingerprint.json
+          node scripts/source-fingerprint.mjs adapter --verify packages/dockosha-provider/build-fingerprint.json
+
+      # WASM output is sensitive to runner-level linker and Binaryen details.
+      # Fingerprints tie the reviewed package bytes to their source inputs.
+      - name: Build adapter from locally packed committed engine artifacts
+        run: |
+          mkdir -p tmp/local-packages
+          (cd pdf-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
+          (cd office-core/wasm/pkg && npm pack --ignore-scripts --pack-destination ../../../tmp/local-packages)
+          VERSION="$(node -p "require('./pdf-core/wasm/pkg/package.json').version")"
+          PDF_TARBALL="../../tmp/local-packages/samarthmn-doc-yantra-${VERSION}.tgz"
+          OFFICE_TARBALL="../../tmp/local-packages/samarthmn-doc-yantra-office-${VERSION}.tgz"
+          test -f "$PDF_TARBALL" && test -f "$OFFICE_TARBALL"
+          cd packages/dockosha-provider
+          npm install --ignore-scripts --no-save --package-lock=false \
+            "$PDF_TARBALL" \
+            "$OFFICE_TARBALL"
+          npm run build
+          cd ../..
+          node scripts/source-fingerprint.mjs adapter --out packages/dockosha-provider/build-fingerprint.json
+          git diff --exit-code -- packages/dockosha-provider/dist packages/dockosha-provider/build-fingerprint.json

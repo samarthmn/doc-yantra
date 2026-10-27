@@ -1,0 +1,85 @@
+{
+  "name": "@samarthmn/doc-yantra-office",
+  "description": "DocKosha office-core Office->PDF engine compiled to WebAssembly (Node/Vercel + browser)",
+  "version": "0.0.27",
+  "license": "AGPL-3.0-only",
+  "files": [
+    "office_core_wasm_bg.wasm",
+    "office_core_wasm.js",
+    "office_core_wasm.d.ts",
+    "web",
+    "index.cjs",
+    "index.d.ts",
+    "font-provider.cjs",
+    "font-provider.d.ts",
+    "fontsource-provider.cjs",
+    "fontsource-provider.d.ts",
+    "noto-fallback.cjs",
+    "noto-fallback.d.ts",
+    "worker.js",
+    "worker.d.ts",
+    "worker-client.cjs",
+    "worker-entry.cjs",
+    "worker-ops.cjs",
+    "build-fingerprint.json",
+    "LICENSE",
+    "COMMERCIAL-LICENSING.md",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_RUST_LICENSES.txt"
+  ],
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samarthmn/doc-yantra.git"
+  },
+  "peerDependencies": {
+    "@samarthmn/doc-yantra-fonts": "0.0.27"
+  },
+  "peerDependenciesMeta": {
+    "@samarthmn/doc-yantra-fonts": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    },
+    "./web": {
+      "types": "./web/web-index.d.ts",
+      "import": "./web/web-index.js",
+      "default": "./web/web-index.js"
+    },
+    "./web/font-provider": {
+      "types": "./web/font-provider.d.ts",
+      "import": "./web/font-provider.js"
+    },
+    "./web/fontsource-provider": {
+      "types": "./web/fontsource-provider.d.ts",
+      "import": "./web/fontsource-provider.js"
+    },
+    "./fontsource-provider": {
+      "types": "./fontsource-provider.d.ts",
+      "require": "./fontsource-provider.cjs",
+      "default": "./fontsource-provider.cjs"
+    },
+    "./noto-fallback": {
+      "types": "./noto-fallback.d.ts",
+      "require": "./noto-fallback.cjs",
+      "default": "./noto-fallback.cjs"
+    },
+    "./office_core_wasm_bg.wasm": "./office_core_wasm_bg.wasm",
+    "./web/office_core_wasm_bg.wasm": "./office_core_wasm_bg.wasm",
+    "./worker": {
+      "types": "./worker.d.ts",
+      "require": "./worker.js",
+      "default": "./worker.js"
+    },
+    "./package.json": "./package.json"
+  }
+}

@@ -1,0 +1,11 @@
+title = "Project status deck (real-world synthetic)"
+tier = "core"
+ssim_threshold = 0.90
+expected_fonts = ["Calibri"]
+max_page_count_delta = 0
+word_version = "Microsoft PowerPoint for the web"
+ground_truth_exported_at = "2026-07-26"
+provenance = "web-export-unattested"
+input_sha256 = "e02b72a839e99c3921366bd1ea5246a153adb5897a34a1ce08790e934d395f11"
+golden_sha256 = "5a839692667b8a59490e96feef3f68b4e6edc266551f7c25f7023d796bf52797"
+notes = "Real-world synthetic fixture exported 2026-07-26 by the maintainer. Office-for-the-web export: the PDF carries no producer metadata (web export, unattested); hashes pin the exact bytes. Calibrated 2026-07-26: baseline weighted SSIM 0.8185; threshold 0.90 is the gating core bar (user directive 2026-07-26)."

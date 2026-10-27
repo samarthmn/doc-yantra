@@ -1,0 +1,169 @@
+{
+  "target": "office",
+  "sourceHash": "18a4e0b8ff88b172100cb66d712bb63d1833b050900aedb37c095074c626d48c",
+  "fileCount": 121,
+  "artifactHash": "88ae68a37c134a277f12b4f51c55b5121d9c1f0d1392d73ca0ebba5ccd76d9ee",
+  "artifactFileCount": 32,
+  "artifacts": [
+    {
+      "path": "COMMERCIAL-LICENSING.md",
+      "sha256": "812dad7da869ac16688c90fea09c408612c24c0403915d1e3870c2483fb93938",
+      "byteLength": 582
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "byteLength": 34523
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "sha256": "0d90cf56d11f8efe91e57d21a2320ea27d5d664b7b915df96915a85638d32d8e",
+      "byteLength": 1252
+    },
+    {
+      "path": "THIRD_PARTY_RUST_LICENSES.txt",
+      "sha256": "202c76dd7b174a5c80e95968aec9872838025986f266286059e609059d30f263",
+      "byteLength": 241907
+    },
+    {
+      "path": "font-provider.cjs",
+      "sha256": "38ec946a76e9a664e96ee7d359f18d627723616f6f61ef24f1d5de56e2574bd3",
+      "byteLength": 24509
+    },
+    {
+      "path": "font-provider.d.ts",
+      "sha256": "d115d68222f1f54df00b58fb00e1ef1d3a218b8dbab00b2316493a87e97537b2",
+      "byteLength": 3931
+    },
+    {
+      "path": "fontsource-provider.cjs",
+      "sha256": "849e9387fbaf4569bf70588da7d3b8b4a307f6f73a950f7587c8276d045faea6",
+      "byteLength": 20988
+    },
+    {
+      "path": "fontsource-provider.d.ts",
+      "sha256": "603ad49812d2d84ba0e450d2cc1fe18e43332fc99bd1310e0d471bd5d985dc9c",
+      "byteLength": 1292
+    },
+    {
+      "path": "index.cjs",
+      "sha256": "962c086680544ad7dd7a307cc2c1813a2adb3b342982859cd116d7c2a9ef38cb",
+      "byteLength": 899
+    },
+    {
+      "path": "index.d.ts",
+      "sha256": "f071a46e28654cb4c3e08ec8e5f9284e5ae86b8da3954c72a1d72e4bdf98abcb",
+      "byteLength": 141
+    },
+    {
+      "path": "noto-fallback.cjs",
+      "sha256": "1ca4bfd347709063c84e3609d38b880469889fa8081bcf97eea06b5ec2daab69",
+      "byteLength": 9614
+    },
+    {
+      "path": "noto-fallback.d.ts",
+      "sha256": "2a4dad16da142451f858ac080ab372a660b183da311266ea7a2ea93e6cf8c944",
+      "byteLength": 1705
+    },
+    {
+      "path": "office_core_wasm.d.ts",
+      "sha256": "d36f70a7c0c24b4338ba3b0333dd22ddfd2d1db2a03b8380ac1c859e30cde757",
+      "byteLength": 1814
+    },
+    {
+      "path": "office_core_wasm.js",
+      "sha256": "f776213f9ab77be31818a6811e41aae78baff6309b031a7ee134cc94d026161f",
+      "byteLength": 14500
+    },
+    {
+      "path": "office_core_wasm_bg.wasm",
+      "sha256": "c2fa7cd90f619946998484f963247e0e46c1db60bfa7c7206eca6c414b3941b4",
+      "byteLength": 4674824
+    },
+    {
+      "path": "office_core_wasm_bg.wasm.d.ts",
+      "sha256": "61092ff3d6ec89a18ecb353770921eb2271e10bbbcb12c9bf198f1fef75034e3",
+      "byteLength": 1365
+    },
+    {
+      "path": "package.json",
+      "sha256": "0a67ada9a7eec2a6471e47f3bdd4b34d5cbd0097e243a57aefe08d3a0188aeca",
+      "byteLength": 2308
+    },
+    {
+      "path": "web/font-provider.d.ts",
+      "sha256": "f246b4ab1aebaa64358dc0ab24480282959d33d63e67d6b8e02aae684489ec30",
+      "byteLength": 626
+    },
+    {
+      "path": "web/font-provider.js",
+      "sha256": "6b320898ffb57f44c98e3a245c7643a04ab83f44ca703829eb7a2f8c798701c8",
+      "byteLength": 24648
+    },
+    {
+      "path": "web/fontsource-provider.d.ts",
+      "sha256": "603ad49812d2d84ba0e450d2cc1fe18e43332fc99bd1310e0d471bd5d985dc9c",
+      "byteLength": 1292
+    },
+    {
+      "path": "web/fontsource-provider.js",
+      "sha256": "f120c52290528141a7045d1629c946e24da7d638a7f25335d4fbed0b406a0e43",
+      "byteLength": 20991
+    },
+    {
+      "path": "web/office_core_wasm.d.ts",
+      "sha256": "550507fd0afd2e4f6c65111f51b6f7bcf75fa6a827beeb16eb2c6ec6264be886",
+      "byteLength": 4122
+    },
+    {
+      "path": "web/office_core_wasm.js",
+      "sha256": "5ff321d4dd862ce71e456920646bdec14ad94ca8ee88874a6fbcf6f2f47d5e04",
+      "byteLength": 17369
+    },
+    {
+      "path": "web/office_core_wasm_bg.wasm.d.ts",
+      "sha256": "61092ff3d6ec89a18ecb353770921eb2271e10bbbcb12c9bf198f1fef75034e3",
+      "byteLength": 1365
+    },
+    {
+      "path": "web/package.json",
+      "sha256": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+      "byteLength": 23
+    },
+    {
+      "path": "web/web-index.d.ts",
+      "sha256": "f138b99a277ca56e48551606d86a49313e59682c37b600eccf51a3ab7487f6ba",
+      "byteLength": 108
+    },
+    {
+      "path": "web/web-index.js",
+      "sha256": "37f0d0cafa11813cbd414550d183a0b623f860818889626c2ca3952ca5d6b78c",
+      "byteLength": 559
+    },
+    {
+      "path": "worker-client.cjs",
+      "sha256": "f27c1eb547205fba8d609ce3b075acddd596603245c7baefaea914fd9b2a3dae",
+      "byteLength": 25903
+    },
+    {
+      "path": "worker-entry.cjs",
+      "sha256": "48bc28545422defc797c36f9204d147f4c56f981621ee3500c134e5ee69e64c7",
+      "byteLength": 8104
+    },
+    {
+      "path": "worker-ops.cjs",
+      "sha256": "00b88a80f6923783f07b49d286c84ecfd7ec76e6e3598bafb27694e5bbc30566",
+      "byteLength": 777
+    },
+    {
+      "path": "worker.d.ts",
+      "sha256": "0dfca6470dcc091b081efa2f3bdd171e79aa8999e4b8a5cd1eadf0e4703c3dae",
+      "byteLength": 5053
+    },
+    {
+      "path": "worker.js",
+      "sha256": "6ffdfe6b863c416d6b263004b166a5af371d1274a8435b5e7704a3627281687c",
+      "byteLength": 10411
+    }
+  ]
+}
