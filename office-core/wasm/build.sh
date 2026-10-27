@@ -99,7 +99,7 @@ node -e '
   const j = JSON.parse(fs.readFileSync(p, "utf8"));
   j.name = process.env.PKG_NAME;
   j.repository = { type: "git", url: process.env.REPO_URL };
-  j.license = "AGPL-3.0-only";
+  j.license = "AGPL-3.0-or-later";
   j.peerDependencies = { ...(j.peerDependencies || {}), "@samarthmn/doc-yantra-fonts": j.version };
   j.peerDependenciesMeta = { ...(j.peerDependenciesMeta || {}), "@samarthmn/doc-yantra-fonts": { optional: true } };
   j.main = "index.cjs";

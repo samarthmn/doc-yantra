@@ -1,14 +1,14 @@
 {
   "target": "pdf",
-  "sourceHash": "940a3796ce2113207a758e1aab0f149eb5f1c7f2c9419de72387adaa189615cd",
+  "sourceHash": "ed588ee9a43f54a2f246b58c16ea9cd2d22aac65f36d5282df6f6f400169420d",
   "fileCount": 43,
-  "artifactHash": "10ff0cdeb92aaf5f3d662eb932880e8a5a8f317744e0fc6a609700ccc2b80c59",
+  "artifactHash": "df712fd076f09064e7f1378f5f648c0f7d048b31766e9b79914c16cc02fd165f",
   "artifactFileCount": 22,
   "artifacts": [
     {
       "path": "COMMERCIAL-LICENSING.md",
-      "sha256": "812dad7da869ac16688c90fea09c408612c24c0403915d1e3870c2483fb93938",
-      "byteLength": 582
+      "sha256": "49b4b26c2fc4afbc0c9b2373690e6c753ca9802cf465133aa632a81905577e95",
+      "byteLength": 590
     },
     {
       "path": "LICENSE",
@@ -22,13 +22,13 @@
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
-      "sha256": "0d90cf56d11f8efe91e57d21a2320ea27d5d664b7b915df96915a85638d32d8e",
-      "byteLength": 1252
+      "sha256": "c40108638b2bae2d6c45753d3993dbb0fee4127e4b84f042e3d5b6762c424c01",
+      "byteLength": 1256
     },
     {
       "path": "THIRD_PARTY_RUST_LICENSES.txt",
-      "sha256": "81240fcb66eba5f67137d26a6eec5ea2f4490e1b844315fdb0c6405f4b545ab3",
-      "byteLength": 267416
+      "sha256": "2cb2100db542e9de1978c37fae6b30ee5d01b39025b4d025631339a27bea87ac",
+      "byteLength": 302127
     },
     {
       "path": "font-manifest.json",
@@ -47,8 +47,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "6a350de4abfbfcc46515e2f39c936e1b98c28eebd6c54b85124e9fcee24ca61f",
-      "byteLength": 1854
+      "sha256": "03977d8c04359db464e9a21ddc834f483bb97931eac8360f6a5586701b42eaff",
+      "byteLength": 1858
     },
     {
       "path": "pdf_core_wasm.d.ts",
@@ -62,8 +62,8 @@
     },
     {
       "path": "pdf_core_wasm_bg.wasm",
-      "sha256": "1ddcd8a3dbcfabd6e06411ef7dd138e08cd4b3d5f4372bdbf2885c1a142f4efe",
-      "byteLength": 6045664
+      "sha256": "9f54fbf6c92304f23ad6b0ec9f1be3546661207c59d5a22a77ef62a30e02f4e2",
+      "byteLength": 6045653
     },
     {
       "path": "pdf_core_wasm_bg.wasm.d.ts",

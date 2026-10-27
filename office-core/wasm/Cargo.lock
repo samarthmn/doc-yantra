@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "office-core"
-version = "0.0.27"
+version = "0.0.28"
 dependencies = [
  "image",
  "jpeg-encoder",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "office-core-wasm"
-version = "0.0.27"
+version = "0.0.28"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",

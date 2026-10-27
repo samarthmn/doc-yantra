@@ -1,6 +1,6 @@
 # Font licenses
 
-The wrapper and package metadata are licensed under AGPL-3.0-only in the
+The wrapper and package metadata are licensed under AGPL-3.0-or-later in the
 package's `LICENSE` file. The font binaries below retain
 their upstream licenses; this mixed-license package does not relicense them.
 

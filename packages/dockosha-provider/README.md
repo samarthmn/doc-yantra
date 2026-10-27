@@ -1,6 +1,6 @@
 # DocKosha DocYantra provider
 
-`@samarthmn/dockosha-provider-docyantra` is the AGPL-3.0-only adapter between
+`@samarthmn/dockosha-provider-docyantra` is the AGPL-3.0-or-later adapter between
 DocKosha's public `DocumentProcessingProvider` contract and the two
 DocYantra WebAssembly engine packages. It owns the worker clients, typed failure
 normalization, Office font provisioning, and the browser wasm-asset sync hook.

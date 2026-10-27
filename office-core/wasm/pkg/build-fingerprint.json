@@ -1,14 +1,14 @@
 {
   "target": "office",
-  "sourceHash": "18a4e0b8ff88b172100cb66d712bb63d1833b050900aedb37c095074c626d48c",
+  "sourceHash": "214e21043c1ffb8771dff1d518ee7539418209a2bcd5e67618365248712a0dd3",
   "fileCount": 121,
-  "artifactHash": "88ae68a37c134a277f12b4f51c55b5121d9c1f0d1392d73ca0ebba5ccd76d9ee",
+  "artifactHash": "96fd1e57746266c147f13b88fc4b3077cb4c83c20e90bce1b093917901e80e0b",
   "artifactFileCount": 32,
   "artifacts": [
     {
       "path": "COMMERCIAL-LICENSING.md",
-      "sha256": "812dad7da869ac16688c90fea09c408612c24c0403915d1e3870c2483fb93938",
-      "byteLength": 582
+      "sha256": "49b4b26c2fc4afbc0c9b2373690e6c753ca9802cf465133aa632a81905577e95",
+      "byteLength": 590
     },
     {
       "path": "LICENSE",
@@ -17,13 +17,13 @@
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
-      "sha256": "0d90cf56d11f8efe91e57d21a2320ea27d5d664b7b915df96915a85638d32d8e",
-      "byteLength": 1252
+      "sha256": "c40108638b2bae2d6c45753d3993dbb0fee4127e4b84f042e3d5b6762c424c01",
+      "byteLength": 1256
     },
     {
       "path": "THIRD_PARTY_RUST_LICENSES.txt",
-      "sha256": "202c76dd7b174a5c80e95968aec9872838025986f266286059e609059d30f263",
-      "byteLength": 241907
+      "sha256": "a48c01d2f4859c71ad01f7c7cb8666b475eedcc84361283e5c6c6e2d776b3452",
+      "byteLength": 276621
     },
     {
       "path": "font-provider.cjs",
@@ -77,8 +77,8 @@
     },
     {
       "path": "office_core_wasm_bg.wasm",
-      "sha256": "c2fa7cd90f619946998484f963247e0e46c1db60bfa7c7206eca6c414b3941b4",
-      "byteLength": 4674824
+      "sha256": "b43568ceab71d11c33b88f55397e542a3667b350ec4e3f6c40081caacdbe4448",
+      "byteLength": 4675450
     },
     {
       "path": "office_core_wasm_bg.wasm.d.ts",
@@ -87,8 +87,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "0a67ada9a7eec2a6471e47f3bdd4b34d5cbd0097e243a57aefe08d3a0188aeca",
-      "byteLength": 2308
+      "sha256": "53db8ddc34475f73b87f70beee57a769a40192a96682439adbb556b65aeafe66",
+      "byteLength": 2312
     },
     {
       "path": "web/font-provider.d.ts",

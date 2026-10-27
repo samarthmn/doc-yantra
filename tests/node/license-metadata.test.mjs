@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const AGPL_IDENTIFIER = "AGPL-3.0-only";
-const FONT_PACKAGE_IDENTIFIER = "AGPL-3.0-only AND OFL-1.1";
+const AGPL_IDENTIFIER = "AGPL-3.0-or-later";
+const FONT_PACKAGE_IDENTIFIER = "AGPL-3.0-or-later AND OFL-1.1";
 const cargoManifests = [
   "pdf-core/Cargo.toml",
   "pdf-core/wasm/Cargo.toml",
@@ -33,10 +33,10 @@ test("the root license is the unmodified GNU AGPL version 3 text", () => {
   assert.doesNotMatch(license, /PolyForm|Enterprise|commercial licen[cs]/iu);
 });
 
-test("all first-party Cargo packages declare AGPL-3.0-only metadata", () => {
+test("all first-party Cargo packages declare AGPL-3.0-or-later metadata", () => {
   for (const relativePath of cargoManifests) {
     const manifest = read(relativePath);
-    assert.match(manifest, /^license\s*=\s*"AGPL-3\.0-only"\s*$/mu, relativePath);
+    assert.match(manifest, /^license\s*=\s*"AGPL-3\.0-or-later"\s*$/mu, relativePath);
     assert.doesNotMatch(manifest, /^license-file\s*=/mu, relativePath);
     assert.doesNotMatch(manifest, /source-available/iu, relativePath);
   }
@@ -81,7 +81,7 @@ test("generated-package inputs include the approved commercial notice", () => {
   for (const relativePath of ["pdf-core/wasm/build.sh", "office-core/wasm/build.sh"]) {
     const script = read(relativePath);
     assert.match(script, /COMMERCIAL-LICENSING\.md/u, relativePath);
-    assert.match(script, /j\.license\s*=\s*"AGPL-3\.0-only"/u, relativePath);
+    assert.match(script, /j\.license\s*=\s*"AGPL-3\.0-or-later"/u, relativePath);
   }
 });
 

@@ -2,7 +2,7 @@
 
 Own OOXML parsing, own layout, own PDF emission. **No LibreOffice, Chromium,
 pdfium, or Typst in the conversion path** — first-party code is under
-AGPL-3.0-only and upstream dependencies retain their own terms; only small,
+AGPL-3.0-or-later and upstream dependencies retain their own terms; only small,
 pure-Rust
 leaf crates. Ships as a native CLI (`officecore`) and a WebAssembly npm package
 (`@samarthmn/doc-yantra-office`), mirroring `pdf-core`'s conventions.

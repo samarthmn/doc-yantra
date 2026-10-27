@@ -1,20 +1,20 @@
 # Consuming DocYantra
 
 DocYantra publishes four packages to GitHub Packages. The first-party
-source and wrapper code is licensed under AGPL-3.0-only in [`LICENSE`](LICENSE).
+source and wrapper code is licensed under AGPL-3.0-or-later in [`LICENSE`](LICENSE).
 Enterprise licensing is available only through a separate signed agreement;
 see [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md).
 
 ## Install
 
-Pin all required packages to the same release candidate (currently `0.0.27`):
+Pin all required packages to the same release candidate (currently `0.0.28`):
 
 ```json
 {
   "dependencies": {
-    "@samarthmn/doc-yantra": "0.0.27",
-    "@samarthmn/doc-yantra-office": "0.0.27",
-    "@samarthmn/dockosha-provider-docyantra": "0.0.27"
+    "@samarthmn/doc-yantra": "0.0.28",
+    "@samarthmn/doc-yantra-office": "0.0.28",
+    "@samarthmn/dockosha-provider-docyantra": "0.0.28"
   }
 }
 ```
@@ -50,7 +50,7 @@ Fonts are optional and are never installed by default. For an offline
 deployment, add the separate font pack at the same version:
 
 ```json
-"@samarthmn/doc-yantra-fonts": "0.0.27"
+"@samarthmn/doc-yantra-fonts": "0.0.28"
 ```
 
 The default font-free path keeps font-independent operations local. Hosts that
@@ -76,7 +76,7 @@ exports for DOCX/PPTX/XLSX, plus host font registration and worker APIs. It is
 fontless by default and fails closed outside its supported envelope.
 
 `@samarthmn/dockosha-provider-docyantra` adapts both engines to DocKosha's
-provider contract. DocKosha declares DocYantra as a mandatory direct `0.0.27`
+provider contract. DocKosha declares DocYantra as a mandatory direct `0.0.28`
 dependency; there is no provider-selection environment variable or fallback.
 
 ```js

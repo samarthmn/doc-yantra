@@ -241,7 +241,7 @@ function auditCorePackage(config, pack, version) {
   invariant(pack.version === version, `${config.name}: version ${pack.version} does not match ${version}`);
   const manifest = readJson(join(ROOT, config.path, "package.json"));
   invariant(manifest.publishConfig?.registry === PACKAGE_REGISTRY, `${config.name}: must publish to GitHub Packages`);
-  invariant(manifest.license === "AGPL-3.0-only", `${config.name}: license metadata must be AGPL-3.0-only`);
+  invariant(manifest.license === "AGPL-3.0-or-later", `${config.name}: license metadata must be AGPL-3.0-or-later`);
   const packedPaths = new Set(pack.files.map(({ path }) => path));
   invariant(packedPaths.has("LICENSE"), `${config.name}: LICENSE is missing from tarball`);
   invariant(packedPaths.has("COMMERCIAL-LICENSING.md"), `${config.name}: COMMERCIAL-LICENSING.md is missing from tarball`);
@@ -297,7 +297,7 @@ function auditFontPackage(pack, version) {
   invariant(pack.version === version, `font package version ${pack.version} does not match ${version}`);
   const fontPackage = readJson(join(ROOT, FONT_PACKAGE.path, "package.json"));
   invariant(fontPackage.publishConfig?.registry === PACKAGE_REGISTRY, `${FONT_PACKAGE.name}: must publish to GitHub Packages`);
-  invariant(fontPackage.license === "AGPL-3.0-only AND OFL-1.1", `${FONT_PACKAGE.name}: license metadata must disclose AGPL-3.0-only and OFL-1.1`);
+  invariant(fontPackage.license === "AGPL-3.0-or-later AND OFL-1.1", `${FONT_PACKAGE.name}: license metadata must disclose AGPL-3.0-or-later and OFL-1.1`);
   invariant(pack.size <= FONT_PACKED_LIMIT, `offline font pack is ${pack.size} bytes; limit is ${FONT_PACKED_LIMIT}`);
   const packageRoot = join(ROOT, FONT_PACKAGE.path);
   const manifest = readJson(join(packageRoot, "fonts", "manifest.json"));
