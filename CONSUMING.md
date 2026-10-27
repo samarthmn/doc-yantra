@@ -5,6 +5,10 @@ source and wrapper code is licensed under AGPL-3.0-or-later in [`LICENSE`](LICEN
 Enterprise licensing is available only through a separate signed agreement;
 see [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md).
 
+For deployment, offline fonts, source builds, and operational verification, see
+[Running DocYantra on your own infrastructure](SELF-HOSTING.md). To run the full
+application, follow [DocKosha self-hosting](https://github.com/samarthmn/doc-kosha/blob/HEAD/docs/self-hosting.md).
+
 ## Install
 
 Pin all required packages to the same release candidate (currently `0.0.28`):

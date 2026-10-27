@@ -28,7 +28,8 @@ See
 
 ## Quick start (consume the package)
 
-Full guide: **[CONSUMING.md](CONSUMING.md)**. Configure the scoped GitHub
+Deployment and offline use: **[SELF-HOSTING.md](SELF-HOSTING.md)**.
+Full API and install guide: **[CONSUMING.md](CONSUMING.md)**. Configure the scoped GitHub
 Packages registry, then consume the exact release:
 
 ```ini
